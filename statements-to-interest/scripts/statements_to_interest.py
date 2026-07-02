@@ -83,6 +83,28 @@ SYMBOL_TO_CODE = {
     "\u00a5": "JPY",
 }
 
+FX_METHOD_LABELS = {
+    "irs-yearly-average": "IRS yearly average exchange rate",
+    "posted-daily-spot": "posted daily spot exchange rate",
+    "posted-yearly-average": "published yearly average exchange rate",
+    "user-rate": "user-provided exchange rate",
+}
+
+SELF_CALCULATED_AVERAGE_TERMS = (
+    "arithmetic average",
+    "calculated average",
+    "calculated from daily",
+    "computed average",
+    "computed from daily",
+    "daily series average",
+    "daily values",
+    "365 daily",
+    "average of daily",
+    "averaged daily",
+    "agent-calculated",
+    "self-calculated",
+)
+
 POSITIVE_INTEREST_TERMS = (
     "interest credited",
     "interest credit",
@@ -238,6 +260,14 @@ AMOUNT_RE = re.compile(
     r"(?:\s*[A-Z]{3})?"
 )
 
+ACCOUNT_CURRENCY_PATTERNS = (
+    re.compile(r"\bmovimientos\s+de\s+cuenta\s+en\s+([A-Z]{3})\b", re.IGNORECASE),
+    re.compile(r"\baccount\s+(?:currency|in)\s*:?\s*([A-Z]{3})\b", re.IGNORECASE),
+    re.compile(r"\bcurrency\s*:?\s*([A-Z]{3})\b", re.IGNORECASE),
+    re.compile(r"\bmoneda\s*:?\s*([A-Z]{3})\b", re.IGNORECASE),
+    re.compile(r"\bcuenta\s+en\s+([A-Z]{3})\b", re.IGNORECASE),
+)
+
 
 @dataclass
 class PageText:
@@ -298,6 +328,15 @@ def text_contains_label(haystack: str, label: str) -> bool:
 
 def money(value: Decimal) -> str:
     return str(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def normalize_currency_code(value: str | None, label: str = "currency") -> str | None:
+    if not value:
+        return None
+    code = value.strip().upper()
+    if code not in CURRENCY_CODES:
+        raise SystemExit(f"Unsupported {label}: {value}. Add it to CURRENCY_CODES before relying on it.")
+    return code
 
 
 def load_pdf_text(path: Path) -> list[PageText]:
@@ -435,7 +474,18 @@ def parse_amount_token(token: str) -> Decimal | None:
     return value
 
 
-def detect_currency(text: str) -> str | None:
+def explicit_currency_codes(text: str) -> list[str]:
+    return sorted({code for code in CURRENCY_CODES if re.search(rf"\b{code}\b", text, re.IGNORECASE)})
+
+
+def detect_currency(text: str, account_currency: str | None = None) -> str | None:
+    codes = explicit_currency_codes(text)
+    if codes:
+        if account_currency and account_currency in codes:
+            return account_currency
+        return codes[0]
+    if account_currency and any(symbol in text for symbol in SYMBOL_TO_CODE):
+        return account_currency
     for code in sorted(CURRENCY_CODES):
         if re.search(rf"\b{code}\b", text, re.IGNORECASE):
             return code
@@ -447,13 +497,43 @@ def detect_currency(text: str) -> str | None:
 
 def currencies_in_text(text: str) -> list[str]:
     found: set[str] = set()
-    for code in CURRENCY_CODES:
-        if re.search(rf"\b{code}\b", text, re.IGNORECASE):
-            found.add(code)
+    found.update(explicit_currency_codes(text))
     for symbol, code in SYMBOL_TO_CODE.items():
         if symbol in text:
             found.add(code)
     return sorted(found)
+
+
+def detect_account_currency(lines: Iterable[str]) -> tuple[str | None, str, list[str]]:
+    evidence_by_currency: dict[str, list[str]] = defaultdict(list)
+    for line in lines:
+        clean = re.sub(r"\s+", " ", line).strip()
+        for pattern in ACCOUNT_CURRENCY_PATTERNS:
+            match = pattern.search(clean)
+            if not match:
+                continue
+            code = normalize_currency_code(match.group(1), "account currency")
+            if code:
+                evidence_by_currency[code].append(clean)
+    if not evidence_by_currency:
+        return None, "not-detected", []
+    if len(evidence_by_currency) == 1:
+        code = next(iter(evidence_by_currency))
+        return code, "statement-text", sorted(set(evidence_by_currency[code]))
+    evidence = []
+    for code, lines_for_code in sorted(evidence_by_currency.items()):
+        evidence.extend(f"{code}: {line}" for line in sorted(set(lines_for_code)))
+    return None, "mixed-statement-text", evidence
+
+
+def statement_title_candidates(lines: Iterable[str]) -> list[str]:
+    titles: set[str] = set()
+    for line in lines:
+        clean = re.sub(r"\s+", " ", line).strip()
+        norm = normalize_text(clean)
+        if any(term in norm for term in ("movimientos de cuenta", "account statement", "bank statement", "statement of account")):
+            titles.add(clean)
+    return sorted(titles)
 
 
 def detect_periods(lines: Iterable[str]) -> list[str]:
@@ -571,20 +651,33 @@ def is_interest_line(line: str) -> tuple[bool, str]:
     return False, ""
 
 
-def extract_rows_from_pages(pages: list[PageText], institution: str, tax_year: int) -> tuple[list[dict], list[dict], list[str], dict]:
+def extract_rows_from_pages(
+    pages: list[PageText],
+    institution: str,
+    tax_year: int,
+    account_currency_override: str | None = None,
+) -> tuple[list[dict], list[dict], list[str], dict]:
     rows: list[dict] = []
     excluded: list[dict] = []
     warnings: list[str] = []
     all_text = "\n".join(p.text for p in pages)
     all_lines = [line.strip() for page in pages for line in page.text.splitlines() if line.strip()]
     currencies = currencies_in_text(all_text)
-    default_currency = currencies[0] if len(currencies) == 1 else None
+    detected_account_currency, account_currency_basis, account_currency_evidence = detect_account_currency(all_lines)
+    account_currency = account_currency_override or detected_account_currency
+    if account_currency_override:
+        account_currency_basis = "user-override"
+        account_currency_evidence = [f"Account currency supplied by user/agent: {account_currency_override}"]
+    default_currency = account_currency or (currencies[0] if len(currencies) == 1 else None)
     periods = detect_periods(all_lines)
+    titles = statement_title_candidates(all_lines)
     scope_years = sorted({d.year for p in periods for d in find_dates(p)})
 
+    institution_label_basis = "pdf-text"
     if not text_contains_label(all_text, institution):
         file_context = "\n".join(str(page.file) for page in pages)
         if text_contains_label(file_context, institution):
+            institution_label_basis = "file-path-fallback"
             warnings.append(
                 f"Institution label '{institution}' was not found in the PDF text layer for "
                 f"{pages[0].file.name}, but it appears in the file path. Verify the statements "
@@ -641,7 +734,7 @@ def extract_rows_from_pages(pages: list[PageText], institution: str, tax_year: i
                     }
                 )
                 continue
-            line_currency = detect_currency(line) or default_currency or "UNKNOWN"
+            line_currency = detect_currency(line, account_currency=account_currency) or default_currency or "UNKNOWN"
             confidence = "high" if reason == "positive interest term" and selected_date else "medium"
             notes: list[str] = [reason]
             if not selected_date:
@@ -650,6 +743,8 @@ def extract_rows_from_pages(pages: list[PageText], institution: str, tax_year: i
             if len(positives) > 1:
                 notes.append(f"multiple positive monetary values found; {amount_selection_note}")
                 confidence = "medium" if confidence == "high" else confidence
+            if account_currency and line_currency == account_currency and not explicit_currency_codes(line):
+                notes.append(f"currency inferred from statement account currency {account_currency}")
             if line_currency == "UNKNOWN":
                 notes.append("currency not detected")
                 confidence = "low"
@@ -674,13 +769,23 @@ def extract_rows_from_pages(pages: list[PageText], institution: str, tax_year: i
             f"Detected statement or interest years outside tax year {tax_year}: {outside_years}. "
             "Split statements by tax year and run again."
         )
-    if len(currencies) > 1:
+    if len(currencies) > 1 and account_currency:
+        warnings.append(
+            f"Multiple currency markers were detected in the statement text; counted rows default to account currency "
+            f"{account_currency} unless a row has an explicit currency code."
+        )
+    elif len(currencies) > 1:
         warnings.append(
             "Multiple currency markers were detected. Verify all counted interest rows use one currency before reporting."
         )
     meta = {
         "periods": periods,
+        "statement_titles": titles,
         "currency_candidates": currencies,
+        "account_currency": account_currency or "",
+        "account_currency_basis": account_currency_basis,
+        "account_currency_evidence": account_currency_evidence,
+        "institution_label_basis": institution_label_basis,
         "character_count": len(all_text),
         "page_count": len(pages),
     }
@@ -726,6 +831,7 @@ def write_csv(rows: list[dict], path: Path) -> None:
 
 def command_extract(args: argparse.Namespace) -> int:
     tax_year = int(args.tax_year)
+    account_currency_override = normalize_currency_code(args.account_currency, "account currency")
     pdf_paths = [Path(p) for p in args.pdf]
     all_rows: list[dict] = []
     all_excluded: list[dict] = []
@@ -733,7 +839,7 @@ def command_extract(args: argparse.Namespace) -> int:
     statement_files: list[dict] = []
     for pdf_path in pdf_paths:
         pages = load_pdf_text(pdf_path)
-        rows, excluded, warnings, meta = extract_rows_from_pages(pages, args.institution, tax_year)
+        rows, excluded, warnings, meta = extract_rows_from_pages(pages, args.institution, tax_year, account_currency_override)
         all_rows.extend(rows)
         all_excluded.extend(excluded)
         all_warnings.extend(warnings)
@@ -743,17 +849,35 @@ def command_extract(args: argparse.Namespace) -> int:
                 "page_count": meta["page_count"],
                 "character_count": meta["character_count"],
                 "detected_periods": meta["periods"],
+                "statement_titles": meta["statement_titles"],
                 "currency_candidates": meta["currency_candidates"],
+                "account_currency": meta["account_currency"],
+                "account_currency_basis": meta["account_currency_basis"],
+                "account_currency_evidence": meta["account_currency_evidence"],
+                "institution_label_basis": meta["institution_label_basis"],
             }
         )
     currencies = sorted({row.get("currency") or "UNKNOWN" for row in all_rows})
     if len(currencies) > 1:
         all_warnings.append("Counted interest rows include more than one currency. Split or review before reporting.")
+    account_currencies = sorted({item["account_currency"] for item in statement_files if item.get("account_currency")})
+    title_values = sorted({title for item in statement_files for title in item.get("statement_titles", [])})
+    period_values = sorted({period for item in statement_files for period in item.get("detected_periods", [])})
+    institution_label_sources = sorted({item.get("institution_label_basis", "") for item in statement_files if item.get("institution_label_basis")})
     analysis = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "institution": args.institution,
         "tax_year": tax_year,
+        "institution_profile": {
+            "institution": args.institution,
+            "tax_year": tax_year,
+            "account_currency": account_currencies[0] if len(account_currencies) == 1 else ("MIXED" if account_currencies else ""),
+            "statement_titles": title_values,
+            "detected_periods": period_values,
+            "institution_label_sources": institution_label_sources,
+            "statement_file_count": len(statement_files),
+        },
         "scope": {
             "one_institution_only": True,
             "one_tax_year_only": True,
@@ -890,6 +1014,76 @@ def page_footer(canvas, doc) -> None:
     canvas.restoreState()
 
 
+def load_fx_rates_json(path: Path, fallback_method: str | None, fallback_source: str, fallback_direction: str) -> dict[str, dict[str, object]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise SystemExit(f"FX rates JSON not found: {path}") from None
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"FX rates JSON is invalid: {path} ({exc.msg} at line {exc.lineno}, column {exc.colno})") from None
+
+    default_method = fallback_method or "user-rate"
+    default_source = fallback_source
+    default_direction = fallback_direction
+    rates_payload = payload
+    if isinstance(payload, dict) and "rates" in payload:
+        default_method = payload.get("method") or default_method
+        default_source = payload.get("source") or default_source
+        default_direction = payload.get("rate_direction") or default_direction
+        rates_payload = payload.get("rates")
+
+    records: list[tuple[str, object]]
+    if isinstance(rates_payload, dict):
+        records = list(rates_payload.items())
+    elif isinstance(rates_payload, list):
+        records = []
+        for item in rates_payload:
+            if not isinstance(item, dict) or "date" not in item:
+                raise SystemExit("FX rates JSON list entries must be objects with date and rate fields.")
+            records.append((str(item["date"]), item))
+    else:
+        raise SystemExit("FX rates JSON must be a date-to-rate object, a rates object, or a list of date/rate objects.")
+
+    loaded: dict[str, dict[str, object]] = {}
+    for date_key, raw_value in records:
+        if not re.fullmatch(r"20\d{2}-\d{2}-\d{2}", date_key):
+            raise SystemExit(f"FX rate key must be an ISO date, got: {date_key}")
+        if isinstance(raw_value, dict):
+            if "rate" not in raw_value:
+                raise SystemExit(f"FX rate entry for {date_key} must include a rate field.")
+            rate_value = raw_value["rate"]
+            method = raw_value.get("method") or default_method
+            source = raw_value.get("source") or default_source
+            direction = raw_value.get("rate_direction") or default_direction
+        else:
+            rate_value = raw_value
+            method = default_method
+            source = default_source
+            direction = default_direction
+        if direction not in {"foreign-per-usd", "usd-per-foreign"}:
+            raise SystemExit(f"Unsupported rate_direction for {date_key}: {direction}")
+        loaded[date_key] = {
+            "rate": parse_decimal(str(rate_value), f"FX rate for {date_key}"),
+            "method": str(method),
+            "source": str(source),
+            "rate_direction": str(direction),
+        }
+    return loaded
+
+
+def reject_self_calculated_posted_average(args: argparse.Namespace) -> None:
+    if args.fx_method != "posted-yearly-average":
+        return
+    evidence = normalize_text(" ".join([args.fx_source or "", args.fx_confirmation_note or ""]))
+    matched = [term for term in SELF_CALCULATED_AVERAGE_TERMS if term in evidence]
+    if matched:
+        raise SystemExit(
+            "Do not use a self-calculated daily-series average as --fx-method posted-yearly-average. "
+            "Use an official/published annual average from a bank, tax authority, central bank, or FX provider, "
+            "or ask the user/preparer for a custom rate and use --fx-method user-rate."
+        )
+
+
 def command_report(args: argparse.Namespace) -> int:
     if colors is None:
         raise SystemExit("reportlab is required. Run with a Python environment that has reportlab installed.")
@@ -919,26 +1113,77 @@ def command_report(args: argparse.Namespace) -> int:
 
     fx_rate = Decimal("0")
     usd_total = Decimal("0")
+    row_usd_values: list[Decimal] = []
+    row_fx_labels: list[str] = []
     fx_note = "No FX conversion was needed because no interest rows were found."
+    fx_confirmation = ""
     if foreign_total != 0:
         if currency == "USD":
             usd_total = foreign_total
+            row_usd_values = [Decimal(str(row.get("amount_foreign", "0"))) for row in rows]
+            row_fx_labels = ["No FX" for _row in rows]
             fx_note = "No FX conversion was needed because the counted interest rows are already denominated in USD."
         else:
-            if not args.fx_method:
-                raise SystemExit("--fx-method is required when non-USD interest rows are present.")
-            if not args.fx_rate:
-                raise SystemExit("--fx-rate is required when non-USD interest rows are present.")
-            fx_rate = parse_decimal(args.fx_rate, "--fx-rate")
-            if args.rate_direction == "foreign-per-usd":
-                usd_total = foreign_total / fx_rate
-                rate_phrase = f"{money(fx_rate)} {currency} per 1 USD"
+            if not args.fx_rate_confirmed:
+                raise SystemExit(
+                    "--fx-rate-confirmed is required for non-USD reports. "
+                    "Prompt the user to confirm the proposed yearly average rate or provide a custom rate/source before generating the PDF."
+                )
+            fx_confirmation = args.fx_confirmation_note or "User confirmed the FX rate before report generation."
+            row_fx_rates = load_fx_rates_json(Path(args.fx_rates_json), args.fx_method, args.fx_source, args.rate_direction) if args.fx_rates_json else {}
+            if row_fx_rates:
+                used_methods: set[str] = set()
+                used_sources: set[str] = set()
+                used_directions: set[str] = set()
+                for row in rows:
+                    row_date = row.get("date", "")
+                    if not row_date:
+                        raise SystemExit("Cannot apply row-level FX rates because at least one counted row has no date.")
+                    fx_spec = row_fx_rates.get(str(row_date))
+                    if not fx_spec:
+                        raise SystemExit(f"Missing FX rate for counted row date: {row_date}")
+                    amount = Decimal(str(row.get("amount_foreign", "0")))
+                    rate = fx_spec["rate"]
+                    direction = str(fx_spec["rate_direction"])
+                    if direction == "foreign-per-usd":
+                        row_usd = amount / rate
+                        label = f"{money(rate)} {currency}/USD"
+                    else:
+                        row_usd = amount * rate
+                        label = f"{money(rate)} USD/{currency}"
+                    row_usd_values.append(row_usd)
+                    row_fx_labels.append(label)
+                    used_methods.add(str(fx_spec["method"]))
+                    if fx_spec["source"]:
+                        used_sources.add(str(fx_spec["source"]))
+                    used_directions.add(direction)
+                usd_total = sum(row_usd_values, Decimal("0"))
+                methods = ", ".join(FX_METHOD_LABELS.get(method, method) for method in sorted(used_methods))
+                sources = "; ".join(sorted(used_sources)) or "No source label supplied"
+                directions = ", ".join(sorted(used_directions))
+                fx_note = f"{methods}; row-level rates matched by interest date; direction: {directions}; source: {sources}."
             else:
-                usd_total = foreign_total * fx_rate
-                rate_phrase = f"{money(fx_rate)} USD per 1 {currency}"
-            method = "IRS yearly average exchange rate" if args.fx_method == "irs-yearly-average" else "user-provided exchange rate"
-            fx_source = args.fx_source or "No source label supplied"
-            fx_note = f"{method}; {rate_phrase}; source: {fx_source}."
+                if not args.fx_method:
+                    raise SystemExit("--fx-method is required when non-USD interest rows are present.")
+                if not args.fx_rate:
+                    raise SystemExit("--fx-rate is required when non-USD interest rows are present.")
+                reject_self_calculated_posted_average(args)
+                fx_rate = parse_decimal(args.fx_rate, "--fx-rate")
+                if args.rate_direction == "foreign-per-usd":
+                    usd_total = foreign_total / fx_rate
+                    rate_phrase = f"{money(fx_rate)} {currency} per 1 USD"
+                else:
+                    usd_total = foreign_total * fx_rate
+                    rate_phrase = f"{money(fx_rate)} USD per 1 {currency}"
+                for row in rows:
+                    amount = Decimal(str(row.get("amount_foreign", "0")))
+                    row_usd = amount / fx_rate if args.rate_direction == "foreign-per-usd" else amount * fx_rate
+                    row_usd_values.append(row_usd)
+                    row_fx_labels.append(rate_phrase)
+                method = FX_METHOD_LABELS.get(args.fx_method, args.fx_method)
+                fx_source = args.fx_source or "No source label supplied"
+                fx_note = f"{method}; {rate_phrase}; source: {fx_source}."
+            fx_note = f"{fx_note} Confirmation: {fx_confirmation}"
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -960,47 +1205,59 @@ def command_report(args: argparse.Namespace) -> int:
         )
     )
 
+    profile = analysis.get("institution_profile", {})
+    account_currency = profile.get("account_currency", "") or currency
+    profile_periods = ", ".join(profile.get("detected_periods", [])) or "Not detected"
+    profile_titles = ", ".join(profile.get("statement_titles", [])) or "Not detected"
+    label_sources = ", ".join(profile.get("institution_label_sources", [])) or "Not recorded"
     summary_rows = [
         ["Field", "Value"],
         ["Institution", analysis.get("institution", "")],
         ["Tax year", analysis.get("tax_year", "")],
+        ["Account currency", account_currency or "Not detected"],
+        ["Statement title(s)", profile_titles],
+        ["Statement periods detected", profile_periods],
+        ["Institution label source", label_sources],
         ["Statement files reviewed", str(len(analysis.get("statement_files", [])))],
         ["Interest rows counted", str(len(rows))],
         ["Source-currency total", f"{money(foreign_total)} {currency}".strip()],
         ["USD conversion", fx_note],
+        ["FX confirmation", fx_confirmation or "Not applicable"],
         ["USD total for reporting support", f"USD {money(usd_total)}" if foreign_total else "USD 0.00"],
     ]
     add_table(story, summary_rows, [2.1 * inch, 5.1 * inch], styles)
 
     story.append(Paragraph("Statements Reviewed", styles["Heading2"]))
-    file_rows = [["File", "Pages", "Detected periods", "Currency markers"]]
+    file_rows = [["File", "Pages", "Detected periods", "Account currency", "Currency markers"]]
     for item in analysis.get("statement_files", []):
         file_rows.append(
             [
                 display_file_name(item.get("file", "")),
                 item.get("page_count", ""),
                 ", ".join(item.get("detected_periods", [])) or "Not detected",
+                item.get("account_currency", "") or "Not detected",
                 ", ".join(item.get("currency_candidates", [])) or "Not detected",
             ]
         )
-    add_table(story, file_rows, [3.0 * inch, 0.55 * inch, 2.2 * inch, 1.45 * inch], styles)
+    add_table(story, file_rows, [2.55 * inch, 0.45 * inch, 1.75 * inch, 1.05 * inch, 1.4 * inch], styles)
 
     story.append(Paragraph("Interest Rows Counted", styles["Heading2"]))
     if rows:
         interest_rows = [["Date", "Period", "Description", "Foreign amount", "USD", "Source"]]
-        for row in rows:
+        for index, row in enumerate(rows):
             amount = Decimal(str(row.get("amount_foreign", "0")))
-            if row.get("currency") == "USD":
-                row_usd = amount
-            else:
-                row_usd = amount / fx_rate if args.rate_direction == "foreign-per-usd" and fx_rate else amount * fx_rate
+            row_usd = row_usd_values[index] if index < len(row_usd_values) else amount
+            fx_label = row_fx_labels[index] if index < len(row_fx_labels) else ""
+            usd_cell = f"USD {money(row_usd)}"
+            if fx_label and fx_label != "No FX":
+                usd_cell = f"{usd_cell}\nFX: {fx_label}"
             interest_rows.append(
                 [
                     row.get("date", ""),
                     row.get("statement_period", ""),
                     row.get("description", ""),
                     f"{money(amount)} {row.get('currency', '')}".strip(),
-                    f"USD {money(row_usd)}",
+                    usd_cell,
                     f"{Path(row.get('source_file', '')).name}, p. {row.get('page', '')}",
                 ]
             )
@@ -1051,6 +1308,8 @@ def command_report(args: argparse.Namespace) -> int:
         "Publication 550: https://www.irs.gov/publications/p550",
         "Foreign currency exchange rates: https://www.irs.gov/individuals/international-taxpayers/foreign-currency-and-currency-exchange-rates",
         "Yearly average exchange rates: https://www.irs.gov/individuals/international-taxpayers/yearly-average-currency-exchange-rates",
+        "Treasury reporting rates: https://fiscal.treasury.gov/resources/reporting-rates-exchange",
+        "Banco de la Republica TRM: https://www.banrep.gov.co/es/estadisticas/trm",
         "FBAR overview: https://www.irs.gov/businesses/small-businesses-self-employed/report-of-foreign-bank-and-financial-accounts-fbar",
         "Form 8938: https://www.irs.gov/forms-pubs/about-form-8938",
     ]
@@ -1099,7 +1358,29 @@ def command_self_test(args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print(f"Self-test passed: {len(cases)} parser cases")
+    cop_pages = [
+        PageText(
+            Path("example-bank-cop.pdf"),
+            1,
+            "\n".join(
+                [
+                    "Movimientos de cuenta en COP",
+                    "Fecha Descripción Movimiento Tarjeta Débito Abono Saldo",
+                    "2025-01-03 16:57:44 Intereses abonados 2679063 $642 $9,110",
+                ]
+            ),
+        )
+    ]
+    rows, _excluded, _warnings, meta = extract_rows_from_pages(cop_pages, "Example Bank", 2025, None)
+    if meta.get("account_currency") != "COP":
+        failures.append(f"cop-account-currency: expected COP account currency, got {meta.get('account_currency')}")
+    if not rows or rows[0].get("currency") != "COP" or rows[0].get("amount_foreign") != "642.00":
+        failures.append(f"cop-symbol-currency: expected 642.00 COP row, got {rows[:1]}")
+    if failures:
+        for failure in failures:
+            print(f"FAIL: {failure}", file=sys.stderr)
+        return 1
+    print(f"Self-test passed: {len(cases) + 1} parser cases")
     return 0
 
 
@@ -1111,6 +1392,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--pdf", nargs="+", required=True, help="One or more statement PDF files.")
     extract.add_argument("--tax-year", required=True, type=int, help="Single tax year to analyze.")
     extract.add_argument("--institution", required=True, help="One institution name visible on every statement.")
+    extract.add_argument("--account-currency", help="Optional account currency override, e.g. COP when statements use $ for pesos.")
     extract.add_argument("--out", required=True, help="Output JSON path, e.g. work/interest-analysis.json.")
     extract.add_argument("--csv", help="Optional CSV path. Defaults to interest-items.csv beside the JSON.")
     extract.set_defaults(func=command_extract)
@@ -1119,11 +1401,22 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--input", required=True, help="Input interest-analysis.json.")
     report.add_argument(
         "--fx-method",
-        choices=["irs-yearly-average", "user-rate"],
+        choices=["irs-yearly-average", "posted-daily-spot", "posted-yearly-average", "user-rate"],
         help="FX method. Required only when counted interest rows are not already USD.",
     )
     report.add_argument("--fx-rate", help="Exchange rate. Default direction is foreign currency units per 1 USD.")
+    report.add_argument("--fx-rates-json", help="Date-keyed FX rates JSON for row-level spot conversion.")
     report.add_argument("--fx-source", default="", help="Human-readable FX source label.")
+    report.add_argument(
+        "--fx-rate-confirmed",
+        action="store_true",
+        help="Required for non-USD reports after the user confirms the proposed rate or provides a custom rate.",
+    )
+    report.add_argument(
+        "--fx-confirmation-note",
+        default="",
+        help="Optional note describing the user's FX confirmation or custom-rate instruction.",
+    )
     report.add_argument(
         "--rate-direction",
         choices=["foreign-per-usd", "usd-per-foreign"],

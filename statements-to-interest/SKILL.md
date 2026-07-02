@@ -4,7 +4,7 @@ description: Use for tax/Schedule B/FBAR support when analyzing one bank's text 
 ---
 # Statements To Interest
 
-Analyze one institution's machine-readable statement PDFs for one tax year, extract interest income, convert to USD only when needed, and generate a tax-support packet. Produce support documentation, not an official IRS form and not tax advice.
+Analyze one institution's machine-readable statement PDFs for one tax year, extract interest income, infer account/institution metadata, convert to USD only when needed, and generate a tax-support packet. Produce support documentation, not an official IRS form and not tax advice.
 
 ## Scope Gate
 
@@ -28,19 +28,35 @@ python "<package-root>/scripts/statements_to_interest.py" extract \
   --pdf statement-01.pdf statement-02.pdf \
   --tax-year 2025 \
   --institution "Example Bank" \
+  --account-currency COP \
   --out work/interest-analysis.json
 ```
 
-Review the JSON and CSV before reporting. Do not invent missing rows. Ask for confirmation when rows are low confidence, ambiguous, out of scope, or when the institution label was found only in a file path.
+Review the JSON and CSV before reporting. Confirm the `institution_profile`, account currency, statement titles, and statement periods. Do not invent missing rows. Ask for confirmation when rows are low confidence, ambiguous, out of scope, when the institution label was found only in a file path, or when account currency cannot be inferred.
 
-For non-USD rows, ask the user to choose and source an FX treatment before generating the PDF:
+For non-USD rows, default to an official or published yearly average exchange rate for the tax year. Accept annual averages published by the IRS, a bank, central bank, tax authority, or reputable FX provider. Do not calculate the yearly average yourself from daily/monthly data. If no published annual average is found, ask the user for a rate/source instead of deriving one. Prompt the user with the proposed rate, source, direction, and resulting USD total; ask them to confirm that rate or provide a custom rate/source before generating the PDF. Do not generate a non-USD PDF until the user confirms or supplies a custom rate. Pass `--fx-rate-confirmed` only after that confirmation:
 
 ```bash
 python "<package-root>/scripts/statements_to_interest.py" report \
   --input work/interest-analysis.json \
-  --fx-method irs-yearly-average \
+  --fx-method posted-yearly-average \
   --fx-rate 0.886 \
-  --fx-source "IRS yearly average exchange rate table, Euro Zone Euro, 2025" \
+  --fx-source "Published yearly average exchange rate source, currency, year" \
+  --fx-rate-confirmed \
+  --fx-confirmation-note "User confirmed the published yearly average rate" \
+  --out outputs/interest-support-packet.pdf
+```
+
+Use item-date spot rates only if the user or preparer explicitly asks for that method. In that case, still prompt for confirmation before reporting and pass a date-keyed `--fx-rates-json` file:
+
+```bash
+python "<package-root>/scripts/statements_to_interest.py" report \
+  --input work/interest-analysis.json \
+  --fx-method posted-daily-spot \
+  --fx-rates-json work/fx-rates.json \
+  --fx-source "Posted daily spot source, currency, retrieval date" \
+  --fx-rate-confirmed \
+  --fx-confirmation-note "User requested and confirmed daily spot rates" \
   --out outputs/interest-support-packet.pdf
 ```
 

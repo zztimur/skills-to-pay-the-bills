@@ -31,6 +31,7 @@ Use careful language:
 - "Review Schedule B applicability" rather than "file Schedule B".
 - "Review FBAR/Form 8938 applicability" rather than deciding the filing result.
 - "FX rate supplied by user/agent from source listed below" unless the source is directly verified in the current task.
+- "Account currency inferred from statement title/header" when the statement clearly names the currency, such as `Movimientos de cuenta en COP`.
 
 ## FX defaults
 
@@ -38,7 +39,11 @@ If counted rows are already denominated in USD, no FX rate decision is needed.
 
 If counted rows are not denominated in USD, ask for a rate decision before generating the final PDF. Recommend one of:
 
-- IRS yearly average exchange rate for recurring interest in one tax year.
+- IRS yearly average exchange rate for the tax year when the currency is listed on the IRS yearly-average table.
+- An official or published yearly average from a consistent source, such as a bank, central bank, tax authority, Treasury/FiscalData, Oanda, or XE.
 - A user-provided rate and source when the user or preparer has a preferred method.
+- Spot exchange rates only when the user or preparer explicitly requests item-date conversion.
 
-For non-USD rows, the report script expects `--fx-rate` as foreign currency units per 1 U.S. dollar by default. Use `--rate-direction usd-per-foreign` only if the user supplies a U.S. dollars per 1 foreign currency unit rate.
+Do not calculate yearly averages from daily, weekly, monthly, or intraday rates. If no official/published annual average is available, stop before report generation and ask the user/preparer for a custom rate and source.
+
+For non-USD rows, the report script expects `--fx-rate` as foreign currency units per 1 U.S. dollar by default. Use `--rate-direction usd-per-foreign` only if the user supplies a U.S. dollars per 1 foreign currency unit rate. The report must name the FX source and method, and must pass `--fx-rate-confirmed` only after the user confirms the proposed published yearly average or supplies a custom rate/source.

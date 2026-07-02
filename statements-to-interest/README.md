@@ -5,10 +5,11 @@ This skill exists for a very specific tax-season annoyance: I have statement PDF
 It does the boring path on purpose:
 
 1. Read one institution's machine-readable statement PDFs for one tax year.
-2. Extract credited interest rows.
-3. Put the evidence in JSON and CSV so the rows can be reviewed.
-4. Apply FX only when the rows are not already USD.
-5. Generate a small IRS-oriented support packet for Schedule B, FBAR, and Form 8938 review.
+2. Infer the account currency and statement coverage from the institution's own statement text when possible.
+3. Extract credited interest rows.
+4. Put the evidence in JSON and CSV so the rows can be reviewed.
+5. Apply FX only when the rows are not already USD.
+6. Generate a small IRS-oriented support packet for Schedule B, FBAR, and Form 8938 review.
 
 This is not tax advice. It is not an official IRS form. It is a support worksheet with an audit trail, which is exactly the kind of boring artifact tax work usually needs.
 
@@ -27,6 +28,8 @@ For a clean run, expect three useful artifacts:
 - `outputs/...interest-support-packet.pdf` with the human-facing packet.
 
 The row review matters. The PDF is only as good as the rows behind it, so the JSON and CSV are part of the output, not temporary junk.
+
+The packet should name the institution, account currency, statement periods, files reviewed, source-currency total, FX treatment, and USD reporting total. If a COP statement uses `$`, the skill should treat that as a symbol inside a COP account, not as automatic USD.
 
 ## Use It In Codex
 
@@ -70,7 +73,11 @@ python statements-to-interest/scripts/statements_to_interest.py report \
   --out "outputs/example-bank-2025-interest-support-packet.pdf"
 ```
 
-If the rows are not USD, pick an FX method, rate, source, and direction before generating the report. Do not freestyle the conversion.
+If the rows are not USD, propose an official or published yearly average exchange rate for the tax year, show the resulting USD total, and ask me to confirm that rate or send a custom rate/source. Do not freestyle the conversion, and do not generate the PDF until the rate is confirmed.
+
+For Colombian peso statements, use a published yearly average if available. If only daily/monthly rates are available, do not calculate the annual average yourself; ask me for an official annual average or custom rate/source.
+
+Use item-date spot rates only when I explicitly ask for them. When using item-date spot rates, pass a date-keyed `--fx-rates-json` file so each interest row converts with the rate for its own receipt/accrual date instead of flattening the packet into one blended rate.
 
 ## Review Flags
 
@@ -102,4 +109,3 @@ claude plugin validate --strict statements-to-interest
 ```
 
 `skill-forge` is the gatekeeper for this repo. If it says the package is not ready, fix the package before pushing.
-
