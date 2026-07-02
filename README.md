@@ -5,7 +5,7 @@ An assorted collection of agent skills. Each top-level folder is a standalone sk
 ## Skills
 
 - `skill-forge/` - linked gatekeeper skill for auditing, pressure testing, validating, and grading skill packages before release. Source repo: https://github.com/zztimur/skill-forge
-- `taxes-statements-to-interest/` - tax-support workflow for extracting interest income from one institution's text PDF statements for one tax year.
+- `statements-to-interest/` - tax-support workflow for extracting interest income from one institution's text PDF statements for one tax year.
 
 ## Clone Setup
 

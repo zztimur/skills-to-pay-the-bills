@@ -3,7 +3,7 @@ description: Analyze one bank statement set for one tax year and render an inter
 argument-hint: "<tax-year> <institution> <statement PDF paths...>"
 ---
 
-You are running `/taxes:statements-to-interest $ARGUMENTS`.
+You are running `/statements-to-interest:statements-to-interest $ARGUMENTS`.
 
 Use the package root `SKILL.md` as the control plane and read `references/workflow.md` before analysis. The command is a Claude plugin entrypoint only; keep all operational workflow details in the shared root skill and references so Codex/OpenAI and Claude use the same process.
 

@@ -1,0 +1,8 @@
+{
+  "name": "statements-to-interest",
+  "description": "Model-agnostic tax-support workflow for statements-to-interest analysis.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Timur"
+  }
+}
