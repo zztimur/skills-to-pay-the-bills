@@ -2,7 +2,7 @@
 name: statements-to-interest
 description: Use for tax/Schedule B/FBAR support when analyzing one bank's text PDF statements for one tax year to extract interest income, apply FX if needed, and create an IRS-oriented packet.
 ---
-# Taxes Statements To Interest
+# Statements To Interest
 
 Analyze one institution's machine-readable statement PDFs for one tax year, extract interest income, convert to USD only when needed, and generate a tax-support packet. Produce support documentation, not an official IRS form and not tax advice.
 

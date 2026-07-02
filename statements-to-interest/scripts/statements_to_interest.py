@@ -894,8 +894,19 @@ def command_report(args: argparse.Namespace) -> int:
     if colors is None:
         raise SystemExit("reportlab is required. Run with a Python environment that has reportlab installed.")
     input_path = Path(args.input)
-    analysis = json.loads(input_path.read_text(encoding="utf-8"))
+    try:
+        analysis = json.loads(input_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise SystemExit(f"Input analysis JSON not found: {input_path}") from None
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Input analysis JSON is invalid: {input_path} ({exc.msg} at line {exc.lineno}, column {exc.colno})") from None
+    if not isinstance(analysis, dict):
+        raise SystemExit(f"Input analysis JSON must be an object: {input_path}")
     rows = analysis.get("rows", [])
+    if not isinstance(rows, list):
+        raise SystemExit(f"Input analysis JSON has invalid 'rows'; expected a list: {input_path}")
+    if any(not isinstance(row, dict) for row in rows):
+        raise SystemExit(f"Input analysis JSON has invalid 'rows'; every row must be an object: {input_path}")
     totals = foreign_totals(rows)
     currencies = [currency for currency in totals if currency != "UNKNOWN"]
     unknown_total = totals.get("UNKNOWN")

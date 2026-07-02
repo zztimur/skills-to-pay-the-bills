@@ -62,6 +62,12 @@ The script writes:
 
 If extraction says the PDF has little machine-readable text, ask for text PDFs. Do not OCR or hand-transcribe unless the user explicitly changes the scope.
 
+For large or messy input sets, triage before extraction:
+
+- If the user provides many PDFs, confirm they are all for one institution, one tax year, and one currency bucket before running the whole set.
+- If filenames, folders, or visible statement periods suggest mixed institutions, accounts from unrelated providers, currencies, or tax years, stop and ask the user to split the job.
+- If the PDFs are unusually large or the text layer looks noisy, run a small extraction first and report what coverage was verified before continuing.
+
 ## 4. Review The Extracted Results
 
 Open the JSON and CSV before generating a report. Review these JSON fields:
