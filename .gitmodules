@@ -1,0 +1,3 @@
+[submodule "skill-forge"]
+	path = skill-forge
+	url = https://github.com/zztimur/skill-forge.git
