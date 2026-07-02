@@ -1,0 +1,4 @@
+interface:
+  display_name: "Taxes: Statements to Interest"
+  short_description: "Analyze bank statements for interest income"
+  default_prompt: "Use $taxes-statements-to-interest to analyze one bank's text statement PDFs for one tax year and generate an IRS-oriented interest support packet."
