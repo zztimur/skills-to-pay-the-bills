@@ -70,6 +70,8 @@ Record:
 - Any caveat, such as IRS table unavailable or proof artifact limited to HTML.
 - Hashes for saved proof files when available.
 
+In the printable PDF, identify saved source proof artifacts by filename or packet-relative path plus hash. Do not rely on absolute local computer paths as evidence because external reviewers cannot access them. Absolute paths are acceptable in `workpaper.json` and chat artifact links for local navigation.
+
 The proof packet supports later review. It is not automatically attached to a tax return.
 
 For non-IRS/manual sources, require both:

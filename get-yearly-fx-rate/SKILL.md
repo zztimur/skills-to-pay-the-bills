@@ -69,10 +69,12 @@ The folder must include:
 
 - `workpaper.md`, a human-readable source note.
 - `workpaper.json`, structured metadata for reuse by other workflows.
-- `workpaper.pdf`, a printable summary workpaper.
+- `workpaper.pdf`, a printable summary workpaper with the rate, source, caveats, and saved source proof/hash.
 - At least one saved source proof artifact: HTML snapshot, source data file, PDF save/print, screenshot, or equivalent retained source file.
 
 For IRS lookups, the script saves the IRS HTML snapshot and hashes it. For non-IRS sources, save a screenshot/PDF/HTML/source file before running `manual`; the script copies that artifact into the workpaper folder and hashes it.
+
+Do not fill the printable PDF with links to the workpaper's own PDF/MD/JSON files. Those artifact links belong in the final chat output. Inside the PDF, list only the source proof artifact filename or packet-relative path and its hash so the workpaper stays readable and useful to reviewers who cannot access local computer paths.
 
 ## IRS Map Refresh
 
@@ -88,12 +90,15 @@ If `map-check` reports unmapped IRS rows, update `IRS_ROWS_BY_CODE` and any need
 
 Keep the user-facing answer concise and use this shape:
 
-```text
+```markdown
 Rate: 1 USD = <rate> <CURRENCY> yearly average
 Reciprocal: 1 <CURRENCY> = <usd-rate> USD
 Source: <source title>, <URL>, retrieved <date>
-Proof: <absolute path to workpaper.pdf>
+Proof: [workpaper.pdf](<absolute path to workpaper.pdf>)
+Artifacts: [workpaper.pdf](<absolute path to workpaper.pdf>), [workpaper.md](<absolute path to workpaper.md>), [workpaper.json](<absolute path to workpaper.json>), [source-proof-1.ext](<absolute path to saved source proof>)
 ```
+
+Use Markdown links for every retained local artifact so the chat UI can expose them as clickable/downloadable files. Wrap link targets in angle brackets because workspace paths may contain spaces. Do not wrap proof paths in backticks.
 
 Add one short caveat only when needed, such as `The IRS table did not list this currency, so this uses a non-IRS published annual average.` Do not call the rate IRS-approved.
 

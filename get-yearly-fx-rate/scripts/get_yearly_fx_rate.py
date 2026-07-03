@@ -694,19 +694,18 @@ class WorkpaperPdfRenderer:
             continuation_title="Source",
         )
 
-        self.draw_section_title("Proof Files")
-        proof_rows: list[tuple[str, object]] = [
-            ("Workpaper PDF", proof.get("workpaper_pdf")),
-            ("Workpaper JSON", proof.get("workpaper_json")),
-            ("Workpaper MD", proof.get("workpaper_md")),
-        ]
+        self.draw_section_title("Source Proof")
+        proof_rows: list[tuple[str, object]] = []
         if isinstance(saved_files, list) and saved_files:
             for index, item in enumerate(saved_files, start=1):
                 if isinstance(item, dict):
-                    proof_rows.append((f"Source proof {index}", f"{item.get('path')}; sha256: {item.get('sha256')}"))
+                    filename = item.get("filename") or Path(str(item.get("path", ""))).name
+                    proof_rows.append((f"Saved source {index}", f"{filename} (retained in this proof packet)"))
+                    proof_rows.append((f"SHA-256 {index}", item.get("sha256")))
+            proof_rows.append(("Reviewer note", "Provide this PDF together with the saved source proof file(s); local computer paths are not required to verify the source hash."))
         else:
             proof_rows.append(("Source proof", "No local source artifact was saved; see proof limitations."))
-        self.draw_key_value_rows(proof_rows, continuation_title="Proof Files")
+        self.draw_key_value_rows(proof_rows, continuation_title="Source Proof")
 
         if isinstance(limitations, list) and limitations:
             self.draw_section_title("Proof Limitations")
@@ -840,6 +839,8 @@ def create_workpaper(
         if proof_path.exists():
             proof_entries.append(
                 {
+                    "filename": proof_path.name,
+                    "packet_relative_path": proof_path.name,
                     "path": as_abs(proof_path),
                     "sha256": sha256_file(proof_path),
                 }
@@ -936,17 +937,56 @@ def render_workpaper_md(workpaper: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def markdown_file_link(label: str, path: object) -> str:
+    target = clean_text(str(path))
+    safe_label = clean_text(label).replace("[", "\\[").replace("]", "\\]")
+    safe_target = target.replace(">", "%3E")
+    return f"[{safe_label}](<{safe_target}>)"
+
+
+def artifact_links(workpaper: dict[str, object]) -> str:
+    proof = workpaper["proof"]
+    assert isinstance(proof, dict)
+    links: list[str] = []
+    seen: set[str] = set()
+
+    for key, label in (
+        ("workpaper_pdf", "workpaper.pdf"),
+        ("workpaper_md", "workpaper.md"),
+        ("workpaper_json", "workpaper.json"),
+    ):
+        path = proof.get(key)
+        if path and str(path) not in seen:
+            links.append(markdown_file_link(label, path))
+            seen.add(str(path))
+
+    saved_files = proof.get("saved_files", [])
+    if isinstance(saved_files, list):
+        for item in saved_files:
+            if not isinstance(item, dict):
+                continue
+            path = item.get("path")
+            if path and str(path) not in seen:
+                links.append(markdown_file_link(Path(str(path)).name, path))
+                seen.add(str(path))
+
+    return ", ".join(links)
+
+
 def final_text(workpaper: dict[str, object]) -> str:
     source = workpaper["source"]
     proof = workpaper["proof"]
     assert isinstance(source, dict)
     assert isinstance(proof, dict)
+    pdf_path = proof.get("workpaper_pdf")
+    proof_link = markdown_file_link("workpaper.pdf", pdf_path) if pdf_path else ""
     return "\n".join(
         [
             f"Rate: 1 USD = {workpaper['foreign_per_usd']} {workpaper['currency']} yearly average",
             f"Reciprocal: 1 {workpaper['currency']} = {workpaper['usd_per_foreign']} USD",
             f"Source: {source.get('title')}, {source.get('url')}, retrieved {source.get('retrieved')}",
-            f"Proof: {proof.get('workpaper_pdf')}",
+            f"Proof: {proof_link}",
+            f"Artifacts: {artifact_links(workpaper)}",
         ]
     )
 
@@ -959,7 +999,7 @@ def command_lookup(args: argparse.Namespace) -> int:
             4,
         )
 
-    html, source_ref = load_html(args.source_url, args.html_file)
+    html, _source_ref = load_html(args.source_url, args.html_file)
     rate = find_irs_rate(code, args.year, html, args.source_url)
 
     source_slug = "irs-yearly-average-currency-exchange-rates"
@@ -971,7 +1011,7 @@ def command_lookup(args: argparse.Namespace) -> int:
 
     note = (
         f"IRS yearly average table row: {rate.country} {rate.currency}; "
-        f"source fetched from {source_ref}; HTML sha256 {sha256_bytes(html_bytes)}."
+        f"source URL {rate.source_url}; retained HTML snapshot sha256 {sha256_bytes(html_bytes)}."
     )
     workpaper = create_workpaper(
         output_root=args.output_root,
@@ -1042,7 +1082,11 @@ def command_map_check(args: argparse.Namespace) -> int:
     return 0
 
 
-def assert_workpaper_pdf(path: Path, required_terms: Iterable[str]) -> None:
+def assert_workpaper_pdf(
+    path: Path,
+    required_terms: Iterable[str],
+    forbidden_terms: Iterable[str] = (),
+) -> None:
     data = path.read_bytes()
     assert data.startswith(b"%PDF-1."), path
     assert data.rstrip().endswith(b"%%EOF"), path
@@ -1053,6 +1097,9 @@ def assert_workpaper_pdf(path: Path, required_terms: Iterable[str]) -> None:
     for term in required_terms:
         encoded = clean_text(term).encode("latin-1", errors="replace")
         assert encoded in data, term
+    for term in forbidden_terms:
+        encoded = clean_text(term).encode("latin-1", errors="replace")
+        assert encoded not in data, term
 
 
 def command_self_test(_args: argparse.Namespace) -> int:
@@ -1094,8 +1141,15 @@ def command_self_test(_args: argparse.Namespace) -> int:
             html_file=str(html_path),
             retrieved="2026-07-03",
         )
-        with contextlib.redirect_stdout(io.StringIO()):
+        lookup_output = io.StringIO()
+        with contextlib.redirect_stdout(lookup_output):
             command_lookup(lookup_args)
+        lookup_text = lookup_output.getvalue()
+        assert "Proof: [workpaper.pdf](<" in lookup_text
+        assert "Artifacts: [workpaper.pdf](<" in lookup_text
+        assert "[workpaper.md](<" in lookup_text
+        assert "[workpaper.json](<" in lookup_text
+        assert "[irs-yearly-average-source.html](<" in lookup_text
         workpaper = next((Path(tmp) / "proof").glob("cad-2024-*/workpaper.json"))
         data = json.loads(workpaper.read_text(encoding="utf-8"))
         assert data["foreign_per_usd"] == "1.37"
@@ -1107,9 +1161,26 @@ def command_self_test(_args: argparse.Namespace) -> int:
                 "RETAINED SUPPORT WORKPAPER",
                 "1 USD = 1.37 CAD",
                 "IRS Yearly average currency exchange rates",
+                "SOURCE PROOF",
+                "Saved source 1",
+                "irs-yearly-average-source.html",
+                "retained in this proof packet",
+                "SHA-256 1",
+                "Reviewer note",
+                "local computer",
+                "paths are not required",
+            ],
+            [
+                "Workpaper PDF",
+                "Workpaper JSON",
+                "Workpaper MD",
+                "PROOF FILES CONTINUED",
+                str(Path(tmp)),
             ],
         )
         assert data["proof"]["workpaper_pdf_sha256"] == sha256_file(lookup_pdf)
+        assert data["proof"]["saved_files"][0]["filename"] == "irs-yearly-average-source.html"
+        assert data["proof"]["saved_files"][0]["packet_relative_path"] == "irs-yearly-average-source.html"
 
         proof_file = Path(tmp) / "proof-source.html"
         proof_file.write_text("<p>published annual average</p>", encoding="utf-8")
@@ -1127,8 +1198,15 @@ def command_self_test(_args: argparse.Namespace) -> int:
             proof_file=str(proof_file),
             output_root=str(Path(tmp) / "manual-proof"),
         )
-        with contextlib.redirect_stdout(io.StringIO()):
+        manual_output = io.StringIO()
+        with contextlib.redirect_stdout(manual_output):
             command_manual(manual_args)
+        manual_text = manual_output.getvalue()
+        assert "Proof: [workpaper.pdf](<" in manual_text
+        assert "Artifacts: [workpaper.pdf](<" in manual_text
+        assert "[workpaper.md](<" in manual_text
+        assert "[workpaper.json](<" in manual_text
+        assert "[source-proof-1.html](<" in manual_text
         manual_workpaper = next((Path(tmp) / "manual-proof").glob("cop-2024-*/workpaper.json"))
         manual_data = json.loads(manual_workpaper.read_text(encoding="utf-8"))
         assert manual_data["foreign_per_usd"] == "4200"
@@ -1138,6 +1216,8 @@ def command_self_test(_args: argparse.Namespace) -> int:
         assert saved_path.exists()
         assert saved_path.parent.resolve() == manual_workpaper.parent.resolve()
         assert saved_file["sha256"] == sha256_file(saved_path)
+        assert saved_file["filename"] == "source-proof-1.html"
+        assert saved_file["packet_relative_path"] == "source-proof-1.html"
         manual_pdf = Path(manual_data["proof"]["workpaper_pdf"])
         assert_workpaper_pdf(
             manual_pdf,
@@ -1145,7 +1225,21 @@ def command_self_test(_args: argparse.Namespace) -> int:
                 "Yearly FX Rate Workpaper",
                 "1 USD = 4200 COP",
                 "Example Central Bank Annual Average",
-                "Source proof 1",
+                "SOURCE PROOF",
+                "Saved source 1",
+                "source-proof-1.html",
+                "retained in this proof packet",
+                "SHA-256 1",
+                "Reviewer note",
+                "local computer",
+                "paths are not required",
+            ],
+            [
+                "Workpaper PDF",
+                "Workpaper JSON",
+                "Workpaper MD",
+                "PROOF FILES CONTINUED",
+                str(Path(tmp)),
             ],
         )
         assert manual_data["proof"]["workpaper_pdf_sha256"] == sha256_file(manual_pdf)
