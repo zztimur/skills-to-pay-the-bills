@@ -1,11 +1,14 @@
 # Skills To Pay The Bills
 
-An assorted collection of agent skills. Each top-level folder is a standalone skill package with its own `SKILL.md` entrypoint.
+Small, practical agent skills for work where guessing is expensive.
+
+Each top-level folder is a standalone skill package with its own `SKILL.md` entrypoint. The pattern here is boring on purpose: one clear workflow, reusable scripts where determinism matters, platform adapters kept thin, and enough proof left behind that Future Me can tell what happened.
 
 ## Skills
 
-- `skill-forge/` - linked gatekeeper skill for auditing, pressure testing, validating, and grading skill packages before release. Source repo: https://github.com/zztimur/skill-forge
-- `statements-to-interest/` - tax-support workflow for extracting interest income from one institution's text PDF statements for one tax year.
+- `skill-forge/` - the gatekeeper. It audits, pressure tests, validates, and grades skill packages before release. Source repo: https://github.com/zztimur/skill-forge
+- `statements-to-interest/` - turns one institution's machine-readable statement PDFs for one tax year into an IRS-oriented interest support packet.
+- `get-yearly-fx-rate/` - finds a published yearly average FX rate and leaves a cited proof workpaper instead of asking everyone to trust a number in chat.
 
 ## Clone Setup
 
@@ -17,7 +20,7 @@ git submodule update --init --recursive
 
 ## Gatekeeper Workflow
 
-Use `skill-forge` before shipping any skill change in this repo.
+Use `skill-forge` before shipping any skill change in this repo. If the package cannot survive the gatekeeper, it is not ready to push.
 
 1. Inspect the changed skill package:
 

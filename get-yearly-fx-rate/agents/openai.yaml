@@ -1,0 +1,4 @@
+interface:
+  display_name: "Get Yearly FX Rate"
+  short_description: "Find a cited yearly average FX rate"
+  default_prompt: "Use $get-yearly-fx-rate to find a published yearly average exchange rate for one currency and one calendar year, prefer the IRS yearly average table when available, avoid self-calculating annual averages, and return the rate with a retained proof workpaper."

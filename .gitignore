@@ -1,5 +1,39 @@
+# macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Node and frontend tooling
+node_modules/
+.npm/
+.pnpm-store/
+dist/
+build/
+coverage/
+
+# Local env and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+
+# Generated workflow artifacts
 work/
 outputs/
