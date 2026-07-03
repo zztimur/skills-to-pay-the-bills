@@ -39,7 +39,8 @@ It includes:
 
 - `workpaper.md` for human review.
 - `workpaper.json` for reuse by other workflows.
-- A saved proof artifact where possible, such as IRS HTML, source data, PDF, screenshot, or another retained source file with a hash.
+- `workpaper.pdf` for printable review.
+- A saved source proof artifact, such as IRS HTML, source data, PDF, screenshot, or another retained source file with a hash.
 
 ## Use It In Codex
 
@@ -83,11 +84,24 @@ python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py manual \
   --source-title "Published annual average source title" \
   --source-url "https://example.gov/rates/2024" \
   --source-note "Source labels this as a published yearly/annual average; retrieved YYYY-MM-DD" \
+  --annual-average-confirmed \
   --proof-file "/path/to/screenshot-or-source.html" \
   --output-root work/fx-rate-proof
 ```
 
 `foreign-per-usd` means `1 USD = <rate> foreign currency`. Use `usd-per-foreign` only when the source is quoted as `1 foreign currency = <rate> USD`.
+
+For non-IRS manual sources, the proof file is required. Save the source page as PDF/HTML, take a screenshot, or download the source data first. The script copies that proof into the workpaper folder and hashes it.
+
+## Refresh The IRS Map
+
+The script keeps an IRS row-to-ISO map because the IRS table uses labels like `Canada Dollar` and `Mexico Peso`, not ISO codes. Check the map after IRS table changes:
+
+```bash
+python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py map-check
+```
+
+If it reports unmapped rows, update `IRS_ROWS_BY_CODE` and aliases in the script, then rerun `self-test` and `map-check`.
 
 ## Failure Modes
 
@@ -96,6 +110,7 @@ The skill should stop instead of getting cute when:
 - The currency is ambiguous, like `peso`, `dollar`, or `pound`.
 - The requested year is not published yet.
 - The source gives daily/monthly/quarterly data but no annual average.
+- There is no local proof file for a non-IRS annual source.
 - Rate direction is unclear.
 - The source is a search snippet instead of a real published page or file.
 
@@ -107,6 +122,7 @@ After script changes:
 
 ```bash
 python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py self-test
+python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py map-check
 ```
 
 Before shipping:

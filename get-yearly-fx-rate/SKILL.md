@@ -48,10 +48,14 @@ python3 "<package-root>/scripts/get_yearly_fx_rate.py" manual \
   --source-title "Published annual average source title" \
   --source-url "https://example.gov/rates/2024" \
   --source-note "Source labels this as a published yearly/annual average; retrieved YYYY-MM-DD" \
+  --annual-average-confirmed \
+  --proof-file "/path/to/source-screenshot-or-saved-page.pdf" \
   --output-root work/fx-rate-proof
 ```
 
 Use `foreign-per-usd` when the rate means one U.S. dollar equals the foreign-currency amount. Use `usd-per-foreign` only when the published rate means one unit of foreign currency equals the U.S. dollar amount.
+
+For manual non-IRS workpapers, do not run the script until there is a local proof file and the source explicitly labels the rate as a yearly/annual average. The proof file can be a screenshot, PDF save/print, HTML snapshot, downloaded source data file, or another retained source artifact.
 
 ## Proof Packet
 
@@ -65,9 +69,20 @@ The folder must include:
 
 - `workpaper.md`, a human-readable source note.
 - `workpaper.json`, structured metadata for reuse by other workflows.
-- Best available saved proof: HTML snapshot, source data file, PDF save/print, screenshot, or a link to an externally retained proof file.
+- `workpaper.pdf`, a printable summary workpaper.
+- At least one saved source proof artifact: HTML snapshot, source data file, PDF save/print, screenshot, or equivalent retained source file.
 
-For IRS lookups, the script saves the IRS HTML snapshot and hashes it. For non-IRS sources, save a screenshot/PDF/HTML/source file when the environment supports it, or record the source URL, retrieval date, and proof limitation in the workpaper.
+For IRS lookups, the script saves the IRS HTML snapshot and hashes it. For non-IRS sources, save a screenshot/PDF/HTML/source file before running `manual`; the script copies that artifact into the workpaper folder and hashes it.
+
+## IRS Map Refresh
+
+The script keeps a small IRS row-to-ISO map so ambiguous currency labels such as `Dollar` or `Peso` do not get guessed. When the IRS yearly-average table changes, run:
+
+```bash
+python3 "<package-root>/scripts/get_yearly_fx_rate.py" map-check
+```
+
+If `map-check` reports unmapped IRS rows, update `IRS_ROWS_BY_CODE` and any needed aliases in `scripts/get_yearly_fx_rate.py`, then rerun `self-test` and `map-check`.
 
 ## Final Answer
 
@@ -77,7 +92,7 @@ Keep the user-facing answer concise and use this shape:
 Rate: 1 USD = <rate> <CURRENCY> yearly average
 Reciprocal: 1 <CURRENCY> = <usd-rate> USD
 Source: <source title>, <URL>, retrieved <date>
-Proof: <absolute path to workpaper.md>
+Proof: <absolute path to workpaper.pdf>
 ```
 
 Add one short caveat only when needed, such as `The IRS table did not list this currency, so this uses a non-IRS published annual average.` Do not call the rate IRS-approved.
@@ -90,6 +105,7 @@ After changing this skill, run:
 
 ```bash
 python3 "<package-root>/scripts/get_yearly_fx_rate.py" self-test
+python3 "<package-root>/scripts/get_yearly_fx_rate.py" map-check
 python3 /Users/timur/.codex/skills/.system/skill-creator/scripts/quick_validate.py "<package-root>"
 python3 -S skill-forge/scripts/inspect_skill_package.py "<package-root>" --json --strict
 ```

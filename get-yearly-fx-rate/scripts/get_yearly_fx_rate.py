@@ -67,7 +67,7 @@ IRS_ROWS_BY_CODE = {
     "TRY": ("Turkey", "New Lira"),
     "AED": ("United Arab Emirates", "Dirham"),
     "GBP": ("United Kingdom", "Pound"),
-    "VES": ("Venezuela", "Bolivar"),
+    "VES": ("Venezuela", "Bolivar (Fuerte)"),
 }
 
 ALIASES = {
@@ -394,6 +394,102 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def escape_pdf_text(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def wrap_text(value: str, width: int = 92) -> list[str]:
+    words = value.split()
+    if not words:
+        return [""]
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        if len(current) + 1 + len(word) <= width:
+            current += " " + word
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+
+def simple_pdf_bytes(lines: list[str]) -> bytes:
+    page_width = 612
+    page_height = 792
+    margin_x = 54
+    start_y = 738
+    line_height = 14
+    lines_per_page = int((start_y - 54) / line_height)
+    pages = [lines[index : index + lines_per_page] for index in range(0, len(lines), lines_per_page)]
+    if not pages:
+        pages = [[""]]
+
+    objects: list[bytes] = []
+    page_object_ids: list[int] = []
+
+    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    objects.append(b"")  # pages object placeholder
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+
+    for page_lines in pages:
+        content_lines = ["BT", "/F1 10 Tf", f"{margin_x} {start_y} Td"]
+        for index, line in enumerate(page_lines):
+            if index:
+                content_lines.append(f"0 -{line_height} Td")
+            content_lines.append(f"({escape_pdf_text(line)}) Tj")
+        content_lines.append("ET")
+        content = "\n".join(content_lines).encode("latin-1", errors="replace")
+        content_id = len(objects) + 1
+        objects.append(
+            b"<< /Length " + str(len(content)).encode("ascii") + b" >>\nstream\n" + content + b"\nendstream"
+        )
+        page_id = len(objects) + 1
+        page_object_ids.append(page_id)
+        objects.append(
+            (
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] "
+                f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_id} 0 R >>"
+            ).encode("ascii")
+        )
+
+    kids = " ".join(f"{page_id} 0 R" for page_id in page_object_ids)
+    objects[1] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_object_ids)} >>".encode("ascii")
+
+    output = io.BytesIO()
+    output.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for object_id, payload in enumerate(objects, start=1):
+        offsets.append(output.tell())
+        output.write(f"{object_id} 0 obj\n".encode("ascii"))
+        output.write(payload)
+        output.write(b"\nendobj\n")
+
+    xref_start = output.tell()
+    output.write(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    output.write(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        output.write(f"{offset:010d} 00000 n \n".encode("ascii"))
+    output.write(
+        (
+            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+            f"startxref\n{xref_start}\n%%EOF\n"
+        ).encode("ascii")
+    )
+    return output.getvalue()
+
+
+def render_workpaper_pdf_bytes(markdown_text: str) -> bytes:
+    lines: list[str] = []
+    for raw_line in markdown_text.splitlines():
+        normalized = raw_line.strip("# ").replace("`", "")
+        for line in wrap_text(normalized):
+            lines.append(line)
+        if raw_line == "":
+            lines.append("")
+    return simple_pdf_bytes(lines)
+
+
 def today_iso() -> str:
     return _dt.date.today().isoformat()
 
@@ -438,7 +534,13 @@ def create_workpaper(
     folder.mkdir(parents=True, exist_ok=True)
 
     proof_entries = []
-    for proof_path in saved_proofs:
+    for index, original_proof_path in enumerate(saved_proofs, start=1):
+        proof_path = original_proof_path
+        if proof_path.exists() and proof_path.parent.resolve() != folder.resolve():
+            copied_name = f"source-proof-{index}{proof_path.suffix}"
+            copied_path = folder / copied_name
+            shutil.copy2(proof_path, copied_path)
+            proof_path = copied_path
         if proof_path.exists():
             proof_entries.append(
                 {
@@ -465,6 +567,7 @@ def create_workpaper(
         "proof": {
             "workpaper_md": as_abs(folder / "workpaper.md"),
             "workpaper_json": as_abs(folder / "workpaper.json"),
+            "workpaper_pdf": as_abs(folder / "workpaper.pdf"),
             "saved_files": proof_entries,
             "limitations": proof_limitations,
         },
@@ -474,11 +577,16 @@ def create_workpaper(
         ],
     }
 
+    markdown_text = render_workpaper_md(workpaper)
+    write_text(folder / "workpaper.md", markdown_text)
+    pdf_path = folder / "workpaper.pdf"
+    pdf_path.write_bytes(render_workpaper_pdf_bytes(markdown_text))
+    workpaper["proof"]["workpaper_pdf_sha256"] = sha256_file(pdf_path)  # type: ignore[index]
     write_text(folder / "workpaper.json", json.dumps(workpaper, indent=2, sort_keys=True) + "\n")
-    write_text(folder / "workpaper.md", render_workpaper_md(workpaper))
 
     workpaper["proof"]["workpaper_md"] = as_abs(folder / "workpaper.md")  # type: ignore[index]
     workpaper["proof"]["workpaper_json"] = as_abs(folder / "workpaper.json")  # type: ignore[index]
+    workpaper["proof"]["workpaper_pdf"] = as_abs(pdf_path)  # type: ignore[index]
     return workpaper
 
 
@@ -505,6 +613,7 @@ def render_workpaper_md(workpaper: dict[str, object]) -> str:
         f"Source note: {source.get('note')}",
         "",
         "## Proof Files",
+        f"- Workpaper PDF: {proof.get('workpaper_pdf')}",
     ]
 
     if saved_files:
@@ -541,7 +650,7 @@ def final_text(workpaper: dict[str, object]) -> str:
             f"Rate: 1 USD = {workpaper['foreign_per_usd']} {workpaper['currency']} yearly average",
             f"Reciprocal: 1 {workpaper['currency']} = {workpaper['usd_per_foreign']} USD",
             f"Source: {source.get('title')}, {source.get('url')}, retrieved {source.get('retrieved')}",
-            f"Proof: {proof.get('workpaper_md')}",
+            f"Proof: {proof.get('workpaper_pdf')}",
         ]
     )
 
@@ -588,21 +697,13 @@ def command_lookup(args: argparse.Namespace) -> int:
 
 def command_manual(args: argparse.Namespace) -> int:
     code = normalize_currency(args.currency)
+    if not args.annual_average_confirmed:
+        raise RateError("Pass --annual-average-confirmed after verifying the source labels the value as yearly/annual average.", 2)
     rate = parse_decimal(args.rate)
-    saved_proofs: list[Path] = []
-    limitations: list[str] = []
+    proof_path = Path(args.proof_file)
+    if not proof_path.exists():
+        raise RateError(f"Proof file does not exist: {proof_path}", 2)
 
-    if args.proof_file:
-        proof_path = Path(args.proof_file)
-        if not proof_path.exists():
-            raise RateError(f"Proof file does not exist: {proof_path}", 2)
-        saved_proofs.append(proof_path)
-    else:
-        limitations.append(
-            "No local screenshot/PDF/HTML proof file was supplied to the script; retain source access and retrieval metadata."
-        )
-
-    note = args.source_note or "Agent confirmed the source labels this as a published yearly/annual average."
     workpaper = create_workpaper(
         output_root=args.output_root,
         currency_code=code,
@@ -612,12 +713,36 @@ def command_manual(args: argparse.Namespace) -> int:
         source_title=args.source_title,
         source_url=args.source_url,
         retrieval_date=args.retrieved or today_iso(),
-        source_note=note,
+        source_note=args.source_note,
         source_category=args.source_category,
-        saved_proofs=saved_proofs,
-        proof_limitations=limitations,
+        saved_proofs=[proof_path],
+        proof_limitations=[],
     )
     print(final_text(workpaper))
+    return 0
+
+
+def command_map_check(args: argparse.Namespace) -> int:
+    html, source_ref = load_html(args.source_url, args.html_file)
+    table = parse_yearly_irs_table(html)
+    if not table:
+        raise RateError("Could not parse the IRS yearly-average table from the source page.", 3)
+
+    mapped_pairs = {(country.lower(), currency.lower()) for country, currency in IRS_ROWS_BY_CODE.values()}
+    unmapped = []
+    for row in table:
+        pair = (str(row["country"]).lower(), str(row["currency"]).lower())
+        if pair not in mapped_pairs:
+            unmapped.append(f"{row['country']} {row['currency']}")
+
+    print(f"Parsed IRS yearly-average rows: {len(table)} from {source_ref}")
+    print(f"Mapped rows: {len(table) - len(unmapped)}")
+    if unmapped:
+        print("Unmapped rows:")
+        for item in unmapped:
+            print(f"- {item}")
+        return 4
+    print("All parsed rows are represented in IRS_ROWS_BY_CODE.")
     return 0
 
 
@@ -677,6 +802,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             source_url="https://example.test/fx",
             source_category="central bank published annual average",
             source_note="Source labels this as annual average.",
+            annual_average_confirmed=True,
             retrieved="2026-07-03",
             proof_file=str(proof_file),
             output_root=str(Path(tmp) / "manual-proof"),
@@ -686,6 +812,15 @@ def command_self_test(_args: argparse.Namespace) -> int:
         manual_workpaper = next((Path(tmp) / "manual-proof").glob("cop-2024-*/workpaper.json"))
         manual_data = json.loads(manual_workpaper.read_text(encoding="utf-8"))
         assert manual_data["foreign_per_usd"] == "4200"
+        assert manual_data["proof"]["saved_files"]
+        assert Path(manual_data["proof"]["workpaper_pdf"]).exists()
+
+        map_check_args = argparse.Namespace(
+            source_url=IRS_YEARLY_URL,
+            html_file=str(html_path),
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert command_map_check(map_check_args) == 0
 
     print("self-test passed")
     return 0
@@ -724,9 +859,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="published annual average",
         help="Source class, e.g. IRS table, central bank annual average, bank annual average.",
     )
-    manual.add_argument("--source-note", help="Note confirming the source labels the value as yearly/annual average.")
-    manual.add_argument("--proof-file", help="Optional local screenshot/PDF/HTML/source file to hash and reference.")
+    manual.add_argument("--source-note", required=True, help="Note confirming the source labels the value as yearly/annual average.")
+    manual.add_argument("--annual-average-confirmed", action="store_true", help="Required confirmation that the source labels the value as a yearly/annual average.")
+    manual.add_argument("--proof-file", required=True, help="Local screenshot/PDF/HTML/source proof file to copy, hash, and reference.")
     manual.set_defaults(func=command_manual)
+
+    map_check = subparsers.add_parser("map-check", help="Compare parsed IRS table rows with the hard-coded IRS currency map.")
+    map_check.add_argument("--source-url", default=IRS_YEARLY_URL, help="IRS yearly-average source URL.")
+    map_check.add_argument("--html-file", help="Use a local HTML file instead of fetching the IRS page.")
+    map_check.set_defaults(func=command_map_check)
 
     self_test = subparsers.add_parser("self-test", help="Run dependency-free parser/workpaper tests.")
     self_test.set_defaults(func=command_self_test)

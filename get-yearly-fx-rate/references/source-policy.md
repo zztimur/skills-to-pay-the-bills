@@ -57,7 +57,8 @@ Every answered rate needs a retained local workpaper folder containing:
 
 - `workpaper.md`
 - `workpaper.json`
-- At least one proof artifact where feasible: screenshot, PDF save/print, HTML snapshot, downloaded source data, or externally retained proof path.
+- `workpaper.pdf`
+- At least one saved source proof artifact: screenshot, PDF save/print, HTML snapshot, downloaded source data, or equivalent retained source file.
 
 Record:
 
@@ -71,6 +72,17 @@ Record:
 
 The proof packet supports later review. It is not automatically attached to a tax return.
 
+For non-IRS/manual sources, require both:
+
+- Explicit confirmation that the source labels the rate as a yearly/annual average.
+- A local proof file saved before the workpaper is created.
+
+Do not accept a bare URL as the only proof for a manual non-IRS source.
+
+## IRS Map Refresh
+
+The helper script intentionally uses an IRS row-to-ISO map because the IRS table labels currencies by country and generic names such as `Dollar` or `Peso`. When the IRS table changes, run `scripts/get_yearly_fx_rate.py map-check`. If it reports unmapped rows, update `IRS_ROWS_BY_CODE` and any aliases needed for user-friendly currency names, then rerun the self-test and map check.
+
 ## Failure Rules
 
 Ask for clarification when:
@@ -83,5 +95,7 @@ Stop instead of answering when:
 
 - No published annual average can be found.
 - Only daily/monthly/quarterly data is available and no user/preparer custom rate was supplied.
+- A manual non-IRS source has no saved local proof artifact.
+- A manual non-IRS source has not been explicitly confirmed as a published yearly/annual average.
 - Rate direction cannot be determined.
 - The result would require tax advice beyond identifying and documenting a published rate.
