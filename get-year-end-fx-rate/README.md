@@ -115,7 +115,10 @@ After script changes:
 
 ```bash
 python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py self-test
+python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py map-check --year 2025 --currency AED --strict
 ```
+
+The script keeps a Treasury row-to-ISO map because Fiscal Data uses labels like `United Arab Emirates-Dirham`, not ISO codes like `AED`. Use targeted `map-check --currency <ISO>` when adding a currency. Use untargeted `map-check --year <year>` when you want to see the broader backlog of Treasury rows this helper does not map yet. If `map-check` reports unmapped rows that users actually need, update `TREASURY_ROWS_BY_CODE`, add only unambiguous aliases, and put that currency into `self-test`.
 
 If the PDF layout changes, render a sample PDF and actually look at it. A byte-valid PDF is nice. A readable workpaper is the point.
 

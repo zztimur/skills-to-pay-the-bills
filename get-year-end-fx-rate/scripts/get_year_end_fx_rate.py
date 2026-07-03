@@ -33,6 +33,7 @@ TREASURY_API_URL = (
 )
 
 TREASURY_ROWS_BY_CODE = {
+    "AED": {"country": "United Arab Emirates", "currency": "Dirham"},
     "ARS": {"country": "Argentina", "currency": "Peso"},
     "AUD": {"country": "Australia", "currency": "Dollar"},
     "BRL": {"country": "Brazil", "currency": "Real"},
@@ -91,6 +92,9 @@ ALIASES = {
     "singapore dollar": "SGD",
     "turkish lira": "TRY",
     "taiwan dollar": "TWD",
+    "uae dirham": "AED",
+    "emirati dirham": "AED",
+    "united arab emirates dirham": "AED",
     "uruguayan peso": "UYU",
     "south african rand": "ZAR",
     "rand": "ZAR",
@@ -101,6 +105,7 @@ AMBIGUOUS_TERMS = {
     "dollar": "Use a country or ISO code, for example CAD, AUD, NZD, SGD, HKD, or TWD.",
     "pound": "Use a country or ISO code, for example GBP.",
     "franc": "Use a country or ISO code, for example CHF.",
+    "dirham": "Use a country or ISO code, for example AED or MAD.",
     "ruble": "Use a country or ISO code, for example RUB.",
     "krone": "Use a country or ISO code, for example DKK or NOK.",
     "krona": "Use a country or ISO code, for example SEK.",
@@ -260,6 +265,27 @@ def treasury_query_url(code: str, year: int, api_url: str) -> str:
     return api_url + "?" + urlencode(params)
 
 
+def treasury_rows_url(year: int, api_url: str) -> str:
+    params = {
+        "fields": ",".join(
+            [
+                "record_date",
+                "country",
+                "currency",
+                "country_currency_desc",
+                "exchange_rate",
+                "effective_date",
+                "src_line_nbr",
+                "record_calendar_year",
+            ]
+        ),
+        "filter": f"record_date:eq:{year}-12-31",
+        "sort": "country,currency,src_line_nbr",
+        "page[size]": "5000",
+    }
+    return api_url + "?" + urlencode(params)
+
+
 def load_json_text(query_url: str, api_file: str | None) -> tuple[str, str]:
     if api_file:
         path = Path(api_file)
@@ -287,6 +313,28 @@ def parse_json_payload(json_text: str) -> dict[str, object]:
     return payload
 
 
+def treasury_records_from_payload(json_text: str) -> list[dict[str, object]]:
+    payload = parse_json_payload(json_text)
+    records = payload.get("data")
+    if not isinstance(records, list):
+        raise RateError("Treasury/Fiscal Data response did not contain a data list.", 3)
+    return [record for record in records if isinstance(record, dict)]
+
+
+def treasury_row_pair(record: dict[str, object]) -> tuple[str, str]:
+    return (clean_text(record.get("country")).lower(), clean_text(record.get("currency")).lower())
+
+
+def mapped_treasury_pairs() -> set[tuple[str, str]]:
+    pairs = set()
+    for mapping in TREASURY_ROWS_BY_CODE.values():
+        country = mapping.get("country")
+        currency = mapping.get("currency")
+        if country and currency:
+            pairs.add((clean_text(country).lower(), clean_text(currency).lower()))
+    return pairs
+
+
 def find_treasury_rate(currency_raw: str, year: int, json_text: str, query_url: str) -> TreasuryRate:
     code = normalize_currency(currency_raw)
     if code not in TREASURY_ROWS_BY_CODE:
@@ -296,10 +344,7 @@ def find_treasury_rate(currency_raw: str, year: int, json_text: str, query_url: 
         )
 
     mapping = TREASURY_ROWS_BY_CODE[code]
-    payload = parse_json_payload(json_text)
-    records = payload.get("data")
-    if not isinstance(records, list):
-        raise RateError("Treasury/Fiscal Data response did not contain a data list.", 3)
+    records = treasury_records_from_payload(json_text)
 
     year_end_date = f"{year}-12-31"
     matches: list[dict[str, object]] = []
@@ -771,6 +816,49 @@ def command_manual(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_map_check(args: argparse.Namespace) -> int:
+    code = normalize_currency(args.currency) if args.currency else None
+    query_url = treasury_rows_url(args.year, args.api_url)
+    json_text, source_ref = load_json_text(query_url, args.api_file)
+    records = treasury_records_from_payload(json_text)
+    year_end_date = f"{args.year}-12-31"
+    rows = [record for record in records if clean_text(record.get("record_date")) == year_end_date]
+
+    if code:
+        if code not in TREASURY_ROWS_BY_CODE:
+            raise RateError(f"No Treasury/Fiscal Data row mapping is known for {code}.", 4)
+        mapping = TREASURY_ROWS_BY_CODE[code]
+        expected_pair = (clean_text(mapping.get("country")).lower(), clean_text(mapping.get("currency")).lower())
+        matches = [record for record in rows if treasury_row_pair(record) == expected_pair]
+        print(f"Parsed Treasury/Fiscal Data rows for {year_end_date}: {len(rows)} from {source_ref}")
+        if matches:
+            desc = clean_text(matches[0].get("country_currency_desc")) or f"{mapping.get('country')}-{mapping.get('currency')}"
+            print(f"{code} mapped row found: {desc}")
+            return 0
+        print(f"{code} mapped row not found in Treasury/Fiscal Data for {year_end_date}.")
+        return 4 if args.strict else 0
+
+    mapped_pairs = mapped_treasury_pairs()
+    unmapped = []
+    for record in rows:
+        pair = treasury_row_pair(record)
+        if pair not in mapped_pairs:
+            desc = clean_text(record.get("country_currency_desc")) or f"{record.get('country')}-{record.get('currency')}"
+            unmapped.append(clean_text(desc))
+
+    print(f"Parsed Treasury/Fiscal Data rows for {year_end_date}: {len(rows)} from {source_ref}")
+    print(f"Mapped rows: {len(rows) - len(unmapped)}")
+    if unmapped:
+        print("Unmapped rows:")
+        for item in sorted(set(unmapped)):
+            print(f"- {item}")
+        if args.strict:
+            return 4
+    else:
+        print("All parsed rows are represented in TREASURY_ROWS_BY_CODE.")
+    return 0
+
+
 def assert_pdf(path: Path, required_terms: Iterable[str], forbidden_terms: Iterable[str] = ()) -> None:
     data = path.read_bytes()
     assert data.startswith(b"%PDF-1."), path
@@ -789,6 +877,16 @@ def command_self_test(_args: argparse.Namespace) -> int:
         "data": [
             {
                 "record_date": "2025-12-31",
+                "country": "United Arab Emirates",
+                "currency": "Dirham",
+                "country_currency_desc": "United Arab Emirates-Dirham",
+                "exchange_rate": "3.672",
+                "effective_date": "2025-12-31",
+                "src_line_nbr": "148",
+                "record_calendar_year": "2025",
+            },
+            {
+                "record_date": "2025-12-31",
                 "country": "Colombia",
                 "currency": "Peso",
                 "country_currency_desc": "Colombia-Peso",
@@ -805,6 +903,9 @@ def command_self_test(_args: argparse.Namespace) -> int:
     rate = find_treasury_rate("colombian peso", 2025, json_text, query_url)
     assert rate.rate == Decimal("3900.25")
     assert rate.year_end_date == "2025-12-31"
+    aed_rate = find_treasury_rate("AED", 2025, json_text, treasury_query_url("AED", 2025, TREASURY_API_URL))
+    assert aed_rate.rate == Decimal("3.672")
+    assert normalize_currency("uae dirham") == "AED"
 
     foreign_per_usd, usd_per_foreign = build_rate_values(Decimal("0.25"), "usd-per-foreign")
     assert foreign_per_usd == Decimal("4")
@@ -861,6 +962,52 @@ def command_self_test(_args: argparse.Namespace) -> int:
             ],
             ["yearly average", "annual average"],
         )
+
+        aed_lookup_args = argparse.Namespace(
+            currency="AED",
+            year=2025,
+            output_root=str(Path(tmp) / "aed-proof"),
+            api_url=TREASURY_API_URL,
+            api_file=str(api_file),
+            retrieved="2026-07-03",
+        )
+        aed_lookup_output = io.StringIO()
+        with contextlib.redirect_stdout(aed_lookup_output):
+            command_lookup(aed_lookup_args)
+        assert "Rate: 1 USD = 3.672 AED year-end (2025-12-31)" in aed_lookup_output.getvalue()
+
+        map_check_args = argparse.Namespace(
+            year=2025,
+            currency="AED",
+            api_url=TREASURY_API_URL,
+            api_file=str(api_file),
+            strict=True,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert command_map_check(map_check_args) == 0
+
+        unmapped_payload = {
+            "data": [
+                {
+                    "record_date": "2025-12-31",
+                    "country": "Exampleland",
+                    "currency": "Token",
+                    "country_currency_desc": "Exampleland-Token",
+                    "exchange_rate": "12.34",
+                }
+            ]
+        }
+        unmapped_file = Path(tmp) / "unmapped.json"
+        unmapped_file.write_text(json.dumps(unmapped_payload), encoding="utf-8")
+        unmapped_args = argparse.Namespace(
+            year=2025,
+            currency=None,
+            api_url=TREASURY_API_URL,
+            api_file=str(unmapped_file),
+            strict=True,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert command_map_check(unmapped_args) == 4
 
         proof_file = Path(tmp) / "manual-source.html"
         proof_file.write_text("<p>2025-12-31 rate</p>", encoding="utf-8")
@@ -945,6 +1092,14 @@ def build_parser() -> argparse.ArgumentParser:
     manual.add_argument("--year-end-confirmed", action="store_true", help="Required confirmation that the source supports a year-end or YYYY-MM-DD rate.")
     manual.add_argument("--proof-file", help="Optional local screenshot/PDF/HTML/source proof file to copy, hash, and reference.")
     manual.set_defaults(func=command_manual)
+
+    map_check = subparsers.add_parser("map-check", help="Compare a Treasury/Fiscal Data year-end response with the hard-coded currency map.")
+    map_check.add_argument("--year", required=True, type=int, help="Calendar year to inspect.")
+    map_check.add_argument("--currency", help="Optional ISO code or unambiguous currency name to check against the map.")
+    map_check.add_argument("--api-url", default=TREASURY_API_URL, help="Treasury/Fiscal Data API endpoint.")
+    map_check.add_argument("--api-file", help="Use a local JSON response instead of fetching the API.")
+    map_check.add_argument("--strict", action="store_true", help="Exit nonzero when unmapped Treasury rows are found.")
+    map_check.set_defaults(func=command_map_check)
 
     self_test = subparsers.add_parser("self-test", help="Run dependency-free parser/workpaper tests.")
     self_test.set_defaults(func=command_self_test)

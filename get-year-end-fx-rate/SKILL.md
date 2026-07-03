@@ -57,6 +57,19 @@ Use `foreign-per-usd` when the rate means one U.S. dollar equals the foreign-cur
 
 For manual workpapers, do not run the script until the source clearly supports a year-end rate. A saved local proof file is strongly preferred; the script accepts `--proof-file` and copies/hashes it. If no proof file is available, the workpaper records that limitation.
 
+## Treasury Map Maintenance
+
+The helper uses a Treasury row-to-ISO map because Fiscal Data rows use country/currency labels, not ISO codes. When a valid Treasury-supported currency is rejected as unmapped, update `TREASURY_ROWS_BY_CODE` and any unambiguous aliases in `scripts/get_year_end_fx_rate.py`, then run:
+
+```bash
+python3 "<package-root>/scripts/get_year_end_fx_rate.py" map-check \
+  --year 2025 \
+  --currency AED \
+  --strict
+```
+
+Use `--api-file` with a saved Fiscal Data JSON response when network access is unavailable.
+
 ## Proof Packet
 
 Create a retained workpaper folder for every answered rate:
