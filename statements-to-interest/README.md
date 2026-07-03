@@ -8,7 +8,7 @@ It does the boring path on purpose:
 2. Infer the account currency and statement coverage from the institution's own statement text when possible.
 3. Extract credited interest rows.
 4. Put the evidence in JSON and a review CSV so the rows can be inspected.
-5. Apply FX only when the rows are not already USD.
+5. Apply FX only when the rows are not already USD, using `get-yearly-fx-rate` for published yearly-average proof.
 6. Generate a polished IRS-oriented PDF support packet for Schedule B, FBAR, and Form 8938 review.
 
 This is not tax advice. It is not an official IRS form. It is a support worksheet with an audit trail, which is exactly the kind of boring artifact tax work usually needs.
@@ -30,6 +30,18 @@ For a clean run, the user-facing deliverable is the PDF packet:
 The row review matters. The PDF is only as good as the rows behind it, so the JSON and CSV stay available as audit artifacts, but they should not distract from the PDF unless you ask for them.
 
 The packet should name the institution, account currency, statement periods, files reviewed, source-currency total, FX treatment, and USD reporting total. If a COP statement uses `$`, the skill should treat that as a symbol inside a COP account, not as automatic USD.
+
+## FX Dependency
+
+Published annual FX sourcing belongs to `get-yearly-fx-rate`. Run that skill for the statement currency/year, then pass its `workpaper.json` to this skill:
+
+```bash
+python statements-to-interest/scripts/statements_to_interest.py fx-prompt \
+  --input "work/example-bank-2025-interest-analysis.json" \
+  --fx-workpaper-json "work/fx-rate-proof/cop-2025-source/workpaper.json"
+```
+
+If `get-yearly-fx-rate` is unavailable or cannot produce a proof-backed annual workpaper, stop before the PDF and ask for either the dependency output or a user/preparer custom rate and source. Do not quietly rebuild annual FX source search inside this skill.
 
 ## Use It In Codex
 
@@ -73,16 +85,14 @@ python statements-to-interest/scripts/statements_to_interest.py report \
   --out "outputs/example-bank-2025-interest-support-packet.pdf"
 ```
 
-If the rows are not USD, propose an official or published yearly average exchange rate for the tax year, show the resulting USD total, and ask me to confirm that rate or send a custom rate/source. Do not freestyle the conversion, and do not generate the PDF until the rate is confirmed.
+If the rows are not USD, run `get-yearly-fx-rate` for the currency/year, show the resulting USD total and proof documents, and ask me to confirm that rate or send a custom rate/source. Do not freestyle the conversion, and do not generate the PDF until the rate is confirmed.
 
 Use `fx-prompt` to make that confirmation step explicit:
 
 ```bash
 python statements-to-interest/scripts/statements_to_interest.py fx-prompt \
   --input "work/example-bank-2025-interest-analysis.json" \
-  --fx-method posted-yearly-average \
-  --fx-rate 4200.00 \
-  --fx-source "Published yearly average exchange rate source, currency, year"
+  --fx-workpaper-json "work/fx-rate-proof/cop-2025-source/workpaper.json"
 ```
 
 After I confirm, generate the PDF:
@@ -90,15 +100,13 @@ After I confirm, generate the PDF:
 ```bash
 python statements-to-interest/scripts/statements_to_interest.py report \
   --input "work/example-bank-2025-interest-analysis.json" \
-  --fx-method posted-yearly-average \
-  --fx-rate 4200.00 \
-  --fx-source "Published yearly average exchange rate source, currency, year" \
+  --fx-workpaper-json "work/fx-rate-proof/cop-2025-source/workpaper.json" \
   --fx-rate-confirmed \
   --fx-confirmation-note "User confirmed the published yearly average rate" \
   --out "outputs/example-bank-2025-interest-support-packet.pdf"
 ```
 
-For Colombian peso statements, use a published yearly average if available. If only daily/monthly rates are available, do not calculate the annual average yourself; ask me for an official annual average or custom rate/source.
+For Colombian peso statements, use `get-yearly-fx-rate` if it can produce a published yearly-average workpaper. If only daily/monthly rates are available, do not calculate the annual average yourself; ask me for the dependency output or a custom rate/source.
 
 Use item-date spot rates only when I explicitly ask for them. When using item-date spot rates, pass a date-keyed `--fx-rates-json` file so each interest row converts with the rate for its own receipt/accrual date instead of flattening the packet into one blended rate.
 

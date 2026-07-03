@@ -39,11 +39,10 @@ If counted rows are already denominated in USD, no FX rate decision is needed.
 
 If counted rows are not denominated in USD, ask for a rate decision before generating the final PDF. Recommend one of:
 
-- IRS yearly average exchange rate for the tax year when the currency is listed on the IRS yearly-average table.
-- An official or published yearly average from a consistent source, such as a bank, central bank, tax authority, Treasury/FiscalData, Oanda, or XE.
+- A proof-backed yearly average workpaper from the `get-yearly-fx-rate` dependency. That skill decides whether IRS or another published annual source is appropriate and retains the source proof.
 - A user-provided rate and source when the user or preparer has a preferred method.
 - Spot exchange rates only when the user or preparer explicitly requests item-date conversion.
 
-Do not calculate yearly averages from daily, weekly, monthly, or intraday rates. If no official/published annual average is available, stop before report generation and ask the user/preparer for a custom rate and source.
+Do not calculate yearly averages from daily, weekly, monthly, or intraday rates. If `get-yearly-fx-rate` is unavailable or cannot produce a published annual workpaper, stop before report generation and ask the user/preparer for a custom rate and source.
 
-For non-USD rows, the report script expects `--fx-rate` as foreign currency units per 1 U.S. dollar by default. Use `--rate-direction usd-per-foreign` only if the user supplies a U.S. dollars per 1 foreign currency unit rate. The report must name the FX source and method, and must pass `--fx-rate-confirmed` only after the user confirms the proposed published yearly average or supplies a custom rate/source.
+For non-USD yearly-average rows, the report script expects `--fx-workpaper-json` from `get-yearly-fx-rate`; it reads `foreign_per_usd` from that workpaper. Use `--fx-method user-rate` with `--fx-rate`, `--fx-source`, and `--rate-direction` only when the user/preparer supplies a custom rate. The report must name the FX source and method, and must pass `--fx-rate-confirmed` only after the user confirms the proposed published yearly average workpaper or supplies a custom rate/source.
