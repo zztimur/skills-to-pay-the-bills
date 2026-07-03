@@ -7,9 +7,9 @@ It does the boring path on purpose:
 1. Read one institution's machine-readable statement PDFs for one tax year.
 2. Infer the account currency and statement coverage from the institution's own statement text when possible.
 3. Extract credited interest rows.
-4. Put the evidence in JSON and CSV so the rows can be reviewed.
+4. Put the evidence in JSON and a review CSV so the rows can be inspected.
 5. Apply FX only when the rows are not already USD.
-6. Generate a small IRS-oriented support packet for Schedule B, FBAR, and Form 8938 review.
+6. Generate a polished IRS-oriented PDF support packet for Schedule B, FBAR, and Form 8938 review.
 
 This is not tax advice. It is not an official IRS form. It is a support worksheet with an audit trail, which is exactly the kind of boring artifact tax work usually needs.
 
@@ -21,13 +21,13 @@ If the input is a pile of mixed banks, mixed years, screenshots, scans, CSVs, or
 
 ## What It Produces
 
-For a clean run, expect three useful artifacts:
+For a clean run, the user-facing deliverable is the PDF packet:
 
+- `outputs/...interest-support-packet.pdf` with the human-facing support packet.
 - `work/...interest-analysis.json` with statement metadata, extracted rows, excluded candidates, warnings, and totals.
-- `work/...interest-items.csv` for quick review in a spreadsheet.
-- `outputs/...interest-support-packet.pdf` with the human-facing packet.
+- `work/...interest-items.csv` for quick internal review in a spreadsheet.
 
-The row review matters. The PDF is only as good as the rows behind it, so the JSON and CSV are part of the output, not temporary junk.
+The row review matters. The PDF is only as good as the rows behind it, so the JSON and CSV stay available as audit artifacts, but they should not distract from the PDF unless you ask for them.
 
 The packet should name the institution, account currency, statement periods, files reviewed, source-currency total, FX treatment, and USD reporting total. If a COP statement uses `$`, the skill should treat that as a symbol inside a COP account, not as automatic USD.
 
@@ -74,6 +74,29 @@ python statements-to-interest/scripts/statements_to_interest.py report \
 ```
 
 If the rows are not USD, propose an official or published yearly average exchange rate for the tax year, show the resulting USD total, and ask me to confirm that rate or send a custom rate/source. Do not freestyle the conversion, and do not generate the PDF until the rate is confirmed.
+
+Use `fx-prompt` to make that confirmation step explicit:
+
+```bash
+python statements-to-interest/scripts/statements_to_interest.py fx-prompt \
+  --input "work/example-bank-2025-interest-analysis.json" \
+  --fx-method posted-yearly-average \
+  --fx-rate 4200.00 \
+  --fx-source "Published yearly average exchange rate source, currency, year"
+```
+
+After I confirm, generate the PDF:
+
+```bash
+python statements-to-interest/scripts/statements_to_interest.py report \
+  --input "work/example-bank-2025-interest-analysis.json" \
+  --fx-method posted-yearly-average \
+  --fx-rate 4200.00 \
+  --fx-source "Published yearly average exchange rate source, currency, year" \
+  --fx-rate-confirmed \
+  --fx-confirmation-note "User confirmed the published yearly average rate" \
+  --out "outputs/example-bank-2025-interest-support-packet.pdf"
+```
 
 For Colombian peso statements, use a published yearly average if available. If only daily/monthly rates are available, do not calculate the annual average yourself; ask me for an official annual average or custom rate/source.
 

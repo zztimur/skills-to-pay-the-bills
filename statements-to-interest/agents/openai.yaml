@@ -1,4 +1,4 @@
 interface:
   display_name: "Statements to Interest"
   short_description: "Extract statement interest for tax support"
-  default_prompt: "Use $statements-to-interest to analyze one institution's machine-readable statement PDFs for one tax year, infer account currency/institution profile, review extracted interest rows, propose an official or published yearly average FX rate when needed without calculating it yourself, ask me to confirm or provide a custom rate, and generate an IRS-oriented support packet."
+  default_prompt: "Use $statements-to-interest to analyze one institution's machine-readable statement PDFs for one tax year, infer account currency/institution profile, review extracted interest rows internally, make the PDF support packet the primary deliverable, and for non-USD rows run fx-prompt with an official or published yearly average FX rate so I can confirm it or provide a custom rate before the PDF is generated."

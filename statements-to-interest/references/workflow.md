@@ -61,7 +61,7 @@ python "<package-root>/scripts/statements_to_interest.py" extract \
 The script writes:
 
 - Analysis JSON at `--out`.
-- CSV beside the JSON unless `--csv` is supplied.
+- Review CSV beside the JSON unless `--csv` is supplied. This is for row inspection; do not make CSV the user-facing deliverable unless the user asks for it.
 - `institution_profile` with institution name, account currency, statement titles, detected periods, institution-label source, and statement count.
 
 Use `--account-currency` only when the account currency is known from file organization or statement review and the script cannot infer it. This is especially important for statements that use `$` for local currency, such as Colombian peso statements. Do not treat `$` alone as proof of USD.
@@ -76,7 +76,7 @@ For large or messy input sets, triage before extraction:
 
 ## 4. Review The Extracted Results
 
-Open the JSON and CSV before generating a report. Review these JSON fields:
+Open the JSON and review CSV before generating a report. The CSV is an internal audit/review aid; the final user-facing artifact should be the PDF packet. Review these JSON fields:
 
 - `statement_files`: files reviewed, page counts, detected periods, currency markers.
 - `institution_profile`: institution, account currency, title/period coverage, and institution-label source.
@@ -122,7 +122,7 @@ If counted rows are not USD:
 3. If the IRS table does not list the currency, use a yearly average published by a bank, central bank, tax authority, or reputable FX provider. Record the source, currency, tax year, retrieval date, and whether the source labels it as annual/yearly average.
 4. Do not calculate the yearly average yourself from daily, weekly, monthly, or intraday rates. If no official/published annual average is found, stop before the PDF and ask the user/preparer for a custom rate and source.
 5. For Colombian peso (COP), the IRS yearly-average page may not list COP. Look for a published annual average from a bank, Banco de la Republica/Superintendencia source, Treasury/FiscalData, Oanda, XE, or another reputable source. If only daily TRM data is available, do not average it yourself.
-6. Show the user the proposed yearly average rate, source, direction, and resulting USD total before generating the PDF. Ask: "Confirm this published yearly average rate, or send a custom rate/source to use instead."
+6. Show the user the proposed yearly average rate, source, direction, and resulting USD total before generating the PDF. Use `fx-prompt` to print the exact confirmation question when a candidate rate is available. Ask: "Confirm this published yearly average rate, or send a custom rate/source to use instead."
 7. Accept a user-provided custom rate and source when the user or preparer prefers it. Use `--fx-method user-rate` for custom rates.
 8. Generate the non-USD PDF only after the user confirms the proposed yearly average or provides a custom rate/source. Pass `--fx-rate-confirmed` and a concise `--fx-confirmation-note`.
 9. Confirm rate direction:
@@ -143,6 +143,18 @@ USD total using this rate: <amount>
 
 Confirm this published yearly average rate, or send a custom rate/source to use instead.
 ```
+
+Generate that prompt with:
+
+```bash
+python "<package-root>/scripts/statements_to_interest.py" fx-prompt \
+  --input "work/example-bank-2025-interest-analysis.json" \
+  --fx-method posted-yearly-average \
+  --fx-rate 4200.00 \
+  --fx-source "Published yearly average exchange rate source, currency, year, retrieved YYYY-MM-DD"
+```
+
+If the user has not confirmed yet, stop here. Do not summarize the run as complete and do not foreground the CSV/JSON as the result. Tell the user the PDF will be generated immediately after they confirm the proposed rate or provide a custom rate/source.
 
 Yearly average report example:
 
@@ -208,11 +220,13 @@ python -c 'from pypdf import PdfReader; p="outputs/example-bank-2025-interest-su
 
 ## 7. Final Response
 
-Return a concise summary with:
+If FX confirmation is still pending, do not use a final-completion response. Ask the FX confirmation/custom-rate question directly and state that the support PDF is pending that answer.
 
-- Analysis JSON path.
-- Interest CSV path.
+After generating and verifying the PDF, return a concise summary with the PDF first:
+
 - Support PDF path.
+- Analysis JSON path.
+- Interest CSV path only if the user asked for CSV or wants the audit artifact.
 - Institution/profile details used in the packet, especially account currency and statement coverage.
 - Row count.
 - Source-currency total.
@@ -230,9 +244,8 @@ Source total: USD 59.55
 USD total: USD 59.55
 
 Files:
-- JSON: ...
-- CSV: ...
 - PDF: ...
+- JSON: ...
 
 Review flags: institution label was found only in the file path; verify the PDFs are all from Example Bank.
 ```
@@ -248,7 +261,7 @@ Review flags: institution label was found only in the file path; verify the PDFs
 | Multiple currencies detected | Review rows and split the job if multiple currencies are truly present. |
 | `UNKNOWN` currency | Do not report until currency is confirmed. |
 | `$` rows from a COP statement are labeled USD | Rerun with the current parser and/or pass `--account-currency COP`; `$` alone is not proof of USD when the statement account currency is COP. |
-| Non-USD report asks for FX | Propose a published yearly average, ask the user to confirm it or provide a custom rate/source, then rerun with `--fx-rate-confirmed`. |
+| Non-USD report asks for FX | Run `fx-prompt` with the proposed published yearly average, ask the user to confirm it or provide a custom rate/source, then rerun `report` with `--fx-rate-confirmed`. |
 | Only daily/monthly rates are available | Do not calculate an annual average yourself; ask the user/preparer for an official annual average or custom rate/source. |
 | Different interest dates need different FX rates | Use `--fx-rates-json` only when the user or preparer explicitly requests daily spot rates. |
 | Extracted amount looks like a balance | Do not report blindly; inspect evidence text and ask the user to confirm before editing source data or relying on the row. |

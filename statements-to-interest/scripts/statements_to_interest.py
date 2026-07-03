@@ -935,26 +935,38 @@ def display_file_name(value: object) -> str:
 
 def make_styles():
     styles = getSampleStyleSheet()
+    styles["Normal"].fontSize = 9
+    styles["Normal"].leading = 12
     styles.add(
         ParagraphStyle(
-            name="TitleCenter",
+            name="HeroTitle",
             parent=styles["Title"],
             alignment=TA_CENTER,
-            textColor=colors.HexColor("#1F4E79"),
-            fontSize=20,
-            leading=24,
-            spaceAfter=8,
+            textColor=colors.white,
+            fontSize=22,
+            leading=26,
+            spaceAfter=3,
         )
     )
     styles.add(
         ParagraphStyle(
-            name="Subtitle",
+            name="HeroSubtitle",
             parent=styles["Normal"],
             alignment=TA_CENTER,
-            textColor=colors.HexColor("#555555"),
+            textColor=colors.HexColor("#E6F3F3"),
             fontSize=9,
             leading=12,
-            spaceAfter=16,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="SectionTitle",
+            parent=styles["Heading2"],
+            textColor=colors.HexColor("#0F3D3E"),
+            fontSize=12,
+            leading=15,
+            spaceBefore=8,
+            spaceAfter=6,
         )
     )
     styles.add(
@@ -973,20 +985,46 @@ def make_styles():
             leading=8,
         )
     )
+    styles.add(
+        ParagraphStyle(
+            name="TableHeader",
+            parent=styles["Cell"],
+            textColor=colors.white,
+            fontName="Helvetica-Bold",
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="KpiCard",
+            parent=styles["Normal"],
+            alignment=TA_CENTER,
+            fontSize=8,
+            leading=12,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="BoxText",
+            parent=styles["Normal"],
+            fontSize=8,
+            leading=11,
+        )
+    )
     return styles
 
 
-def as_paragraphs(rows: list[list[object]], styles) -> list[list[object]]:
+def as_paragraphs(rows: list[list[object]], styles, header: bool = True) -> list[list[object]]:
     converted: list[list[object]] = []
-    for row in rows:
-        converted.append([Paragraph(escape(cell), styles["Cell"]) for cell in row])
+    for index, row in enumerate(rows):
+        style = styles["TableHeader"] if header and index == 0 else styles["Cell"]
+        converted.append([Paragraph(escape(cell), style) for cell in row])
     return converted
 
 
 def add_table(story: list, rows: list[list[object]], widths: list[float], styles, header: bool = True) -> None:
-    table = Table(as_paragraphs(rows, styles), colWidths=widths, repeatRows=1 if header else 0)
+    table = Table(as_paragraphs(rows, styles, header=header), colWidths=widths, repeatRows=1 if header else 0)
     table_style = [
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D9E2EC")),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D6E4E5")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 4),
         ("RIGHTPADDING", (0, 0), (-1, -1), 4),
@@ -996,8 +1034,9 @@ def add_table(story: list, rows: list[list[object]], widths: list[float], styles
     if header:
         table_style.extend(
             [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E79")),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F3D3E")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7FAFC")]),
             ]
         )
     table.setStyle(TableStyle(table_style))
@@ -1005,8 +1044,98 @@ def add_table(story: list, rows: list[list[object]], widths: list[float], styles
     story.append(Spacer(1, 0.16 * inch))
 
 
+def add_hero(story: list, styles, institution: str, tax_year: object) -> None:
+    title = "Foreign Bank Interest Support Packet"
+    subtitle = f"{institution or 'Institution not recorded'} - {tax_year or 'tax year not recorded'}"
+    hero = Table(
+        [
+            [Paragraph(escape(title), styles["HeroTitle"])],
+            [
+                Paragraph(
+                    escape(f"{subtitle}. For U.S. tax return support only; not an official IRS form."),
+                    styles["HeroSubtitle"],
+                )
+            ],
+        ],
+        colWidths=[7.4 * inch],
+    )
+    hero.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0F3D3E")),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#0A2C2D")),
+                ("TOPPADDING", (0, 0), (-1, 0), 13),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 2),
+                ("TOPPADDING", (0, 1), (-1, 1), 0),
+                ("BOTTOMPADDING", (0, 1), (-1, 1), 13),
+                ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+            ]
+        )
+    )
+    story.append(hero)
+    story.append(Spacer(1, 0.18 * inch))
+
+
+def add_kpi_cards(story: list, items: list[tuple[str, str]], styles) -> None:
+    cells = []
+    for label, value in items:
+        cells.append(
+            Paragraph(
+                f'<font color="#667085">{escape(label)}</font><br/><font size="15" color="#0F3D3E"><b>{escape(value)}</b></font>',
+                styles["KpiCard"],
+            )
+        )
+    card_width = 7.4 * inch / max(len(items), 1)
+    table = Table([cells], colWidths=[card_width for _item in items])
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7FAFC")),
+                ("BOX", (0, 0), (-1, -1), 0.4, colors.HexColor("#D6E4E5")),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D6E4E5")),
+                ("TOPPADDING", (0, 0), (-1, -1), 9),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+                ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+            ]
+        )
+    )
+    story.append(table)
+    story.append(Spacer(1, 0.18 * inch))
+
+
+def add_note_box(story: list, title: str, lines: list[str], styles, tone: str = "info") -> None:
+    palette = {
+        "warning": ("#FFF8E6", "#F4C95D", "#7A4F00"),
+        "info": ("#F0F7F7", "#B8D8D8", "#0F3D3E"),
+    }
+    background, border, title_color = palette.get(tone, palette["info"])
+    body = f'<font color="{title_color}"><b>{escape(title)}</b></font>'
+    if lines:
+        body = f"{body}<br/>" + "<br/>".join(escape(line) for line in lines)
+    box = Table([[Paragraph(body, styles["BoxText"])]], colWidths=[7.4 * inch])
+    box.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(background)),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor(border)),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ]
+        )
+    )
+    story.append(box)
+    story.append(Spacer(1, 0.14 * inch))
+
+
 def page_footer(canvas, doc) -> None:
     canvas.saveState()
+    canvas.setStrokeColor(colors.HexColor("#D6E4E5"))
+    canvas.setLineWidth(0.25)
+    canvas.line(0.55 * inch, 0.5 * inch, 7.95 * inch, 0.5 * inch)
     canvas.setFont("Helvetica", 7)
     canvas.setFillColor(colors.HexColor("#666666"))
     canvas.drawString(0.55 * inch, 0.35 * inch, "Generated support packet - not an official IRS form.")
@@ -1074,7 +1203,7 @@ def load_fx_rates_json(path: Path, fallback_method: str | None, fallback_source:
 def reject_self_calculated_posted_average(args: argparse.Namespace) -> None:
     if args.fx_method != "posted-yearly-average":
         return
-    evidence = normalize_text(" ".join([args.fx_source or "", args.fx_confirmation_note or ""]))
+    evidence = normalize_text(" ".join([getattr(args, "fx_source", "") or "", getattr(args, "fx_confirmation_note", "") or ""]))
     matched = [term for term in SELF_CALCULATED_AVERAGE_TERMS if term in evidence]
     if matched:
         raise SystemExit(
@@ -1084,10 +1213,49 @@ def reject_self_calculated_posted_average(args: argparse.Namespace) -> None:
         )
 
 
-def command_report(args: argparse.Namespace) -> int:
-    if colors is None:
-        raise SystemExit("reportlab is required. Run with a Python environment that has reportlab installed.")
-    input_path = Path(args.input)
+def build_fx_confirmation_prompt(args: argparse.Namespace, analysis: dict, currency: str, foreign_total: Decimal) -> str:
+    institution = analysis.get("institution", "the institution")
+    tax_year = analysis.get("tax_year", "the tax year")
+    method = FX_METHOD_LABELS.get(args.fx_method or "", args.fx_method or "not supplied")
+    lines = [
+        f"FX confirmation needed before I generate the PDF for {institution} {tax_year}.",
+        "",
+    ]
+    if args.fx_rate:
+        fx_rate = parse_decimal(args.fx_rate, "--fx-rate")
+        if args.rate_direction == "foreign-per-usd":
+            usd_total = foreign_total / fx_rate
+            rate_line = f"{money(fx_rate)} {currency} per 1 USD"
+        else:
+            usd_total = foreign_total * fx_rate
+            rate_line = f"{money(fx_rate)} USD per 1 {currency}"
+        lines.extend(
+            [
+                "I found/propose this FX rate:",
+                f"Rate: {rate_line}",
+                f"Source: {args.fx_source or 'No source supplied'}",
+                f"Method: {method}",
+                f"Source-currency total: {money(foreign_total)} {currency}",
+                f"USD total using this rate: USD {money(usd_total)}",
+                "",
+                'Reply "confirm" to use this rate, or send a custom rate/source instead.',
+                'Custom format: rate: <number>, direction: foreign-per-usd or usd-per-foreign, source: <source>, method: user-rate.',
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"The extracted interest total is {money(foreign_total)} {currency}, so a USD conversion is required.",
+                "No published yearly-average FX rate was supplied to the report command.",
+                "",
+                "Send a published yearly-average rate/source to propose, or send a custom rate/source from you or your preparer.",
+                'Custom format: rate: <number>, direction: foreign-per-usd or usd-per-foreign, source: <source>, method: user-rate.',
+            ]
+        )
+    return "\n".join(lines)
+
+
+def load_analysis_payload(input_path: Path) -> dict:
     try:
         analysis = json.loads(input_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -1096,6 +1264,10 @@ def command_report(args: argparse.Namespace) -> int:
         raise SystemExit(f"Input analysis JSON is invalid: {input_path} ({exc.msg} at line {exc.lineno}, column {exc.colno})") from None
     if not isinstance(analysis, dict):
         raise SystemExit(f"Input analysis JSON must be an object: {input_path}")
+    return analysis
+
+
+def report_rows_and_total(analysis: dict, input_path: Path) -> tuple[list[dict], dict[str, str], str, Decimal]:
     rows = analysis.get("rows", [])
     if not isinstance(rows, list):
         raise SystemExit(f"Input analysis JSON has invalid 'rows'; expected a list: {input_path}")
@@ -1110,6 +1282,31 @@ def command_report(args: argparse.Namespace) -> int:
         raise SystemExit(f"Report supports one currency per run. Found currencies: {', '.join(currencies)}")
     currency = currencies[0] if currencies else ""
     foreign_total = Decimal(totals[currency]) if currency else Decimal("0")
+    return rows, totals, currency, foreign_total
+
+
+def command_fx_prompt(args: argparse.Namespace) -> int:
+    input_path = Path(args.input)
+    analysis = load_analysis_payload(input_path)
+    _rows, _totals, currency, foreign_total = report_rows_and_total(analysis, input_path)
+    if foreign_total == 0:
+        print("No interest rows were counted, so no FX confirmation is needed.")
+        return 0
+    if currency == "USD":
+        print("Counted interest rows are already denominated in USD, so no FX confirmation is needed.")
+        return 0
+    if args.fx_method == "posted-yearly-average":
+        reject_self_calculated_posted_average(args)
+    print(build_fx_confirmation_prompt(args, analysis, currency, foreign_total))
+    return 0
+
+
+def command_report(args: argparse.Namespace) -> int:
+    if colors is None:
+        raise SystemExit("reportlab is required. Run with a Python environment that has reportlab installed.")
+    input_path = Path(args.input)
+    analysis = load_analysis_payload(input_path)
+    rows, _totals, currency, foreign_total = report_rows_and_total(analysis, input_path)
 
     fx_rate = Decimal("0")
     usd_total = Decimal("0")
@@ -1125,10 +1322,18 @@ def command_report(args: argparse.Namespace) -> int:
             fx_note = "No FX conversion was needed because the counted interest rows are already denominated in USD."
         else:
             if not args.fx_rate_confirmed:
-                raise SystemExit(
-                    "--fx-rate-confirmed is required for non-USD reports. "
-                    "Prompt the user to confirm the proposed yearly average rate or provide a custom rate/source before generating the PDF."
-                )
+                if args.fx_method == "posted-yearly-average":
+                    try:
+                        reject_self_calculated_posted_average(args)
+                    except SystemExit as exc:
+                        print(str(exc), file=sys.stderr)
+                        print(
+                            "Ask the user/preparer for a published annual average or custom rate/source before generating the PDF.",
+                            file=sys.stderr,
+                        )
+                        return 2
+                print(build_fx_confirmation_prompt(args, analysis, currency, foreign_total), file=sys.stderr)
+                return 2
             fx_confirmation = args.fx_confirmation_note or "User confirmed the FX rate before report generation."
             row_fx_rates = load_fx_rates_json(Path(args.fx_rates_json), args.fx_method, args.fx_source, args.rate_direction) if args.fx_rates_json else {}
             if row_fx_rates:
@@ -1197,19 +1402,25 @@ def command_report(args: argparse.Namespace) -> int:
     )
     styles = make_styles()
     story: list = []
-    story.append(Paragraph("Foreign Bank Interest Support Packet", styles["TitleCenter"]))
-    story.append(
-        Paragraph(
-            "For U.S. tax return support only. This is not an official IRS form and not tax or legal advice.",
-            styles["Subtitle"],
-        )
-    )
 
     profile = analysis.get("institution_profile", {})
     account_currency = profile.get("account_currency", "") or currency
     profile_periods = ", ".join(profile.get("detected_periods", [])) or "Not detected"
     profile_titles = ", ".join(profile.get("statement_titles", [])) or "Not detected"
     label_sources = ", ".join(profile.get("institution_label_sources", [])) or "Not recorded"
+    source_total = f"{money(foreign_total)} {currency}".strip() if currency else "0.00"
+    usd_total_label = f"USD {money(usd_total)}" if foreign_total else "USD 0.00"
+    add_hero(story, styles, str(analysis.get("institution", "")), analysis.get("tax_year", ""))
+    add_kpi_cards(
+        story,
+        [
+            ("Interest rows", str(len(rows))),
+            ("Source total", source_total),
+            ("USD support total", usd_total_label),
+        ],
+        styles,
+    )
+    story.append(Paragraph("Packet Summary", styles["SectionTitle"]))
     summary_rows = [
         ["Field", "Value"],
         ["Institution", analysis.get("institution", "")],
@@ -1220,14 +1431,14 @@ def command_report(args: argparse.Namespace) -> int:
         ["Institution label source", label_sources],
         ["Statement files reviewed", str(len(analysis.get("statement_files", [])))],
         ["Interest rows counted", str(len(rows))],
-        ["Source-currency total", f"{money(foreign_total)} {currency}".strip()],
+        ["Source-currency total", source_total],
         ["USD conversion", fx_note],
         ["FX confirmation", fx_confirmation or "Not applicable"],
-        ["USD total for reporting support", f"USD {money(usd_total)}" if foreign_total else "USD 0.00"],
+        ["USD total for reporting support", usd_total_label],
     ]
     add_table(story, summary_rows, [2.1 * inch, 5.1 * inch], styles)
 
-    story.append(Paragraph("Statements Reviewed", styles["Heading2"]))
+    story.append(Paragraph("Statements Reviewed", styles["SectionTitle"]))
     file_rows = [["File", "Pages", "Detected periods", "Account currency", "Currency markers"]]
     for item in analysis.get("statement_files", []):
         file_rows.append(
@@ -1241,7 +1452,7 @@ def command_report(args: argparse.Namespace) -> int:
         )
     add_table(story, file_rows, [2.55 * inch, 0.45 * inch, 1.75 * inch, 1.05 * inch, 1.4 * inch], styles)
 
-    story.append(Paragraph("Interest Rows Counted", styles["Heading2"]))
+    story.append(Paragraph("Interest Rows Counted", styles["SectionTitle"]))
     if rows:
         interest_rows = [["Date", "Period", "Description", "Foreign amount", "USD", "Source"]]
         for index, row in enumerate(rows):
@@ -1267,7 +1478,7 @@ def command_report(args: argparse.Namespace) -> int:
         story.append(Spacer(1, 0.12 * inch))
 
     excluded = analysis.get("excluded_candidates", [])
-    story.append(Paragraph("Ambiguous or Excluded Items", styles["Heading2"]))
+    story.append(Paragraph("Ambiguous or Excluded Items", styles["SectionTitle"]))
     if excluded:
         excluded_rows = [["Source", "Evidence", "Reason"]]
         for item in excluded[:80]:
@@ -1285,13 +1496,10 @@ def command_report(args: argparse.Namespace) -> int:
 
     warnings = analysis.get("warnings", [])
     if warnings:
-        story.append(Paragraph("Warnings", styles["Heading2"]))
-        for warning in warnings:
-            story.append(Paragraph(f"- {escape(warning)}", styles["Normal"]))
-        story.append(Spacer(1, 0.12 * inch))
+        add_note_box(story, "Warnings for preparer review", warnings, styles, tone="warning")
 
     story.append(PageBreak())
-    story.append(Paragraph("IRS-Oriented Review Notes", styles["Heading2"]))
+    story.append(Paragraph("IRS-Oriented Review Notes", styles["SectionTitle"]))
     notes = [
         "Review Schedule B applicability if taxable interest is present, if total taxable interest and ordinary dividends exceed the Schedule B threshold, or if foreign-account questions apply.",
         "Review Form 1040 or 1040-SR taxable interest reporting with the preparer or tax software.",
@@ -1302,7 +1510,7 @@ def command_report(args: argparse.Namespace) -> int:
         story.append(Paragraph(f"- {escape(note)}", styles["Normal"]))
     story.append(Spacer(1, 0.16 * inch))
 
-    story.append(Paragraph("Source Links", styles["Heading2"]))
+    story.append(Paragraph("Source Links", styles["SectionTitle"]))
     sources = [
         "Schedule B: https://www.irs.gov/forms-pubs/about-schedule-b-form-1040",
         "Publication 550: https://www.irs.gov/publications/p550",
@@ -1396,6 +1604,23 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--out", required=True, help="Output JSON path, e.g. work/interest-analysis.json.")
     extract.add_argument("--csv", help="Optional CSV path. Defaults to interest-items.csv beside the JSON.")
     extract.set_defaults(func=command_extract)
+
+    fx_prompt = subparsers.add_parser("fx-prompt", help="Print the user-facing FX confirmation prompt for non-USD rows.")
+    fx_prompt.add_argument("--input", required=True, help="Input interest-analysis.json.")
+    fx_prompt.add_argument(
+        "--fx-method",
+        choices=["irs-yearly-average", "posted-daily-spot", "posted-yearly-average", "user-rate"],
+        help="Proposed FX method.",
+    )
+    fx_prompt.add_argument("--fx-rate", help="Proposed exchange rate. Default direction is foreign currency units per 1 USD.")
+    fx_prompt.add_argument("--fx-source", default="", help="Human-readable FX source label.")
+    fx_prompt.add_argument(
+        "--rate-direction",
+        choices=["foreign-per-usd", "usd-per-foreign"],
+        default="foreign-per-usd",
+        help="Interpretation of --fx-rate. Defaults to IRS table direction.",
+    )
+    fx_prompt.set_defaults(func=command_fx_prompt)
 
     report = subparsers.add_parser("report", help="Generate the IRS-oriented support packet PDF.")
     report.add_argument("--input", required=True, help="Input interest-analysis.json.")

@@ -32,9 +32,19 @@ python "<package-root>/scripts/statements_to_interest.py" extract \
   --out work/interest-analysis.json
 ```
 
-Review the JSON and CSV before reporting. Confirm the `institution_profile`, account currency, statement titles, and statement periods. Do not invent missing rows. Ask for confirmation when rows are low confidence, ambiguous, out of scope, when the institution label was found only in a file path, or when account currency cannot be inferred.
+Review the JSON and review CSV before reporting. Treat the CSV as an internal row-review artifact, not the user-facing deliverable unless the user asks for it. Confirm the `institution_profile`, account currency, statement titles, and statement periods. Do not invent missing rows. Ask for confirmation when rows are low confidence, ambiguous, out of scope, when the institution label was found only in a file path, or when account currency cannot be inferred.
 
-For non-USD rows, default to an official or published yearly average exchange rate for the tax year. Accept annual averages published by the IRS, a bank, central bank, tax authority, or reputable FX provider. Do not calculate the yearly average yourself from daily/monthly data. If no published annual average is found, ask the user for a rate/source instead of deriving one. Prompt the user with the proposed rate, source, direction, and resulting USD total; ask them to confirm that rate or provide a custom rate/source before generating the PDF. Do not generate a non-USD PDF until the user confirms or supplies a custom rate. Pass `--fx-rate-confirmed` only after that confirmation:
+For non-USD rows, default to an official or published yearly average exchange rate for the tax year. Accept annual averages published by the IRS, a bank, central bank, tax authority, or reputable FX provider. Do not calculate the yearly average yourself from daily/monthly data. If no published annual average is found, ask the user for a rate/source instead of deriving one. Prompt the user with the proposed rate, source, direction, and resulting USD total; ask them to confirm that rate or provide a custom rate/source before generating the PDF. Use the `fx-prompt` command to produce the exact user-facing confirmation question when a candidate rate is available:
+
+```bash
+python "<package-root>/scripts/statements_to_interest.py" fx-prompt \
+  --input work/interest-analysis.json \
+  --fx-method posted-yearly-average \
+  --fx-rate 4200.00 \
+  --fx-source "Published yearly average exchange rate source, currency, year"
+```
+
+When the FX gate is reached, do not present JSON/CSV as the completed result. Ask the confirmation/custom-rate question and make clear that the PDF is pending until the user answers. Do not generate a non-USD PDF until the user confirms or supplies a custom rate. Pass `--fx-rate-confirmed` only after that confirmation:
 
 ```bash
 python "<package-root>/scripts/statements_to_interest.py" report \
@@ -72,7 +82,7 @@ python "<package-root>/scripts/statements_to_interest.py" report \
 
 Read `references/irs-interest-reporting.md` when writing IRS-oriented notes, explaining Schedule B/FBAR/Form 8938 review flags, or refreshing source-link wording.
 
-The final answer should include the JSON, CSV, and PDF paths; the row count and source-currency total; the USD total; and any warnings or manual-review flags.
+The final answer after a completed run should lead with the PDF path, then include the JSON path, row count, source-currency total, USD total, and any warnings or manual-review flags. Mention the CSV only as an internal review artifact unless the user asks for it.
 
 ## Runtime
 

@@ -14,8 +14,8 @@ Use the package root `SKILL.md` as the control plane and read `references/workfl
 3. Enforce one institution and one tax year.
 4. Use machine-readable text PDFs only.
 5. Run `scripts/statements_to_interest.py` exactly as described in `references/workflow.md`.
-6. Review JSON/CSV outputs, account currency, institution profile, and warnings before generating the PDF.
-7. For non-USD rows, propose an official/published yearly average rate for the tax year, show the USD total, and ask the user to confirm it or provide a custom rate/source before reporting. Do not calculate the annual average yourself from daily/monthly data. Pass `--fx-rate-confirmed` only after confirmation; use `--fx-rates-json` only when the user explicitly requests item-date spot rates.
-8. Return JSON, CSV, PDF, institution/profile details, totals, and review flags.
+6. Review JSON and the review CSV internally, then make the PDF packet the user-facing deliverable.
+7. For non-USD rows, propose an official/published yearly average rate for the tax year, run `fx-prompt` to show the USD total, and ask the user to confirm it or provide a custom rate/source before reporting. Do not calculate the annual average yourself from daily/monthly data. Pass `--fx-rate-confirmed` only after confirmation; use `--fx-rates-json` only when the user explicitly requests item-date spot rates.
+8. If FX confirmation is pending, ask the confirmation/custom-rate question and state that the PDF is pending. After confirmation, generate and verify the PDF, then return the PDF first with totals and review flags. Mention CSV only as an audit artifact if useful or requested.
 
 Do not prepare official IRS forms and do not give tax advice.
