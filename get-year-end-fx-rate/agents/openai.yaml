@@ -1,0 +1,4 @@
+interface:
+  display_name: "Get Year-End FX Rate"
+  short_description: "Find a cited FBAR year-end FX rate"
+  default_prompt: "Use $get-year-end-fx-rate to find a Treasury/Fiscal Data year-end USD exchange rate for one currency and calendar year, or create a confirmed manual fallback proof packet."
