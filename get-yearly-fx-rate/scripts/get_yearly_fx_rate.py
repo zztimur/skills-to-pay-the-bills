@@ -395,51 +395,343 @@ def sha256_file(path: Path) -> str:
 
 
 def escape_pdf_text(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    normalized = clean_text(str(value))
+    return normalized.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
 def wrap_text(value: str, width: int = 92) -> list[str]:
-    words = value.split()
+    max_width = max(8, width)
+    words = clean_text(str(value)).split()
     if not words:
         return [""]
     lines: list[str] = []
-    current = words[0]
-    for word in words[1:]:
-        if len(current) + 1 + len(word) <= width:
-            current += " " + word
-        else:
-            lines.append(current)
-            current = word
-    lines.append(current)
+    current = ""
+    for word in words:
+        chunks = [word[index : index + max_width] for index in range(0, len(word), max_width)] or [word]
+        for chunk in chunks:
+            if not current:
+                current = chunk
+            elif len(current) + 1 + len(chunk) <= max_width:
+                current += " " + chunk
+            else:
+                lines.append(current)
+                current = chunk
+    if current:
+        lines.append(current)
     return lines
 
 
-def simple_pdf_bytes(lines: list[str]) -> bytes:
-    page_width = 612
-    page_height = 792
-    margin_x = 54
-    start_y = 738
-    line_height = 14
-    lines_per_page = int((start_y - 54) / line_height)
-    pages = [lines[index : index + lines_per_page] for index in range(0, len(lines), lines_per_page)]
-    if not pages:
-        pages = [[""]]
+PDF_PAGE_WIDTH = 612
+PDF_PAGE_HEIGHT = 792
+PDF_MARGIN_X = 54
+PDF_INNER_WIDTH = PDF_PAGE_WIDTH - (PDF_MARGIN_X * 2)
+PDF_BOTTOM_MARGIN = 54
+PDF_COLOR_INK = (0.105, 0.145, 0.215)
+PDF_COLOR_MUTED = (0.365, 0.415, 0.485)
+PDF_COLOR_RULE = (0.815, 0.840, 0.880)
+PDF_COLOR_PANEL = (0.965, 0.978, 0.992)
+PDF_COLOR_ACCENT = (0.075, 0.265, 0.455)
+PDF_COLOR_WHITE = (1.000, 1.000, 1.000)
 
+
+def pdf_num(value: float | int) -> str:
+    return f"{float(value):.2f}".rstrip("0").rstrip(".")
+
+
+def pdf_color(rgb: tuple[float, float, float], operator: str) -> str:
+    return f"{rgb[0]:.3f} {rgb[1]:.3f} {rgb[2]:.3f} {operator}"
+
+
+def pdf_rect(
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    *,
+    fill: tuple[float, float, float] | None = None,
+    stroke: tuple[float, float, float] | None = None,
+    line_width: float = 1,
+) -> str:
+    commands = ["q"]
+    if fill:
+        commands.append(pdf_color(fill, "rg"))
+    if stroke:
+        commands.append(pdf_color(stroke, "RG"))
+        commands.append(f"{pdf_num(line_width)} w")
+    commands.append(f"{pdf_num(x)} {pdf_num(y)} {pdf_num(width)} {pdf_num(height)} re")
+    if fill and stroke:
+        commands.append("B")
+    elif fill:
+        commands.append("f")
+    else:
+        commands.append("S")
+    commands.append("Q")
+    return "\n".join(commands)
+
+
+def pdf_line(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    *,
+    stroke: tuple[float, float, float] = PDF_COLOR_RULE,
+    line_width: float = 0.7,
+) -> str:
+    return "\n".join(
+        [
+            "q",
+            pdf_color(stroke, "RG"),
+            f"{pdf_num(line_width)} w",
+            f"{pdf_num(x1)} {pdf_num(y1)} m",
+            f"{pdf_num(x2)} {pdf_num(y2)} l",
+            "S",
+            "Q",
+        ]
+    )
+
+
+def pdf_text(
+    text: object,
+    x: float,
+    y: float,
+    *,
+    font: str = "F1",
+    size: float = 10,
+    color: tuple[float, float, float] = PDF_COLOR_INK,
+) -> str:
+    if text is None:
+        text = ""
+    return "\n".join(
+        [
+            "BT",
+            pdf_color(color, "rg"),
+            f"/{font} {pdf_num(size)} Tf",
+            f"1 0 0 1 {pdf_num(x)} {pdf_num(y)} Tm",
+            f"({escape_pdf_text(str(text))}) Tj",
+            "ET",
+        ]
+    )
+
+
+def wrap_for_pdf(value: object, max_width: float, font_size: float) -> list[str]:
+    char_width = max(font_size * 0.52, 1)
+    return wrap_text(str(value), max(12, int(max_width / char_width)))
+
+
+class WorkpaperPdfRenderer:
+    def __init__(self, workpaper: dict[str, object]) -> None:
+        self.workpaper = workpaper
+        self.pages: list[list[str]] = []
+        self.commands: list[str] = []
+        self.y = 0.0
+        self.new_page(first=True)
+
+    def add(self, command: str) -> None:
+        if command:
+            self.commands.append(command)
+
+    def new_page(self, *, first: bool = False) -> None:
+        self.commands = []
+        self.pages.append(self.commands)
+        if first:
+            self.draw_cover_header()
+            self.y = 646
+        else:
+            self.draw_continuation_header()
+            self.y = 724
+
+    def ensure_space(self, needed: float) -> None:
+        if self.y - needed < PDF_BOTTOM_MARGIN:
+            self.new_page()
+
+    def draw_cover_header(self) -> None:
+        currency = self.workpaper["currency"]
+        year = self.workpaper["year"]
+        self.add(pdf_rect(0, 676, PDF_PAGE_WIDTH, 116, fill=PDF_COLOR_PANEL))
+        self.add(pdf_rect(0, 784, PDF_PAGE_WIDTH, 8, fill=PDF_COLOR_ACCENT))
+        self.add(pdf_text("Yearly FX Rate Workpaper", PDF_MARGIN_X, 742, font="F2", size=22))
+        self.add(
+            pdf_text(
+                "Published annual average exchange-rate support",
+                PDF_MARGIN_X,
+                720,
+                size=10,
+                color=PDF_COLOR_MUTED,
+            )
+        )
+        self.add(pdf_text(f"{currency} | {year}", PDF_MARGIN_X, 696, font="F2", size=11, color=PDF_COLOR_ACCENT))
+        self.add(pdf_rect(375, 734, 183, 24, fill=PDF_COLOR_ACCENT))
+        self.add(pdf_text("RETAINED SUPPORT WORKPAPER", 389, 742, font="F2", size=8, color=PDF_COLOR_WHITE))
+
+    def draw_continuation_header(self) -> None:
+        self.add(pdf_rect(0, 762, PDF_PAGE_WIDTH, 30, fill=PDF_COLOR_PANEL))
+        self.add(pdf_rect(0, 788, PDF_PAGE_WIDTH, 4, fill=PDF_COLOR_ACCENT))
+        self.add(
+            pdf_text(
+                f"{self.workpaper['currency']} {self.workpaper['year']} Yearly FX Rate Workpaper",
+                PDF_MARGIN_X,
+                773,
+                font="F2",
+                size=10,
+                color=PDF_COLOR_ACCENT,
+            )
+        )
+
+    def draw_rate_card(self) -> None:
+        height = 104
+        self.ensure_space(height + 20)
+        top = self.y
+        bottom = top - height
+        self.add(pdf_rect(PDF_MARGIN_X, bottom, PDF_INNER_WIDTH, height, fill=PDF_COLOR_WHITE, stroke=PDF_COLOR_RULE))
+        self.add(pdf_rect(PDF_MARGIN_X, top - 6, PDF_INNER_WIDTH, 6, fill=PDF_COLOR_ACCENT))
+        self.add(pdf_text("RATE", PDF_MARGIN_X + 20, top - 27, font="F2", size=8, color=PDF_COLOR_MUTED))
+        self.add(
+            pdf_text(
+                f"1 USD = {self.workpaper['foreign_per_usd']} {self.workpaper['currency']}",
+                PDF_MARGIN_X + 20,
+                top - 58,
+                font="F2",
+                size=23,
+            )
+        )
+        self.add(pdf_text("yearly average", PDF_MARGIN_X + 20, top - 80, size=10, color=PDF_COLOR_MUTED))
+        self.add(
+            pdf_text(
+                f"Reciprocal: 1 {self.workpaper['currency']} = {self.workpaper['usd_per_foreign']} USD",
+                PDF_MARGIN_X + 235,
+                top - 80,
+                font="F2",
+                size=10,
+                color=PDF_COLOR_ACCENT,
+            )
+        )
+        self.y = bottom - 24
+
+    def draw_section_title(self, title: str) -> None:
+        self.ensure_space(34)
+        self.add(pdf_text(title.upper(), PDF_MARGIN_X, self.y, font="F2", size=10.5, color=PDF_COLOR_ACCENT))
+        self.add(pdf_line(PDF_MARGIN_X, self.y - 9, PDF_MARGIN_X + PDF_INNER_WIDTH, self.y - 9))
+        self.y -= 26
+
+    def draw_key_value_rows(self, rows: list[tuple[str, object]], *, continuation_title: str | None = None) -> None:
+        label_x = PDF_MARGIN_X
+        value_x = PDF_MARGIN_X + 126
+        value_width = PDF_INNER_WIDTH - 126
+        for label, value in rows:
+            value_lines = wrap_for_pdf(value, value_width, 9)
+            row_height = max(23, (len(value_lines) * 11) + 10)
+            if self.y - (row_height + 4) < PDF_BOTTOM_MARGIN:
+                self.new_page()
+                if continuation_title:
+                    self.draw_section_title(f"{continuation_title} continued")
+            top = self.y
+            baseline = top - 15
+            self.add(pdf_text(label, label_x, baseline, font="F2", size=8, color=PDF_COLOR_MUTED))
+            for index, line in enumerate(value_lines):
+                self.add(pdf_text(line, value_x, baseline - (index * 11), size=9, color=PDF_COLOR_INK))
+            self.add(pdf_line(label_x, top - row_height, label_x + PDF_INNER_WIDTH, top - row_height, line_width=0.45))
+            self.y = top - row_height
+        self.y -= 12
+
+    def draw_bullets(self, items: Iterable[object]) -> None:
+        for item in items:
+            lines = wrap_for_pdf(item, PDF_INNER_WIDTH - 18, 9)
+            block_height = max(16, len(lines) * 11)
+            self.ensure_space(block_height + 4)
+            baseline = self.y - 10
+            self.add(pdf_text("-", PDF_MARGIN_X, baseline, font="F2", size=9, color=PDF_COLOR_ACCENT))
+            for index, line in enumerate(lines):
+                self.add(pdf_text(line, PDF_MARGIN_X + 16, baseline - (index * 11), size=9))
+            self.y -= block_height + 5
+        self.y -= 8
+
+    def draw_footer(self) -> None:
+        total = len(self.pages)
+        for index, commands in enumerate(self.pages, start=1):
+            commands.append(pdf_line(PDF_MARGIN_X, 36, PDF_MARGIN_X + PDF_INNER_WIDTH, 36, line_width=0.45))
+            commands.append(
+                pdf_text(
+                    f"get-yearly-fx-rate support workpaper | Page {index} of {total}",
+                    PDF_MARGIN_X,
+                    22,
+                    size=8,
+                    color=PDF_COLOR_MUTED,
+                )
+            )
+
+    def render(self) -> list[list[str]]:
+        source = self.workpaper["source"]
+        proof = self.workpaper["proof"]
+        assert isinstance(source, dict)
+        assert isinstance(proof, dict)
+        saved_files = proof.get("saved_files", [])
+        limitations = proof.get("limitations", [])
+        caveats = self.workpaper.get("caveats", [])
+
+        self.draw_rate_card()
+        self.draw_section_title("Rate Details")
+        self.draw_key_value_rows(
+            [
+                ("Currency", self.workpaper["currency"]),
+                ("Year", self.workpaper["year"]),
+                ("Published rate", f"{self.workpaper['rate']} ({self.workpaper['rate_direction']})"),
+                ("Final display", f"1 USD = {self.workpaper['foreign_per_usd']} {self.workpaper['currency']}"),
+                ("Reciprocal", f"1 {self.workpaper['currency']} = {self.workpaper['usd_per_foreign']} USD"),
+            ],
+            continuation_title="Rate Details",
+        )
+
+        self.draw_section_title("Source")
+        self.draw_key_value_rows(
+            [
+                ("Title", source.get("title")),
+                ("URL", source.get("url")),
+                ("Category", source.get("category")),
+                ("Retrieved", source.get("retrieved")),
+                ("Note", source.get("note")),
+            ],
+            continuation_title="Source",
+        )
+
+        self.draw_section_title("Proof Files")
+        proof_rows: list[tuple[str, object]] = [
+            ("Workpaper PDF", proof.get("workpaper_pdf")),
+            ("Workpaper JSON", proof.get("workpaper_json")),
+            ("Workpaper MD", proof.get("workpaper_md")),
+        ]
+        if isinstance(saved_files, list) and saved_files:
+            for index, item in enumerate(saved_files, start=1):
+                if isinstance(item, dict):
+                    proof_rows.append((f"Source proof {index}", f"{item.get('path')}; sha256: {item.get('sha256')}"))
+        else:
+            proof_rows.append(("Source proof", "No local source artifact was saved; see proof limitations."))
+        self.draw_key_value_rows(proof_rows, continuation_title="Proof Files")
+
+        if isinstance(limitations, list) and limitations:
+            self.draw_section_title("Proof Limitations")
+            self.draw_bullets(limitations)
+
+        if isinstance(caveats, list) and caveats:
+            self.draw_section_title("Caveats")
+            self.draw_bullets(caveats)
+
+        self.draw_footer()
+        return self.pages
+
+
+def pdf_document_bytes(pages: list[list[str]], *, title: str) -> bytes:
     objects: list[bytes] = []
     page_object_ids: list[int] = []
 
     objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
     objects.append(b"")  # pages object placeholder
     objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique >>")
 
-    for page_lines in pages:
-        content_lines = ["BT", "/F1 10 Tf", f"{margin_x} {start_y} Td"]
-        for index, line in enumerate(page_lines):
-            if index:
-                content_lines.append(f"0 -{line_height} Td")
-            content_lines.append(f"({escape_pdf_text(line)}) Tj")
-        content_lines.append("ET")
-        content = "\n".join(content_lines).encode("latin-1", errors="replace")
+    for page_commands in pages:
+        content = "\n".join(page_commands).encode("latin-1", errors="replace")
         content_id = len(objects) + 1
         objects.append(
             b"<< /Length " + str(len(content)).encode("ascii") + b" >>\nstream\n" + content + b"\nendstream"
@@ -448,13 +740,21 @@ def simple_pdf_bytes(lines: list[str]) -> bytes:
         page_object_ids.append(page_id)
         objects.append(
             (
-                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] "
-                f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_id} 0 R >>"
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PDF_PAGE_WIDTH} {PDF_PAGE_HEIGHT}] "
+                f"/Resources << /ProcSet [/PDF /Text] /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> "
+                f"/Contents {content_id} 0 R >>"
             ).encode("ascii")
         )
 
     kids = " ".join(f"{page_id} 0 R" for page_id in page_object_ids)
     objects[1] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_object_ids)} >>".encode("ascii")
+    info_id = len(objects) + 1
+    objects.append(
+        (
+            f"<< /Title ({escape_pdf_text(title)}) /Creator (get-yearly-fx-rate) "
+            f"/Producer (get-yearly-fx-rate standard-library PDF renderer) >>"
+        ).encode("latin-1", errors="replace")
+    )
 
     output = io.BytesIO()
     output.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
@@ -472,22 +772,18 @@ def simple_pdf_bytes(lines: list[str]) -> bytes:
         output.write(f"{offset:010d} 00000 n \n".encode("ascii"))
     output.write(
         (
-            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R /Info {info_id} 0 R >>\n"
             f"startxref\n{xref_start}\n%%EOF\n"
         ).encode("ascii")
     )
     return output.getvalue()
 
 
-def render_workpaper_pdf_bytes(markdown_text: str) -> bytes:
-    lines: list[str] = []
-    for raw_line in markdown_text.splitlines():
-        normalized = raw_line.strip("# ").replace("`", "")
-        for line in wrap_text(normalized):
-            lines.append(line)
-        if raw_line == "":
-            lines.append("")
-    return simple_pdf_bytes(lines)
+def render_workpaper_pdf_bytes(workpaper: dict[str, object]) -> bytes:
+    renderer = WorkpaperPdfRenderer(workpaper)
+    pages = renderer.render()
+    title = f"{workpaper['currency']} {workpaper['year']} Yearly FX Rate Workpaper"
+    return pdf_document_bytes(pages, title=title)
 
 
 def today_iso() -> str:
@@ -580,7 +876,7 @@ def create_workpaper(
     markdown_text = render_workpaper_md(workpaper)
     write_text(folder / "workpaper.md", markdown_text)
     pdf_path = folder / "workpaper.pdf"
-    pdf_path.write_bytes(render_workpaper_pdf_bytes(markdown_text))
+    pdf_path.write_bytes(render_workpaper_pdf_bytes(workpaper))
     workpaper["proof"]["workpaper_pdf_sha256"] = sha256_file(pdf_path)  # type: ignore[index]
     write_text(folder / "workpaper.json", json.dumps(workpaper, indent=2, sort_keys=True) + "\n")
 
@@ -746,6 +1042,19 @@ def command_map_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def assert_workpaper_pdf(path: Path, required_terms: Iterable[str]) -> None:
+    data = path.read_bytes()
+    assert data.startswith(b"%PDF-1."), path
+    assert data.rstrip().endswith(b"%%EOF"), path
+    assert b"xref" in data, path
+    assert b"/Type /Page /Parent" in data, path
+    assert b"/Helvetica-Bold" in data, path
+    assert len(data) > 3000, path
+    for term in required_terms:
+        encoded = clean_text(term).encode("latin-1", errors="replace")
+        assert encoded in data, term
+
+
 def command_self_test(_args: argparse.Namespace) -> int:
     sample_html = """
     <table>
@@ -790,6 +1099,17 @@ def command_self_test(_args: argparse.Namespace) -> int:
         workpaper = next((Path(tmp) / "proof").glob("cad-2024-*/workpaper.json"))
         data = json.loads(workpaper.read_text(encoding="utf-8"))
         assert data["foreign_per_usd"] == "1.37"
+        lookup_pdf = Path(data["proof"]["workpaper_pdf"])
+        assert_workpaper_pdf(
+            lookup_pdf,
+            [
+                "Yearly FX Rate Workpaper",
+                "RETAINED SUPPORT WORKPAPER",
+                "1 USD = 1.37 CAD",
+                "IRS Yearly average currency exchange rates",
+            ],
+        )
+        assert data["proof"]["workpaper_pdf_sha256"] == sha256_file(lookup_pdf)
 
         proof_file = Path(tmp) / "proof-source.html"
         proof_file.write_text("<p>published annual average</p>", encoding="utf-8")
@@ -813,7 +1133,22 @@ def command_self_test(_args: argparse.Namespace) -> int:
         manual_data = json.loads(manual_workpaper.read_text(encoding="utf-8"))
         assert manual_data["foreign_per_usd"] == "4200"
         assert manual_data["proof"]["saved_files"]
-        assert Path(manual_data["proof"]["workpaper_pdf"]).exists()
+        saved_file = manual_data["proof"]["saved_files"][0]
+        saved_path = Path(saved_file["path"])
+        assert saved_path.exists()
+        assert saved_path.parent.resolve() == manual_workpaper.parent.resolve()
+        assert saved_file["sha256"] == sha256_file(saved_path)
+        manual_pdf = Path(manual_data["proof"]["workpaper_pdf"])
+        assert_workpaper_pdf(
+            manual_pdf,
+            [
+                "Yearly FX Rate Workpaper",
+                "1 USD = 4200 COP",
+                "Example Central Bank Annual Average",
+                "Source proof 1",
+            ],
+        )
+        assert manual_data["proof"]["workpaper_pdf_sha256"] == sha256_file(manual_pdf)
 
         map_check_args = argparse.Namespace(
             source_url=IRS_YEARLY_URL,
