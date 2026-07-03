@@ -41,7 +41,13 @@ python statements-to-interest/scripts/statements_to_interest.py fx-prompt \
   --fx-workpaper-json "work/fx-rate-proof/cop-2025-source/workpaper.json"
 ```
 
-If `get-yearly-fx-rate` is unavailable or cannot produce a proof-backed annual workpaper, stop before the PDF and ask for either the dependency output or a user/preparer custom rate and source. Do not quietly rebuild annual FX source search inside this skill.
+If `get-yearly-fx-rate` is unavailable or cannot produce a proof-backed annual workpaper, stop before the PDF and ask for either the dependency output or a confirmed user/preparer custom rate. Do not quietly rebuild annual FX source search inside this skill.
+
+You can preflight the dependency with:
+
+```bash
+python statements-to-interest/scripts/statements_to_interest.py dependency-check
+```
 
 ## Use It In Codex
 
@@ -85,7 +91,7 @@ python statements-to-interest/scripts/statements_to_interest.py report \
   --out "outputs/example-bank-2025-interest-support-packet.pdf"
 ```
 
-If the rows are not USD, run `get-yearly-fx-rate` for the currency/year, show the resulting USD total and proof documents, and ask me to confirm that rate or send a custom rate/source. Do not freestyle the conversion, and do not generate the PDF until the rate is confirmed.
+If the rows are not USD, run `get-yearly-fx-rate` for the currency/year, show the resulting USD total and proof documents, and ask me to confirm that rate or send a custom rate. Do not freestyle the conversion, and do not generate the PDF until the rate is confirmed.
 
 Use `fx-prompt` to make that confirmation step explicit:
 
@@ -106,7 +112,9 @@ python statements-to-interest/scripts/statements_to_interest.py report \
   --out "outputs/example-bank-2025-interest-support-packet.pdf"
 ```
 
-For Colombian peso statements, use `get-yearly-fx-rate` if it can produce a published yearly-average workpaper. If only daily/monthly rates are available, do not calculate the annual average yourself; ask me for the dependency output or a custom rate/source.
+For Colombian peso statements, use `get-yearly-fx-rate` if it can produce a published yearly-average workpaper. If only daily/monthly rates are available, do not calculate the annual average yourself; ask me for the dependency output or a custom rate.
+
+For custom user/preparer rates, `--fx-source` is optional. If no source is supplied, the PDF labels the rate as user/preparer supplied, notes that no independent source was provided, and adds a preparer-review warning.
 
 Use item-date spot rates only when I explicitly ask for them. When using item-date spot rates, pass a date-keyed `--fx-rates-json` file so each interest row converts with the rate for its own receipt/accrual date instead of flattening the packet into one blended rate.
 
@@ -130,6 +138,12 @@ After parser changes:
 
 ```bash
 python statements-to-interest/scripts/statements_to_interest.py self-test
+```
+
+To check the FX dependency:
+
+```bash
+python statements-to-interest/scripts/statements_to_interest.py dependency-check
 ```
 
 Before shipping the skill:

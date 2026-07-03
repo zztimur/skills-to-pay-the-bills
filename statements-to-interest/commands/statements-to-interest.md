@@ -15,7 +15,7 @@ Use the package root `SKILL.md` as the control plane and read `references/workfl
 4. Use machine-readable text PDFs only.
 5. Run `scripts/statements_to_interest.py` exactly as described in `references/workflow.md`.
 6. Review JSON and the review CSV internally, then make the PDF packet the user-facing deliverable.
-7. For non-USD rows, use the separate `get-yearly-fx-rate` skill to create a proof-backed yearly-average workpaper, then pass its `workpaper.json` to `fx-prompt` and `report` with `--fx-workpaper-json`. Do not source published yearly averages inside this command. If the dependency is unavailable, stop and ask the user to install/run it or provide a user/preparer custom rate/source with `--fx-method user-rate`.
+7. For non-USD rows, use the separate `get-yearly-fx-rate` skill to create a proof-backed yearly-average workpaper, then pass its `workpaper.json` to `fx-prompt` and `report` with `--fx-workpaper-json`. Do not source published yearly averages inside this command. If the dependency is unavailable, stop and ask the user to install/run it or provide a confirmed user/preparer custom rate with `--fx-method user-rate`; `--fx-source` is optional for custom rates.
 8. If FX confirmation is pending, ask the confirmation/custom-rate question and state that the PDF is pending. After confirmation, generate and verify the PDF, then return the PDF first with totals, review flags, and the `get-yearly-fx-rate` proof artifacts. Mention CSV only as an audit artifact if useful or requested.
 
 Do not prepare official IRS forms and do not give tax advice.

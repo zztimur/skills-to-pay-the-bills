@@ -120,10 +120,10 @@ If counted rows are not USD:
 1. Use the separate `get-yearly-fx-rate` skill to find a published yearly average and create a retained proof workpaper.
 2. Pass that skill's `workpaper.json` into `statements_to_interest.py` with `--fx-workpaper-json`.
 3. Do not search for or validate published annual FX sources inside `statements-to-interest`; that is the dependency's job.
-4. If `get-yearly-fx-rate` is unavailable or cannot produce a workpaper, stop before the PDF and ask the user to install/run it or provide a user/preparer custom rate and source.
-5. Accept a user/preparer custom rate and source when preferred. Use `--fx-method user-rate` for custom rates.
-6. Show the user the workpaper rate, source, proof documents, direction, and resulting USD total before generating the PDF. Use `fx-prompt` to print the exact confirmation question when a workpaper is available. Ask: "Confirm this published yearly average rate, or send a custom rate/source to use instead."
-7. Generate the non-USD PDF only after the user confirms the proposed yearly average workpaper or provides a custom rate/source. Pass `--fx-rate-confirmed` and a concise `--fx-confirmation-note`.
+4. If `get-yearly-fx-rate` is unavailable or cannot produce a workpaper, stop before the PDF and ask the user to install/run it or provide a confirmed user/preparer custom rate.
+5. Accept a user/preparer custom rate when preferred. Use `--fx-method user-rate`; `--fx-source` is optional for custom rates.
+6. Show the user the workpaper rate, source, proof documents, direction, and resulting USD total before generating the PDF. Use `fx-prompt` to print the exact confirmation question when a workpaper is available. Ask: "Confirm this published yearly average rate, or send a custom rate to use instead."
+7. Generate the non-USD PDF only after the user confirms the proposed yearly average workpaper or provides a custom rate. Pass `--fx-rate-confirmed` and a concise `--fx-confirmation-note`.
 8. Confirm rate direction:
    - Default is `foreign-per-usd`, matching IRS yearly average tables.
    - Use `--rate-direction usd-per-foreign` only when the supplied rate is USD per one foreign currency unit.
@@ -141,7 +141,7 @@ Method: get-yearly-fx-rate published yearly average workpaper
 Source-currency total: <amount>
 USD total using this rate: <amount>
 
-Confirm this published yearly average rate, or send a custom rate/source to use instead.
+Confirm this published yearly average rate, or send a custom rate to use instead.
 ```
 
 Generate that prompt with:
@@ -152,7 +152,7 @@ python "<package-root>/scripts/statements_to_interest.py" fx-prompt \
   --fx-workpaper-json "work/fx-rate-proof/cop-2025-source/workpaper.json"
 ```
 
-If the user has not confirmed yet, stop here. Do not summarize the run as complete and do not foreground the CSV/JSON as the result. Tell the user the PDF will be generated immediately after they confirm the proposed rate or provide a custom rate/source.
+If the user has not confirmed yet, stop here. Do not summarize the run as complete and do not foreground the CSV/JSON as the result. Tell the user the PDF will be generated immediately after they confirm the proposed rate or provide a custom rate.
 
 Yearly average report example:
 
@@ -165,19 +165,20 @@ python "<package-root>/scripts/statements_to_interest.py" report \
   --out "outputs/example-bank-2025-interest-support-packet.pdf"
 ```
 
-Custom-rate fallback example:
+Custom-rate fallback example without an external source:
 
 ```bash
 python "<package-root>/scripts/statements_to_interest.py" report \
   --input "work/example-bank-2025-interest-analysis.json" \
   --fx-method user-rate \
   --fx-rate 4200.00 \
-  --fx-source "User/preparer supplied custom rate and source" \
   --rate-direction foreign-per-usd \
   --fx-rate-confirmed \
-  --fx-confirmation-note "User supplied and confirmed the custom rate/source" \
+  --fx-confirmation-note "User supplied and confirmed a custom rate without an external source" \
   --out "outputs/example-bank-2025-interest-support-packet.pdf"
 ```
+
+If the user/preparer provides a custom-rate source, add `--fx-source "..."`. If no source is supplied, the script labels the rate as user/preparer supplied, notes that no independent source was provided, and adds a preparer-review warning to the PDF.
 
 Daily spot override example:
 
@@ -272,9 +273,9 @@ Review flags: institution label was found only in the file path; verify the PDFs
 | Multiple currencies detected | Review rows and split the job if multiple currencies are truly present. |
 | `UNKNOWN` currency | Do not report until currency is confirmed. |
 | `$` rows from a COP statement are labeled USD | Rerun with the current parser and/or pass `--account-currency COP`; `$` alone is not proof of USD when the statement account currency is COP. |
-| Non-USD report asks for FX | Run `get-yearly-fx-rate`, pass its `workpaper.json` to `fx-prompt`, ask the user to confirm it or provide a custom rate/source, then rerun `report` with `--fx-rate-confirmed`. |
-| `get-yearly-fx-rate` is unavailable | Stop before the PDF and ask the user to install/run the dependency or provide a user/preparer custom rate and source. |
-| Only daily/monthly rates are available | Do not calculate an annual average yourself; use `get-yearly-fx-rate` only if it can produce a published annual workpaper, otherwise ask the user/preparer for a custom rate/source. |
+| Non-USD report asks for FX | Run `get-yearly-fx-rate`, pass its `workpaper.json` to `fx-prompt`, ask the user to confirm it or provide a custom rate, then rerun `report` with `--fx-rate-confirmed`. |
+| `get-yearly-fx-rate` is unavailable | Run `dependency-check` if needed, then stop before the PDF and ask the user to install/run the dependency or provide a confirmed user/preparer custom rate. |
+| Only daily/monthly rates are available | Do not calculate an annual average yourself; use `get-yearly-fx-rate` only if it can produce a published annual workpaper, otherwise ask the user/preparer for a custom rate. |
 | Different interest dates need different FX rates | Use `--fx-rates-json` only when the user or preparer explicitly requests daily spot rates. |
 | Extracted amount looks like a balance | Do not report blindly; inspect evidence text and ask the user to confirm before editing source data or relying on the row. |
 
@@ -284,6 +285,12 @@ After editing `scripts/statements_to_interest.py`, run:
 
 ```bash
 python "<package-root>/scripts/statements_to_interest.py" self-test
+```
+
+To verify the published-yearly-average FX dependency is discoverable:
+
+```bash
+python "<package-root>/scripts/statements_to_interest.py" dependency-check
 ```
 
 Before shipping or reinstalling the skill, validate the package:

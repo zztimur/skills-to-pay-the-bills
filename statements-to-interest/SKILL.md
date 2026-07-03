@@ -21,7 +21,7 @@ Stop and ask the user to split the work if statements span multiple institutions
 
 Read `references/workflow.md` before running analysis. It contains the operational checklist, commands, review gates, FX decision rules, troubleshooting, and final-response template.
 
-Dependency: for non-USD published yearly-average FX, use the separate `get-yearly-fx-rate` skill to create a retained FX proof workpaper. `statements-to-interest` consumes that skill's `workpaper.json` and passes its proof documents through in the final output. If `get-yearly-fx-rate` is unavailable, stop before the PDF and ask the user to install/run it or provide a user/preparer custom rate and source; do not recreate annual-rate source search inside this skill.
+Dependency: for non-USD published yearly-average FX, use the separate `get-yearly-fx-rate` skill to create a retained FX proof workpaper. `statements-to-interest` consumes that skill's `workpaper.json` and passes its proof documents through in the final output. If `get-yearly-fx-rate` is unavailable, stop before the PDF and ask the user to install/run it or provide a confirmed user/preparer custom rate; do not recreate annual-rate source search inside this skill. Use `dependency-check` when you need a quick installed-dependency preflight.
 
 Use `scripts/statements_to_interest.py` for the deterministic work:
 
@@ -36,7 +36,7 @@ python "<package-root>/scripts/statements_to_interest.py" extract \
 
 Review the JSON and review CSV before reporting. Treat the CSV as an internal row-review artifact, not the user-facing deliverable unless the user asks for it. Confirm the `institution_profile`, account currency, statement titles, and statement periods. Do not invent missing rows. Ask for confirmation when rows are low confidence, ambiguous, out of scope, when the institution label was found only in a file path, or when account currency cannot be inferred.
 
-For non-USD rows, default to `get-yearly-fx-rate` for the published yearly average exchange rate and retained proof. Do not calculate the yearly average yourself from daily/monthly data. If `get-yearly-fx-rate` cannot produce a published annual workpaper, ask the user for a custom rate/source instead of deriving one. Prompt the user with the workpaper rate, source, proof documents, direction, and resulting USD total; ask them to confirm that rate or provide a custom rate/source before generating the PDF. Use the `fx-prompt` command to produce the exact user-facing confirmation question when a candidate workpaper is available:
+For non-USD rows, default to `get-yearly-fx-rate` for the published yearly average exchange rate and retained proof. Do not calculate the yearly average yourself from daily/monthly data. If `get-yearly-fx-rate` cannot produce a published annual workpaper, ask the user for a custom rate, with an optional source, instead of deriving one. Prompt the user with the workpaper rate, source, proof documents, direction, and resulting USD total; ask them to confirm that rate or provide a custom rate before generating the PDF. Use the `fx-prompt` command to produce the exact user-facing confirmation question when a candidate workpaper is available:
 
 ```bash
 python "<package-root>/scripts/statements_to_interest.py" fx-prompt \
@@ -55,7 +55,7 @@ python "<package-root>/scripts/statements_to_interest.py" report \
   --out outputs/interest-support-packet.pdf
 ```
 
-If the user/preparer supplies a custom rate instead of a `get-yearly-fx-rate` workpaper, use `--fx-method user-rate` with `--fx-rate`, `--fx-source`, `--rate-direction`, and `--fx-rate-confirmed`.
+If the user/preparer supplies a custom rate instead of a `get-yearly-fx-rate` workpaper, use `--fx-method user-rate` with `--fx-rate`, `--rate-direction`, and `--fx-rate-confirmed`. Add `--fx-source` only when the user/preparer supplies one. If no source is supplied, the PDF must disclose that no independent source was provided and add a preparer-review warning.
 
 Use item-date spot rates only if the user or preparer explicitly asks for that method. In that case, still prompt for confirmation before reporting and pass a date-keyed `--fx-rates-json` file:
 
@@ -92,6 +92,12 @@ After changing the parser, run:
 
 ```bash
 python "<package-root>/scripts/statements_to_interest.py" self-test
+```
+
+To preflight the FX dependency, run:
+
+```bash
+python "<package-root>/scripts/statements_to_interest.py" dependency-check
 ```
 
 ## Package Compatibility

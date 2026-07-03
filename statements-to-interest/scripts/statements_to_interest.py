@@ -7,8 +7,10 @@ import argparse
 import csv
 import json
 import math
+import os
 import re
 import sys
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -104,6 +106,11 @@ SELF_CALCULATED_AVERAGE_TERMS = (
     "averaged daily",
     "agent-calculated",
     "self-calculated",
+)
+
+CUSTOM_RATE_NO_SOURCE_LABEL = "User/preparer supplied custom FX rate; no independent source provided"
+CUSTOM_RATE_NO_SOURCE_WARNING = (
+    "No external FX source was provided for the custom rate; retain the user/preparer rationale with tax records."
 )
 
 POSITIVE_INTEREST_TERMS = (
@@ -1295,6 +1302,14 @@ def fx_workpaper_artifacts(workpaper: dict[str, object]) -> list[dict[str, str]]
     return artifacts
 
 
+def display_fx_source(fx_method: str | None, fx_source: str | None) -> str:
+    if fx_source:
+        return fx_source
+    if fx_method == "user-rate":
+        return CUSTOM_RATE_NO_SOURCE_LABEL
+    return "No source supplied"
+
+
 def configure_fx_from_workpaper(args: argparse.Namespace, analysis: dict, currency: str) -> dict[str, object] | None:
     workpaper_path = getattr(args, "fx_workpaper_json", None)
     if not workpaper_path:
@@ -1318,8 +1333,41 @@ def dependency_required_message(currency: str, tax_year: object) -> str:
     return (
         f"Published yearly-average FX for {currency}/{tax_year} must come from the get-yearly-fx-rate skill. "
         "Run get-yearly-fx-rate and pass its workpaper.json with --fx-workpaper-json, or use "
-        "--fx-method user-rate with a user/preparer supplied custom rate and source."
+        "--fx-method user-rate with a confirmed user/preparer supplied custom rate."
     )
+
+
+def find_get_yearly_fx_rate_skill() -> Path | None:
+    candidates: list[Path] = []
+    script_path = Path(__file__).resolve()
+    if len(script_path.parents) >= 3:
+        candidates.append(script_path.parents[2] / "get-yearly-fx-rate" / "SKILL.md")
+    env_codex_home = os.environ.get("CODEX_HOME")
+    if env_codex_home:
+        candidates.append(Path(env_codex_home) / "skills" / "get-yearly-fx-rate" / "SKILL.md")
+    candidates.append(Path.home() / ".codex" / "skills" / "get-yearly-fx-rate" / "SKILL.md")
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.expanduser()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.is_file():
+            return resolved
+    return None
+
+
+def command_dependency_check(args: argparse.Namespace) -> int:
+    skill_md = find_get_yearly_fx_rate_skill()
+    if skill_md:
+        print(f"get-yearly-fx-rate skill found: {skill_md}")
+        return 0
+    print(
+        "get-yearly-fx-rate skill not found. Install/run it before published yearly-average FX, "
+        "or use --fx-method user-rate with a confirmed custom rate.",
+        file=sys.stderr,
+    )
+    return 2
 
 
 def build_fx_confirmation_prompt(args: argparse.Namespace, analysis: dict, currency: str, foreign_total: Decimal) -> str:
@@ -1342,7 +1390,7 @@ def build_fx_confirmation_prompt(args: argparse.Namespace, analysis: dict, curre
             [
                 "I found/propose this FX rate:",
                 f"Rate: {rate_line}",
-                f"Source: {args.fx_source or 'No source supplied'}",
+                f"Source: {display_fx_source(args.fx_method, args.fx_source)}",
                 f"Method: {method}",
                 f"Source-currency total: {money(foreign_total)} {currency}",
                 f"USD total using this rate: USD {money(usd_total)}",
@@ -1360,8 +1408,8 @@ def build_fx_confirmation_prompt(args: argparse.Namespace, analysis: dict, curre
         lines.extend(
             [
                 "",
-                'Reply "confirm" to use this rate, or send a custom rate/source instead.',
-                'Custom format: rate: <number>, direction: foreign-per-usd or usd-per-foreign, source: <source>, method: user-rate.',
+                'Reply "confirm" to use this rate, or send a custom rate instead.',
+                'Custom format: rate: <number>, direction: foreign-per-usd or usd-per-foreign, optional source: <source>, method: user-rate.',
             ]
         )
     else:
@@ -1370,8 +1418,8 @@ def build_fx_confirmation_prompt(args: argparse.Namespace, analysis: dict, curre
                 f"The extracted interest total is {money(foreign_total)} {currency}, so a USD conversion is required.",
                 "No get-yearly-fx-rate workpaper was supplied to the report command.",
                 "",
-                "Run get-yearly-fx-rate for this currency/year and pass its workpaper.json via --fx-workpaper-json, or send a custom user/preparer rate/source.",
-                'Custom format: rate: <number>, direction: foreign-per-usd or usd-per-foreign, source: <source>, method: user-rate.',
+                "Run get-yearly-fx-rate for this currency/year and pass its workpaper.json via --fx-workpaper-json, or send a custom user/preparer rate.",
+                'Custom format: rate: <number>, direction: foreign-per-usd or usd-per-foreign, optional source: <source>, method: user-rate.',
             ]
         )
     return "\n".join(lines)
@@ -1443,6 +1491,7 @@ def command_report(args: argparse.Namespace) -> int:
     fx_note = "No FX conversion was needed because no interest rows were found."
     fx_confirmation = ""
     fx_workpaper: dict[str, object] | None = None
+    custom_rate_no_source = False
     if foreign_total != 0:
         if currency == "USD":
             usd_total = foreign_total
@@ -1461,7 +1510,7 @@ def command_report(args: argparse.Namespace) -> int:
                     except SystemExit as exc:
                         print(str(exc), file=sys.stderr)
                         print(
-                            "Ask the user/preparer for a published annual average or custom rate/source before generating the PDF.",
+                            "Ask the user/preparer for a published annual average or custom rate before generating the PDF.",
                             file=sys.stderr,
                         )
                         return 2
@@ -1507,8 +1556,7 @@ def command_report(args: argparse.Namespace) -> int:
                     raise SystemExit("--fx-method is required when non-USD interest rows are present.")
                 if not args.fx_rate:
                     raise SystemExit("--fx-rate is required when non-USD interest rows are present.")
-                if args.fx_method == "user-rate" and not args.fx_source:
-                    raise SystemExit("--fx-source is required with --fx-method user-rate.")
+                custom_rate_no_source = args.fx_method == "user-rate" and not args.fx_source
                 reject_self_calculated_posted_average(args)
                 fx_rate = parse_decimal(args.fx_rate, "--fx-rate")
                 if args.rate_direction == "foreign-per-usd":
@@ -1523,7 +1571,7 @@ def command_report(args: argparse.Namespace) -> int:
                     row_usd_values.append(row_usd)
                     row_fx_labels.append(rate_phrase)
                 method = FX_METHOD_LABELS.get(args.fx_method, args.fx_method)
-                fx_source = args.fx_source or "No source label supplied"
+                fx_source = display_fx_source(args.fx_method, args.fx_source)
                 fx_note = f"{method}; {rate_phrase}; source: {fx_source}."
             fx_note = f"{fx_note} Confirmation: {fx_confirmation}"
 
@@ -1635,7 +1683,9 @@ def command_report(args: argparse.Namespace) -> int:
         story.append(Paragraph("No ambiguous or excluded interest-like lines were detected.", styles["Normal"]))
         story.append(Spacer(1, 0.12 * inch))
 
-    warnings = analysis.get("warnings", [])
+    warnings = list(analysis.get("warnings", []))
+    if custom_rate_no_source:
+        warnings.append(CUSTOM_RATE_NO_SOURCE_WARNING)
     if warnings:
         add_note_box(story, "Warnings for preparer review", warnings, styles, tone="warning")
 
@@ -1660,7 +1710,7 @@ def command_report(args: argparse.Namespace) -> int:
         "Review Schedule B applicability if taxable interest is present, if total taxable interest and ordinary dividends exceed the Schedule B threshold, or if foreign-account questions apply.",
         "Review Form 1040 or 1040-SR taxable interest reporting with the preparer or tax software.",
         "Review FBAR and Form 8938 applicability separately for foreign financial accounts and specified foreign financial assets.",
-        "Keep the original statements, this worksheet, the FX source, and any user/preparer adjustments with tax records.",
+        "Keep the original statements, this worksheet, the FX source or custom-rate rationale, and any user/preparer adjustments with tax records.",
     ]
     for note in notes:
         story.append(Paragraph(f"- {escape(note)}", styles["Normal"]))
@@ -1743,11 +1793,84 @@ def command_self_test(args: argparse.Namespace) -> int:
         failures.append(f"cop-account-currency: expected COP account currency, got {meta.get('account_currency')}")
     if not rows or rows[0].get("currency") != "COP" or rows[0].get("amount_foreign") != "642.00":
         failures.append(f"cop-symbol-currency: expected 642.00 COP row, got {rows[:1]}")
+
+    analysis = {
+        "institution": "Example Bank",
+        "tax_year": 2025,
+        "statement_files": [],
+        "institution_profile": {"account_currency": "COP"},
+        "rows": [
+            {
+                "date": "2025-01-03",
+                "description": "Interest credited",
+                "amount_foreign": "1486.00",
+                "currency": "COP",
+                "source_file": "statement.pdf",
+                "page": 1,
+            }
+        ],
+        "warnings": [],
+        "excluded_candidates": [],
+    }
+    with tempfile.TemporaryDirectory(prefix="statements-to-interest-self-test-") as tmp:
+        tmp_path = Path(tmp)
+        workpaper_path = tmp_path / "workpaper.json"
+        workpaper = {
+            "skill": "get-yearly-fx-rate",
+            "currency": "COP",
+            "year": 2025,
+            "foreign_per_usd": "4089.9846",
+            "source": {
+                "title": "Example published yearly average",
+                "url": "https://example.test/fx",
+                "retrieved": "2026-07-03",
+            },
+            "proof": {
+                "workpaper_json": str(workpaper_path),
+                "workpaper_pdf": str(tmp_path / "workpaper.pdf"),
+                "saved_files": [{"path": str(tmp_path / "source-proof.html"), "sha256": "abc123"}],
+            },
+        }
+        workpaper_path.write_text(json.dumps(workpaper), encoding="utf-8")
+        loaded_workpaper = load_fx_workpaper(workpaper_path, "COP", 2025)
+        if loaded_workpaper.get("_fx_rate_decimal") != Decimal("4089.9846"):
+            failures.append("fx-workpaper-load: expected normalized foreign_per_usd rate")
+        args = argparse.Namespace(fx_workpaper_json=str(workpaper_path))
+        configure_fx_from_workpaper(args, analysis, "COP")
+        if args.fx_method != "get-yearly-fx-rate" or args.fx_rate != "4089.9846" or args.rate_direction != "foreign-per-usd":
+            failures.append(f"fx-workpaper-configure: unexpected args {args}")
+        try:
+            load_fx_workpaper(workpaper_path, "EUR", 2025)
+            failures.append("fx-workpaper-currency-mismatch: expected SystemExit")
+        except SystemExit:
+            pass
+        bad_workpaper_path = tmp_path / "bad-workpaper.json"
+        bad_workpaper = dict(workpaper)
+        bad_workpaper["proof"] = {"workpaper_json": str(bad_workpaper_path), "workpaper_pdf": str(tmp_path / "workpaper.pdf")}
+        bad_workpaper_path.write_text(json.dumps(bad_workpaper), encoding="utf-8")
+        try:
+            load_fx_workpaper(bad_workpaper_path, "COP", 2025)
+            failures.append("fx-workpaper-missing-source-proof: expected SystemExit")
+        except SystemExit:
+            pass
+        missing_dep_args = argparse.Namespace(fx_method="get-yearly-fx-rate", fx_workpaper_json=None)
+        if not published_fx_requires_workpaper(missing_dep_args):
+            failures.append("fx-workpaper-required: expected get-yearly-fx-rate method to require workpaper")
+        prompt_args = argparse.Namespace(
+            fx_method="user-rate",
+            fx_rate="4089.9846",
+            fx_source="",
+            fx_workpaper_json=None,
+            rate_direction="foreign-per-usd",
+        )
+        prompt = build_fx_confirmation_prompt(prompt_args, analysis, "COP", Decimal("1486.00"))
+        if CUSTOM_RATE_NO_SOURCE_LABEL not in prompt:
+            failures.append("custom-rate-no-source-prompt: expected honest no-source label")
     if failures:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print(f"Self-test passed: {len(cases) + 1} parser cases")
+    print(f"Self-test passed: {len(cases) + 1} parser cases, 6 FX/dependency cases")
     return 0
 
 
@@ -1811,6 +1934,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     report.add_argument("--out", required=True, help="Output PDF path.")
     report.set_defaults(func=command_report)
+
+    dependency_check = subparsers.add_parser("dependency-check", help="Check whether get-yearly-fx-rate is installed.")
+    dependency_check.set_defaults(func=command_dependency_check)
 
     self_test = subparsers.add_parser("self-test", help="Run parser regression checks.")
     self_test.set_defaults(func=command_self_test)

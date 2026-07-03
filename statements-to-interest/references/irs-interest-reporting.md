@@ -30,7 +30,8 @@ Use careful language:
 - "Support packet", "worksheet", "for preparer review", and "not an official IRS form".
 - "Review Schedule B applicability" rather than "file Schedule B".
 - "Review FBAR/Form 8938 applicability" rather than deciding the filing result.
-- "FX rate supplied by user/agent from source listed below" unless the source is directly verified in the current task.
+- "FX rate supplied by user/agent from source listed below" when a source is supplied or directly verified in the current task.
+- "User/preparer supplied custom FX rate; no independent source provided" when the user chooses a custom rate without source support.
 - "Account currency inferred from statement title/header" when the statement clearly names the currency, such as `Movimientos de cuenta en COP`.
 
 ## FX defaults
@@ -40,9 +41,9 @@ If counted rows are already denominated in USD, no FX rate decision is needed.
 If counted rows are not denominated in USD, ask for a rate decision before generating the final PDF. Recommend one of:
 
 - A proof-backed yearly average workpaper from the `get-yearly-fx-rate` dependency. That skill decides whether IRS or another published annual source is appropriate and retains the source proof.
-- A user-provided rate and source when the user or preparer has a preferred method.
+- A user-provided rate, with optional source, when the user or preparer has a preferred method.
 - Spot exchange rates only when the user or preparer explicitly requests item-date conversion.
 
-Do not calculate yearly averages from daily, weekly, monthly, or intraday rates. If `get-yearly-fx-rate` is unavailable or cannot produce a published annual workpaper, stop before report generation and ask the user/preparer for a custom rate and source.
+Do not calculate yearly averages from daily, weekly, monthly, or intraday rates. If `get-yearly-fx-rate` is unavailable or cannot produce a published annual workpaper, stop before report generation and ask the user/preparer for a confirmed custom rate. A custom-rate source is useful but optional.
 
-For non-USD yearly-average rows, the report script expects `--fx-workpaper-json` from `get-yearly-fx-rate`; it reads `foreign_per_usd` from that workpaper. Use `--fx-method user-rate` with `--fx-rate`, `--fx-source`, and `--rate-direction` only when the user/preparer supplies a custom rate. The report must name the FX source and method, and must pass `--fx-rate-confirmed` only after the user confirms the proposed published yearly average workpaper or supplies a custom rate/source.
+For non-USD yearly-average rows, the report script expects `--fx-workpaper-json` from `get-yearly-fx-rate`; it reads `foreign_per_usd` from that workpaper. Use `--fx-method user-rate` with `--fx-rate`, optional `--fx-source`, and `--rate-direction` when the user/preparer supplies a custom rate. The report must name the FX method, disclose when no custom-rate source was supplied, and pass `--fx-rate-confirmed` only after the user confirms the proposed published yearly average workpaper or supplies a custom rate.
