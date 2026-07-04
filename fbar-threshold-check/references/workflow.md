@@ -1,0 +1,176 @@
+# FBAR Threshold Check Workflow
+
+Use this workflow whenever the skill is triggered. Keep all work local unless the user explicitly asks otherwise.
+
+## 1. Intake
+
+Collect or infer:
+
+- Calendar year.
+- Statement PDF paths for exactly one account.
+- Account currency, if the statement does not clearly identify it.
+- Work folder, defaulting to `work/`.
+- Output folder, defaulting to `outputs/`.
+
+Before running extraction, verify scope:
+
+- One account per pass.
+- One calendar year.
+- One currency bucket.
+- Machine-readable PDFs, not screenshots or image-only scans.
+- The user wants an FBAR threshold check, not an official filing.
+
+If the user provides multiple accounts, split the work. If an account has multiple currencies, split by currency bucket or stop for manual review.
+
+## 2. Source Anchors
+
+Read `references/fbar-source-notes.md` when explaining the threshold, maximum account value, source limitations, or FX dependency behavior.
+
+Use careful language:
+
+- "FBAR threshold support check" rather than "FBAR filing prepared."
+- "Daily threshold exceeded/not exceeded in reviewed records" rather than a legal filing opinion.
+- "FinCEN maximum-value view" for the aggregate account-maximum calculation.
+- "Records insufficient for a confident no" when coverage is incomplete.
+
+## 3. Runtime Setup
+
+For extraction, use a Python runtime with `pdfplumber`:
+
+```bash
+python3 -c 'import pdfplumber; print("pdfplumber ok")'
+```
+
+If `pdfplumber` is unavailable, stop before extraction and report the missing dependency. `confirm-account`, `aggregate`, and `self-test` do not require `pdfplumber`.
+
+## 4. Extract One Account
+
+Run:
+
+```bash
+python3 "<package-root>/scripts/fbar_threshold_check.py" extract-account \
+  --pdf "statement-01.pdf" "statement-02.pdf" \
+  --tax-year 2025 \
+  --out "work/account-1.json"
+```
+
+Optional flags:
+
+- `--account-id`: stable local identifier when the user has one.
+- `--institution`: institution label when visible in the statement set or known from the user.
+- `--account-currency`: ISO code when the statement text cannot safely infer it.
+- `--csv`: review CSV output path.
+
+The script writes:
+
+- Account JSON at `--out`.
+- Review CSV beside the JSON unless `--csv` is supplied.
+
+The review CSV has one row per day with native balance, USD balance placeholder, confidence, source references, and notes.
+
+## 5. Review Gate
+
+Open the JSON and CSV before confirming. Confirm these fields:
+
+- `account.account_id`, `institution`, and account hints represent one account.
+- `account.currency` is correct and not ambiguous.
+- `statement_files` are the expected PDFs.
+- `coverage.complete_year` is true.
+- Every day in the year has a native balance.
+- `warnings` are either resolved or explicitly accepted by the user.
+
+Stop for user review when any of these appear:
+
+- Multiple account-number hints or conflicting institution labels.
+- Dates outside the requested tax year.
+- Missing opening balance or missing days.
+- Unknown or ambiguous currency, including `$` without country/context.
+- Scanned/image-only PDFs.
+- Low-confidence candidate rows.
+- Extracted totals that visibly conflict with statement summaries.
+
+Do not edit rows by guess. If the statement set cannot support a complete daily ledger, say so and ask for better statements or explicit user/preparer review.
+
+## 6. FX Dependency
+
+For USD accounts, confirm without FX.
+
+For non-USD accounts:
+
+1. Use the separate `get-yearly-fx-rate` skill to create a retained workpaper.
+2. Pass the dependency's `workpaper.json` to `confirm-account`.
+3. Do not search for FX sources inside this skill.
+4. Do not accept a bare rate in chat.
+5. Do not accept an ordinary yearly-average workpaper for FBAR conversion.
+
+The checker accepts the dependency only when `workpaper.json`:
+
+- Has `skill: "get-yearly-fx-rate"`.
+- Matches the account currency and tax year.
+- Has usable `foreign_per_usd` or `usd_per_foreign` conversion data.
+- Includes source/proof metadata.
+- Is marked as FBAR-compatible or year-end appropriate by fields such as `rate_kind`, `method`, `rate_type`, `conversion_context`, `use_case`, `fbar_compatible`, or source notes/categories/titles that clearly indicate FBAR, year-end, last-day, Treasury/FMS, or equivalent support.
+
+If the workpaper only says yearly average or annual average, stop and ask the user to complete the FX dependency in an FBAR-compatible mode first.
+
+## 7. Confirm One Account
+
+USD:
+
+```bash
+python3 "<package-root>/scripts/fbar_threshold_check.py" confirm-account \
+  --input "work/account-1.json" \
+  --balances-confirmed \
+  --out "work/account-1-confirmed.json"
+```
+
+Non-USD:
+
+```bash
+python3 "<package-root>/scripts/fbar_threshold_check.py" confirm-account \
+  --input "work/account-1.json" \
+  --balances-confirmed \
+  --fx-workpaper-json "work/fx-rate-proof/cop-2025-fbar/workpaper.json" \
+  --out "work/account-1-confirmed.json"
+```
+
+The confirmed JSON and CSV contain USD balances. Negative balances are treated as zero for threshold aggregation and maximum-value calculations.
+
+After confirmation, ask: "Do you have another foreign account for the same year to add?" Continue account-by-account until the user says no.
+
+## 8. Aggregate All Confirmed Accounts
+
+Run:
+
+```bash
+python3 "<package-root>/scripts/fbar_threshold_check.py" aggregate \
+  --account-ledger "work/account-1-confirmed.json" "work/account-2-confirmed.json" \
+  --out "outputs/fbar-2025-summary.json"
+```
+
+The aggregate command writes:
+
+- Final JSON decision file.
+- Final daily combined CSV.
+- Concise human PDF summary.
+
+Use the final JSON/CSV as the data source for the final answer. The PDF is for human reading only.
+
+## 9. Final Response
+
+Lead with the answer:
+
+```text
+Daily threshold: Yes/No/Insufficient records.
+FinCEN max-value view: Yes/No.
+```
+
+Then list:
+
+- Over-$10,000 dates, if any.
+- Final JSON, CSV, and PDF paths.
+- Per-account confirmed ledger paths.
+- FX workpaper paths used for non-USD accounts.
+- Any warnings or unresolved review limits.
+
+Do not call the result legal advice, and do not say an FBAR was filed or prepared.

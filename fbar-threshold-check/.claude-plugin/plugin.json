@@ -1,0 +1,8 @@
+{
+  "name": "fbar-threshold-check",
+  "description": "Client-agnostic FBAR threshold checker for daily aggregate and maximum-value views.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Timur"
+  }
+}
