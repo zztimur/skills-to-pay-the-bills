@@ -38,6 +38,35 @@ class PrivacyGateTests(unittest.TestCase):
         findings = self.scan_text("work/interest-analysis.json", "{}\n")
         self.assertTrue(any(item.code == "generated_artifact_path" for item in findings))
 
+    def test_missing_path_blocks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = privacy_gate.scan_path(Path(tmpdir) / "missing.txt")
+        self.assertEqual(result.scanned_files, 0)
+        self.assertTrue(any(item.code == "scan_path_missing" for item in result.findings))
+        self.assertTrue(any(item.severity == "block" for item in result.findings))
+
+    def test_large_text_blocks_as_partial_coverage(self):
+        data = ("a" * (privacy_gate.MAX_TEXT_BYTES + 1)).encode("utf-8")
+        findings = privacy_gate.scan_bytes("huge.txt", data)
+        self.assertTrue(any(item.code == "text_read_limit_exceeded" for item in findings))
+        self.assertTrue(any(item.severity == "block" for item in findings))
+
+    def test_symlink_file_blocks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "outside.txt"
+            target.write_text("outside\n", encoding="utf-8")
+            scan_root = root / "scan"
+            scan_root.mkdir()
+            link = scan_root / "linked.txt"
+            try:
+                link.symlink_to(target)
+            except OSError as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+            result = privacy_gate.scan_path(scan_root)
+        self.assertTrue(any(item.code == "symlink_found" for item in result.findings))
+        self.assertTrue(any(item.severity == "block" for item in result.findings))
+
     def test_placeholder_examples_are_allowed(self):
         text = "OPENAI_API_KEY=<OPENAI_API_KEY>\ncontact=team@example.com\n"
         findings = self.scan_text(".env.example", text)
