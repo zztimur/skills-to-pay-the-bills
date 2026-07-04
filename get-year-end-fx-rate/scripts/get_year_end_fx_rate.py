@@ -417,43 +417,130 @@ def wrap_text(value: object, width: int = 88) -> list[str]:
     return lines
 
 
-def pdf_text(text: object, x: int, y: int, *, size: int = 10, font: str = "F1") -> str:
+PDF_PAGE_WIDTH = 612
+PDF_PAGE_HEIGHT = 792
+PDF_MARGIN_X = 42
+PDF_BOTTOM_MARGIN = 62
+PDF_CONTENT_WIDTH = PDF_PAGE_WIDTH - (PDF_MARGIN_X * 2)
+
+PDF_INK = (0.10, 0.13, 0.18)
+PDF_MUTED = (0.39, 0.45, 0.55)
+PDF_BORDER = (0.82, 0.86, 0.91)
+PDF_SURFACE = (1.00, 1.00, 1.00)
+PDF_BACKGROUND = (0.97, 0.98, 0.99)
+PDF_NAVY = (0.09, 0.13, 0.20)
+PDF_TEAL = (0.03, 0.45, 0.53)
+
+
+def pdf_num(value: float | int) -> str:
+    return f"{float(value):.3f}".rstrip("0").rstrip(".")
+
+
+def pdf_color(color: tuple[float, float, float]) -> str:
+    return " ".join(pdf_num(component) for component in color)
+
+
+def pdf_rect(
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    *,
+    fill: tuple[float, float, float] | None = None,
+    stroke: tuple[float, float, float] | None = None,
+    line_width: float = 1,
+) -> str:
+    commands = ["q"]
+    if fill:
+        commands.append(f"{pdf_color(fill)} rg")
+    if stroke:
+        commands.append(f"{pdf_color(stroke)} RG")
+        commands.append(f"{pdf_num(line_width)} w")
+    commands.append(f"{pdf_num(x)} {pdf_num(y)} {pdf_num(width)} {pdf_num(height)} re")
+    if fill and stroke:
+        commands.append("B")
+    elif fill:
+        commands.append("f")
+    else:
+        commands.append("S")
+    commands.append("Q")
+    return "\n".join(commands)
+
+
+def pdf_line(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    *,
+    color: tuple[float, float, float] = PDF_BORDER,
+    line_width: float = 1,
+) -> str:
+    return "\n".join(
+        [
+            "q",
+            f"{pdf_color(color)} RG",
+            f"{pdf_num(line_width)} w",
+            f"{pdf_num(x1)} {pdf_num(y1)} m",
+            f"{pdf_num(x2)} {pdf_num(y2)} l",
+            "S",
+            "Q",
+        ]
+    )
+
+
+def pdf_text(
+    text: object,
+    x: int | float,
+    y: int | float,
+    *,
+    size: int = 10,
+    font: str = "F1",
+    color: tuple[float, float, float] = PDF_INK,
+) -> str:
     return "\n".join(
         [
             "BT",
+            f"{pdf_color(color)} rg",
             f"/{font} {size} Tf",
-            f"1 0 0 1 {x} {y} Tm",
+            f"1 0 0 1 {pdf_num(x)} {pdf_num(y)} Tm",
             f"({escape_pdf_text(text)}) Tj",
             "ET",
         ]
     )
 
 
-def pdf_document_bytes(lines: list[str], *, title: str) -> bytes:
-    page_width = 612
-    page_height = 792
-    margin_x = 54
-    start_y = 744
-    line_height = 14
-    lines_per_page = 48
-    pages: list[list[str]] = []
+def pdf_chars_for_width(width: float, size: int) -> int:
+    return max(18, int(width / (size * 0.48)))
 
-    for start in range(0, len(lines), lines_per_page):
-        page_lines = lines[start : start + lines_per_page]
-        commands = [
-            pdf_text(title, margin_x, start_y, size=15, font="F2"),
-            pdf_text("Retained support workpaper", margin_x, start_y - 20, size=9),
-        ]
-        y = start_y - 48
-        for raw_line in page_lines:
-            if raw_line == "":
-                y -= line_height
-                continue
-            font = "F2" if raw_line.endswith(":") else "F1"
-            for wrapped in wrap_text(raw_line, 92):
-                commands.append(pdf_text(wrapped, margin_x, y, size=9, font=font))
-                y -= line_height
-        pages.append(commands)
+
+def pdf_draw_wrapped_text(
+    commands: list[str],
+    text: object,
+    x: float,
+    y: float,
+    width: float,
+    *,
+    size: int = 9,
+    font: str = "F1",
+    color: tuple[float, float, float] = PDF_INK,
+    line_height: float | None = None,
+) -> float:
+    line_height = line_height if line_height is not None else size + 4
+    for line in wrap_text(text, pdf_chars_for_width(width, size)):
+        commands.append(pdf_text(line, x, y, size=size, font=font, color=color))
+        y -= line_height
+    return y
+
+
+def pdf_wrapped_height(text: object, width: float, *, size: int = 9, line_height: float | None = None) -> float:
+    line_height = line_height if line_height is not None else size + 4
+    return max(1, len(wrap_text(text, pdf_chars_for_width(width, size)))) * line_height
+
+
+def pdf_document_bytes_from_pages(pages: list[list[str]], *, title: str) -> bytes:
+    if not pages:
+        pages = [[pdf_text(title, PDF_MARGIN_X, PDF_PAGE_HEIGHT - 72, size=15, font="F2")]]
 
     objects: list[bytes] = []
     page_object_ids: list[int] = []
@@ -461,6 +548,7 @@ def pdf_document_bytes(lines: list[str], *, title: str) -> bytes:
     objects.append(b"")
     objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
     objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>")
 
     for page_commands in pages:
         content = "\n".join(page_commands).encode("latin-1", errors="replace")
@@ -472,8 +560,8 @@ def pdf_document_bytes(lines: list[str], *, title: str) -> bytes:
         page_object_ids.append(page_id)
         objects.append(
             (
-                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] "
-                f"/Resources << /ProcSet [/PDF /Text] /Font << /F1 3 0 R /F2 4 0 R >> >> "
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PDF_PAGE_WIDTH} {PDF_PAGE_HEIGHT}] "
+                f"/Resources << /ProcSet [/PDF /Text] /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> "
                 f"/Contents {content_id} 0 R >>"
             ).encode("ascii")
         )
@@ -509,6 +597,216 @@ def pdf_document_bytes(lines: list[str], *, title: str) -> bytes:
         ).encode("ascii")
     )
     return output.getvalue()
+
+
+def pdf_document_bytes(lines: list[str], *, title: str) -> bytes:
+    pages: list[list[str]] = []
+    y = 664
+    commands = pdf_page_frame(title=title, badge="", page_number=1)
+
+    for raw_line in lines:
+        if y < PDF_BOTTOM_MARGIN + 28:
+            pages.append(commands)
+            commands = pdf_page_frame(title=title, badge="", page_number=len(pages) + 1)
+            y = 664
+        if raw_line == "":
+            y -= 12
+            continue
+        font = "F2" if raw_line.endswith(":") else "F1"
+        color = PDF_NAVY if raw_line.endswith(":") else PDF_INK
+        y = pdf_draw_wrapped_text(commands, raw_line, PDF_MARGIN_X, y, PDF_CONTENT_WIDTH, size=9, font=font, color=color)
+    pages.append(commands)
+    return pdf_document_bytes_from_pages(pages, title=title)
+
+
+def pdf_page_frame(*, title: str, badge: str, page_number: int) -> list[str]:
+    commands = [
+        pdf_rect(0, 0, PDF_PAGE_WIDTH, PDF_PAGE_HEIGHT, fill=PDF_BACKGROUND),
+        pdf_rect(0, 688, PDF_PAGE_WIDTH, 104, fill=PDF_NAVY),
+        pdf_rect(0, 688, PDF_PAGE_WIDTH, 4, fill=PDF_TEAL),
+        pdf_text("FBAR-STYLE SUPPORT WORKPAPER", PDF_MARGIN_X, 752, size=7, font="F2", color=(0.71, 0.94, 0.96)),
+        pdf_text(title, PDF_MARGIN_X, 726, size=20, font="F2", color=(1, 1, 1)),
+        pdf_text("Year-end exchange-rate proof packet", PDF_MARGIN_X, 706, size=9, color=(0.82, 0.87, 0.92)),
+        pdf_line(PDF_MARGIN_X, 44, PDF_PAGE_WIDTH - PDF_MARGIN_X, 44, color=(0.86, 0.89, 0.93), line_width=0.75),
+        pdf_text("Generated by get-year-end-fx-rate", PDF_MARGIN_X, 28, size=7, color=PDF_MUTED),
+        pdf_text(f"Page {page_number}", PDF_PAGE_WIDTH - 78, 28, size=7, color=PDF_MUTED),
+    ]
+    if badge:
+        badge_width = max(72, min(138, 8 * len(badge) + 28))
+        badge_x = PDF_PAGE_WIDTH - PDF_MARGIN_X - badge_width
+        commands.extend(
+            [
+                pdf_rect(badge_x, 728, badge_width, 30, fill=(0.15, 0.22, 0.32), stroke=(0.27, 0.39, 0.50)),
+                pdf_text(badge, badge_x + 14, 739, size=10, font="F2", color=(1, 1, 1)),
+            ]
+        )
+    return commands
+
+
+def pdf_section_heading(commands: list[str], title: str, y: float) -> float:
+    commands.append(pdf_text(title, PDF_MARGIN_X, y, size=11, font="F2", color=PDF_NAVY))
+    commands.append(pdf_line(PDF_MARGIN_X, y - 6, PDF_PAGE_WIDTH - PDF_MARGIN_X, y - 6, color=PDF_BORDER))
+    return y - 22
+
+
+def pdf_add_key_value(
+    commands: list[str],
+    label: str,
+    value: object,
+    y: float,
+    *,
+    x: float = PDF_MARGIN_X,
+    width: float = PDF_CONTENT_WIDTH,
+) -> float:
+    commands.append(pdf_text(label.upper(), x, y, size=7, font="F2", color=PDF_MUTED))
+    return pdf_draw_wrapped_text(commands, value, x, y - 14, width, size=9, color=PDF_INK) - 4
+
+
+def pdf_add_fact_cell(
+    commands: list[str],
+    label: str,
+    value: object,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+) -> None:
+    commands.append(pdf_rect(x, y - height, width, height, fill=PDF_SURFACE, stroke=PDF_BORDER))
+    commands.append(pdf_text(label.upper(), x + 12, y - 17, size=6, font="F2", color=PDF_MUTED))
+    pdf_draw_wrapped_text(commands, value, x + 12, y - 33, width - 24, size=9, font="F2", color=PDF_INK, line_height=11)
+
+
+def pdf_workpaper_document_bytes(workpaper: dict[str, object]) -> bytes:
+    source = workpaper["source"]
+    proof = workpaper["proof"]
+    assert isinstance(source, dict)
+    assert isinstance(proof, dict)
+    saved_files = proof.get("saved_files", [])
+    limitations = proof.get("limitations", [])
+
+    title = "Year-End FX Rate Workpaper"
+    badge = f"{workpaper['currency']} {workpaper['year']}"
+    pages: list[list[str]] = []
+    commands = pdf_page_frame(title=title, badge=badge, page_number=1)
+    y = 650
+
+    def ensure_space(needed: float) -> None:
+        nonlocal commands, y
+        if y - needed >= PDF_BOTTOM_MARGIN:
+            return
+        pages.append(commands)
+        commands = pdf_page_frame(title=title, badge=badge, page_number=len(pages) + 1)
+        y = 650
+
+    rate_line = f"1 USD = {workpaper['foreign_per_usd']} {workpaper['currency']} year-end"
+    reciprocal_line = f"1 {workpaper['currency']} = {workpaper['usd_per_foreign']} USD"
+    rate_height = pdf_wrapped_height(rate_line, PDF_CONTENT_WIDTH - 40, size=17, line_height=20)
+    card_height = 82 + max(0, rate_height - 20)
+    card_y = y - card_height
+    commands.extend(
+        [
+            pdf_rect(PDF_MARGIN_X, card_y, PDF_CONTENT_WIDTH, card_height, fill=PDF_SURFACE, stroke=PDF_BORDER),
+            pdf_rect(PDF_MARGIN_X, card_y, 5, card_height, fill=PDF_TEAL),
+            pdf_text("YEAR-END RATE", PDF_MARGIN_X + 20, card_y + card_height - 24, size=7, font="F2", color=PDF_MUTED),
+        ]
+    )
+    next_y = pdf_draw_wrapped_text(
+        commands,
+        rate_line,
+        PDF_MARGIN_X + 20,
+        card_y + card_height - 48,
+        PDF_CONTENT_WIDTH - 40,
+        size=17,
+        font="F2",
+        color=PDF_NAVY,
+        line_height=20,
+    )
+    commands.append(pdf_text(f"Year-end date: {workpaper['year_end_date']}", PDF_MARGIN_X + 20, next_y - 3, size=8, color=PDF_MUTED))
+    commands.append(pdf_text(f"Reciprocal: {reciprocal_line}", PDF_MARGIN_X + 260, next_y - 3, size=8, color=PDF_MUTED))
+    y = card_y - 28
+
+    ensure_space(132)
+    y = pdf_section_heading(commands, "Workpaper Summary", y)
+    cell_gap = 10
+    cell_width = (PDF_CONTENT_WIDTH - cell_gap) / 2
+    cell_height = 44
+    facts = [
+        ("Currency", workpaper["currency"]),
+        ("Year", workpaper["year"]),
+        ("Rate direction", workpaper["rate_direction"]),
+        ("Retrieved", source.get("retrieved")),
+    ]
+    for index, (label, value) in enumerate(facts):
+        row = index // 2
+        col = index % 2
+        x = PDF_MARGIN_X + col * (cell_width + cell_gap)
+        top_y = y - row * (cell_height + 8)
+        pdf_add_fact_cell(commands, label, value, x, top_y, cell_width, cell_height)
+    y -= (cell_height * 2) + 22
+
+    ensure_space(148)
+    y = pdf_section_heading(commands, "Source", y)
+    y = pdf_add_key_value(commands, "Title", source.get("title"), y)
+    y = pdf_add_key_value(commands, "URL", source.get("url"), y)
+    y = pdf_add_key_value(commands, "Category", source.get("category"), y)
+    y = pdf_add_key_value(commands, "Note", source.get("note"), y)
+
+    ensure_space(92)
+    y = pdf_section_heading(commands, "Source Proof", y)
+    if saved_files:
+        for index, item in enumerate(saved_files, start=1):
+            assert isinstance(item, dict)
+            entry_height = 64 + pdf_wrapped_height(item.get("sha256"), PDF_CONTENT_WIDTH - 44, size=7, line_height=9)
+            ensure_space(entry_height + 10)
+            commands.append(pdf_rect(PDF_MARGIN_X, y - entry_height, PDF_CONTENT_WIDTH, entry_height, fill=PDF_SURFACE, stroke=PDF_BORDER))
+            commands.append(pdf_text(f"Saved source {index}", PDF_MARGIN_X + 16, y - 20, size=8, font="F2", color=PDF_TEAL))
+            commands.append(
+                pdf_text(
+                    f"{item.get('filename')} (retained in this proof packet)",
+                    PDF_MARGIN_X + 16,
+                    y - 38,
+                    size=9,
+                    font="F2",
+                    color=PDF_INK,
+                )
+            )
+            commands.append(pdf_text(f"Packet path: {item.get('packet_relative_path')}", PDF_MARGIN_X + 16, y - 54, size=8, color=PDF_MUTED))
+            pdf_draw_wrapped_text(
+                commands,
+                f"SHA-256: {item.get('sha256')}",
+                PDF_MARGIN_X + 16,
+                y - 70,
+                PDF_CONTENT_WIDTH - 32,
+                size=7,
+                font="F3",
+                color=PDF_MUTED,
+                line_height=9,
+            )
+            y -= entry_height + 12
+    else:
+        y = pdf_draw_wrapped_text(
+            commands,
+            "No saved source proof file was supplied; see proof limitations.",
+            PDF_MARGIN_X,
+            y,
+            PDF_CONTENT_WIDTH,
+            size=9,
+            color=PDF_INK,
+        )
+
+    if limitations:
+        ensure_space(52 + (len(limitations) * 18))
+        y = pdf_section_heading(commands, "Proof Limitations", y)
+        for item in limitations:
+            y = pdf_draw_wrapped_text(commands, f"- {item}", PDF_MARGIN_X, y, PDF_CONTENT_WIDTH, size=9, color=PDF_INK) - 3
+
+    ensure_space(76)
+    y = pdf_section_heading(commands, "Caveats", y)
+    for item in workpaper.get("caveats", []):
+        y = pdf_draw_wrapped_text(commands, f"- {item}", PDF_MARGIN_X, y, PDF_CONTENT_WIDTH, size=8, color=PDF_MUTED) - 2
+
+    pages.append(commands)
+    return pdf_document_bytes_from_pages(pages, title=title)
 
 
 def workpaper_folder(output_root: str, currency_code: str, year: int, source_title: str) -> Path:
@@ -652,51 +950,7 @@ def render_workpaper_md(workpaper: dict[str, object]) -> str:
 
 
 def render_workpaper_pdf_bytes(workpaper: dict[str, object]) -> bytes:
-    source = workpaper["source"]
-    proof = workpaper["proof"]
-    assert isinstance(source, dict)
-    assert isinstance(proof, dict)
-    saved_files = proof.get("saved_files", [])
-    limitations = proof.get("limitations", [])
-
-    lines = [
-        "Rate Details:",
-        f"Currency: {workpaper['currency']}",
-        f"Year: {workpaper['year']}",
-        f"Year-end date: {workpaper['year_end_date']}",
-        f"Rate: 1 USD = {workpaper['foreign_per_usd']} {workpaper['currency']} year-end",
-        f"Reciprocal: 1 {workpaper['currency']} = {workpaper['usd_per_foreign']} USD",
-        "",
-        "Source:",
-        f"Title: {source.get('title')}",
-        f"URL: {source.get('url')}",
-        f"Category: {source.get('category')}",
-        f"Retrieved: {source.get('retrieved')}",
-        f"Note: {source.get('note')}",
-        "",
-        "Source Proof:",
-    ]
-    if saved_files:
-        for index, item in enumerate(saved_files, start=1):
-            assert isinstance(item, dict)
-            lines.append(f"Saved source {index}: {item.get('filename')} (retained in this proof packet)")
-            lines.append(f"SHA-256 {index}: {item.get('sha256')}")
-    else:
-        lines.append("No saved source proof file was supplied; see proof limitations.")
-
-    if limitations:
-        lines.extend(["", "Proof Limitations:"])
-        lines.extend(str(item) for item in limitations)
-
-    lines.extend(
-        [
-            "",
-            "Caveats:",
-            "This is a retained support workpaper, not legal or tax advice.",
-            "Use this for year-end support only; do not reuse it as an income-tax average rate.",
-        ]
-    )
-    return pdf_document_bytes(lines, title="Year-End FX Rate Workpaper")
+    return pdf_workpaper_document_bytes(workpaper)
 
 
 def markdown_file_link(label: str, path: object) -> str:

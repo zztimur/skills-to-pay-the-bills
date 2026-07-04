@@ -33,6 +33,7 @@ coverage/
 *.log
 *.tmp
 *.temp
+tmp/
 
 # Generated workflow artifacts
 work/
