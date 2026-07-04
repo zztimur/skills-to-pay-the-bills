@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+set -eu
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+python3 privacy-gate/scripts/privacy_gate.py scan --staged --strict

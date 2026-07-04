@@ -7,6 +7,7 @@ Each top-level folder is a standalone skill package with its own `SKILL.md` entr
 ## Skills
 
 - `skill-forge/` - the gatekeeper. It audits, pressure tests, validates, and grades skill packages before release. Source repo: https://github.com/zztimur/skill-forge
+- `privacy-gate/` - scans staged commits, repo trees, or files for likely secrets, private data, generated artifacts, and unsafe binary exports before commit or release.
 - `statements-to-interest/` - turns one institution's machine-readable statement PDFs for one tax year into an IRS-oriented interest support packet.
 - `get-yearly-fx-rate/` - finds a published yearly average FX rate and leaves a cited proof workpaper instead of asking everyone to trust a number in chat.
 - `fbar-threshold-check/` - builds daily foreign-account ledgers, consumes `get-year-end-fx-rate` (preferred) or FBAR-compatible `get-yearly-fx-rate` proof workpapers for non-USD accounts, and checks FBAR daily/max-value thresholds.
@@ -21,6 +22,18 @@ git submodule update --init --recursive
 ```
 
 ## Gatekeeper Workflow
+
+Run `privacy-gate` before committing or publishing anything from this repo:
+
+```bash
+python3 privacy-gate/scripts/privacy_gate.py scan --staged --strict
+```
+
+To install the tracked local Git hook:
+
+```bash
+python3 privacy-gate/scripts/privacy_gate.py install-hook
+```
 
 Use `skill-forge` before shipping any skill change in this repo. If the package cannot survive the gatekeeper, it is not ready to push.
 
