@@ -19,7 +19,10 @@ from typing import Iterable
 
 getcontext().prec = 28
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
+# Ledgers older than 1.1 predate carry-gap coverage fields and would silently
+# bypass the confirmation gates; refuse them instead.
+SUPPORTED_SCHEMA_VERSIONS = {"1.1", "1.2"}
 THRESHOLD_USD = Decimal("10000")
 MIN_TEXT_CHARS = 40
 # Longest carry-forward run that is still routine for monthly statement cycles.
@@ -186,9 +189,18 @@ MONTH_DATE_PATTERNS = (
     re.compile(rf"\b(\d{{1,2}})\s+({MONTH_RE})\.?,?\s+(20\d{{2}})\b", re.I),
 )
 
+# One monetary token. Whitespace never bridges digit groups except in the
+# explicit space-grouped-with-decimals form, so adjacent statement columns
+# ("100.00 200.00 300.00") tokenize separately instead of merging.
+MONEY_NUMBER = (
+    r"(?:\d{1,2}(?:,\d{2})+,\d{3}(?:\.\d{1,2})?"  # lakh grouping: 1,23,456
+    r"|\d{1,3}(?:[.,'’]\d{3})+(?:[.,]\d{1,6})?"  # punct-grouped thousands: 1.234,56
+    r"|\d{1,3}(?:[ \u00a0]\d{3})+[.,]\d{1,2}"  # space-grouped, decimals required: 1 234,56
+    r"|\d+(?:[.,]\d{1,6})?)"  # plain: 1234.56
+)
 MONEY_RE = re.compile(
     r"(?<![A-Za-z0-9])"
-    r"(\(?\s*-?\s*(?:[$€£¥]\s*)?\d[\d\s,.'’]*\d(?:[,.]\d{1,6})?\s*\)?)"
+    r"(\(?\s*[-−]?\s*(?:[$€£¥]\s*)?" + MONEY_NUMBER + r"\s*\)?\s*[-−]?)"
     r"(?![A-Za-z0-9])"
 )
 
@@ -253,10 +265,12 @@ def parse_amount(raw: str) -> tuple[Decimal, tuple[str, ...]]:
     negative = False
     if value.startswith("(") and value.endswith(")"):
         negative = True
-    if "-" in value[:4]:
-        negative = True
     value = re.sub(r"[A-Za-z$€£¥()\s'’]", "", value)
-    value = value.replace("+", "").replace("-", "")
+    # Accounting formats place the minus before or after the digits (SAP/German
+    # trailing minus), and PDF text extraction often emits U+2212 for minus.
+    if re.match(r"^[-−]", value) or re.search(r"[-−]$", value):
+        negative = True
+    value = value.replace("+", "").replace("-", "").replace("−", "")
 
     if not value:
         raise InvalidOperation("empty decimal")
@@ -379,6 +393,20 @@ def parse_line_dates(line: str) -> list[tuple[date, str, str]]:
     return list(unique.values())
 
 
+def mask_date_spans(line: str) -> str:
+    """Blank out date substrings so their fragments cannot parse as money.
+
+    Uses '#' (not alphanumeric) so masking never bridges or blocks adjacent
+    monetary tokens; character positions are preserved.
+    """
+    chars = list(line)
+    for pattern in (*DATE_PATTERNS, *MONTH_DATE_PATTERNS):
+        for match in pattern.finditer(line):
+            for index in range(match.start(), match.end()):
+                chars[index] = "#"
+    return "".join(chars)
+
+
 def parse_money_values(line: str) -> list[tuple[Decimal, str, int, tuple[str, ...]]]:
     values: list[tuple[Decimal, str, int, tuple[str, ...]]] = []
     for match in MONEY_RE.finditer(line):
@@ -457,17 +485,22 @@ def load_pdf_lines(pdf_paths: list[str]) -> tuple[list[tuple[SourceRef, str]], l
 
         page_count = 0
         char_count = 0
-        with pdfplumber.open(str(path)) as pdf:
-            page_count = len(pdf.pages)
-            for page_index, page in enumerate(pdf.pages, start=1):
-                page_text = page.extract_text() or ""
-                char_count += len(page_text)
-                full_text_parts.append(page_text)
-                for line_index, line in enumerate(page_text.splitlines(), start=1):
-                    clean_line = clean_text(line)
-                    if clean_line:
-                        ref = SourceRef(str(path), page_index, line_index, clean_line)
-                        all_lines.append((ref, clean_line))
+        try:
+            with pdfplumber.open(str(path)) as pdf:
+                page_count = len(pdf.pages)
+                for page_index, page in enumerate(pdf.pages, start=1):
+                    page_text = page.extract_text() or ""
+                    char_count += len(page_text)
+                    full_text_parts.append(page_text)
+                    for line_index, line in enumerate(page_text.splitlines(), start=1):
+                        clean_line = clean_text(line)
+                        if clean_line:
+                            ref = SourceRef(str(path), page_index, line_index, clean_line)
+                            all_lines.append((ref, clean_line))
+        except FbarError:
+            raise
+        except Exception as exc:
+            raise FbarError(f"Could not read {path} as a PDF: {exc}", 2) from exc
 
         if char_count < MIN_TEXT_CHARS:
             warnings.append(f"{path.name} has little machine-readable text; scanned/image-only PDFs are out of scope for v1.")
@@ -495,7 +528,9 @@ def extract_balance_candidates(
         date_hits = parse_line_dates(line)
         if not date_hits:
             continue
-        money_values = parse_money_values(line)
+        # Mask date substrings first so fragments like "31/12" or "31, 2023"
+        # can never be selected as the day's balance.
+        money_values = parse_money_values(mask_date_spans(line))
         if not money_values:
             continue
 
@@ -515,6 +550,7 @@ def extract_balance_candidates(
         if not selected_values:
             selected_values = money_values
         amount, token, _pos, parse_notes = selected_values[-1]
+        bare_small_int = re.fullmatch(r"[-−]?\d{1,2}[-−]?", token) is not None
         if parse_notes:
             ambiguous_amount_lines += 1
         for parsed_date, date_confidence, date_note in date_hits:
@@ -532,6 +568,12 @@ def extract_balance_candidates(
             if parse_notes:
                 confidence = "medium" if confidence == "high" else confidence
                 notes.extend(parse_notes)
+            if bare_small_int:
+                # A 1-2 digit integer with no separators is more likely a row
+                # number or stray fragment than a balance; force review.
+                confidence = "low"
+                low_confidence += 1
+                notes.append(f"Selected value '{token}' is a bare 1-2 digit integer; verify it is really the balance.")
             candidates.append(
                 BalanceCandidate(
                     balance_date=parsed_date,
@@ -864,6 +906,13 @@ def require_account_data(path: Path) -> dict[str, object]:
         raise FbarError(f"{path} is not an fbar-threshold-check account ledger.", 2)
     if "daily_ledger" not in data:
         raise FbarError(f"{path} has no daily_ledger.", 2)
+    version = str(data.get("schema_version") or "missing")
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
+        raise FbarError(
+            f"{path} has unsupported schema_version {version}; re-run extract-account with the current skill "
+            f"(schema {SCHEMA_VERSION}) so coverage gating applies.",
+            2,
+        )
     return data
 
 
@@ -874,6 +923,13 @@ def as_decimal(value: object, label: str) -> Decimal:
         return Decimal(str(value))
     except InvalidOperation as exc:
         raise FbarError(f"Could not parse decimal value for {label}: {value}", 2) from exc
+
+
+def as_int(value: object, label: str) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as exc:
+        raise FbarError(f"Could not parse integer value for {label}: {value!r}", 2) from exc
 
 
 def validate_fx_workpaper(path: Path, currency: str, year: int) -> dict[str, object]:
@@ -904,6 +960,11 @@ def validate_fx_workpaper(path: Path, currency: str, year: int) -> dict[str, obj
     usd_per_foreign = workpaper.get("usd_per_foreign")
     if not foreign_per_usd and not usd_per_foreign:
         raise FbarError("FX workpaper must include foreign_per_usd or usd_per_foreign.", 2)
+    for rate_key, rate_value in (("foreign_per_usd", foreign_per_usd), ("usd_per_foreign", usd_per_foreign)):
+        if rate_value:
+            rate = as_decimal(rate_value, rate_key)
+            if rate <= 0:
+                raise FbarError(f"FX workpaper {rate_key} must be a positive rate; got {rate_value}.", 2)
 
     # get-year-end-fx-rate workpapers are year-end by construction; the
     # FBAR-compatibility heuristic only guards yearly-average workpapers.
@@ -940,10 +1001,11 @@ def is_fbar_compatible_workpaper(workpaper: dict[str, object]) -> bool:
             value = proof.get(key)
             if value is not None:
                 values.append(str(value))
-    if isinstance(caveats, list):
-        values.extend(str(item) for item in caveats)
-
-    text = " ".join(values).lower()
+    # Caveats are warnings by nature ("not for FBAR use") and must never
+    # count as positive FBAR/year-end evidence; they only feed the
+    # average-language check.
+    positive_text = " ".join(values).lower()
+    caveat_text = " ".join(str(item) for item in caveats).lower() if isinstance(caveats, list) else ""
     positive_terms = (
         "fbar",
         "fincen",
@@ -954,9 +1016,11 @@ def is_fbar_compatible_workpaper(workpaper: dict[str, object]) -> bool:
         "12/31",
         "12-31",
         "december 31",
-        "treasury financial management service",
+        "dec 31",
+        "dec. 31",
+        "treasury",
+        "fiscal data",
         "financial management service",
-        "treasury reporting",
         "fms",
     )
     average_terms = (
@@ -967,8 +1031,8 @@ def is_fbar_compatible_workpaper(workpaper: dict[str, object]) -> bool:
         "period average",
         "average exchange rate",
     )
-    has_positive = any(term in text for term in positive_terms)
-    has_only_average = any(term in text for term in average_terms) and not has_positive
+    has_positive = any(term in positive_text for term in positive_terms)
+    has_only_average = any(term in positive_text + " " + caveat_text for term in average_terms) and not has_positive
     return has_positive and not has_only_average
 
 
@@ -1000,14 +1064,18 @@ def command_confirm_account(args: argparse.Namespace) -> int:
     if not isinstance(account, dict):
         raise FbarError("Account ledger has no account object.", 2)
     currency = str(account.get("currency") or "UNKNOWN").upper()
-    tax_year = int(data.get("tax_year", 0))
+    tax_year = as_int(data.get("tax_year", 0), "tax_year")
     if currency in {"UNKNOWN", "MIXED"}:
         raise FbarError("Account currency is not confirmed; regenerate with --account-currency or split the account.", 2)
 
     fx_workpaper: dict[str, object] | None = None
     if currency != "USD":
         if not args.fx_workpaper_json:
-            raise FbarError("Non-USD account requires --fx-workpaper-json from get-yearly-fx-rate.", 2)
+            raise FbarError(
+                "Non-USD account requires --fx-workpaper-json from get-year-end-fx-rate (preferred) "
+                "or an FBAR-compatible get-yearly-fx-rate workpaper.",
+                2,
+            )
         fx_workpaper = validate_fx_workpaper(Path(args.fx_workpaper_json), currency, tax_year)
     elif args.fx_workpaper_json:
         raise FbarError("Do not pass FX workpaper for USD accounts.", 2)
@@ -1023,7 +1091,10 @@ def command_confirm_account(args: argparse.Namespace) -> int:
         usd = convert_to_usd(native, currency, fx_workpaper)
         threshold_value = usd if usd > 0 else Decimal("0")
         row["usd_balance"] = fmt_decimal(usd)
-        row["threshold_usd_value"] = fmt_decimal(threshold_value)
+        # Keep sub-cent precision in the threshold work value: rounding to
+        # cents before the FinCEN whole-dollar ceiling can flip the answer
+        # at the $10,000 boundary.
+        row["threshold_usd_value"] = fmt_decimal(threshold_value, "0.000001")
         if native < 0:
             notes = row.get("notes")
             if not isinstance(notes, list):
@@ -1092,10 +1163,12 @@ def convert_to_usd(native: Decimal, currency: str, workpaper: dict[str, object] 
         raise FbarError("Missing FX workpaper for non-USD conversion.", 2)
     if workpaper.get("foreign_per_usd"):
         rate = as_decimal(workpaper.get("foreign_per_usd"), "foreign_per_usd")
-        if rate == 0:
-            raise FbarError("FX foreign_per_usd rate cannot be zero.", 2)
+        if rate <= 0:
+            raise FbarError("FX foreign_per_usd rate must be positive.", 2)
         return native / rate
     rate = as_decimal(workpaper.get("usd_per_foreign"), "usd_per_foreign")
+    if rate <= 0:
+        raise FbarError("FX usd_per_foreign rate must be positive.", 2)
     return native * rate
 
 
@@ -1117,11 +1190,32 @@ def load_confirmed_account(path: Path) -> dict[str, object]:
 
 def command_aggregate(args: argparse.Namespace) -> int:
     out_path = Path(args.out)
-    accounts = [load_confirmed_account(Path(path)) for path in args.account_ledger]
+    resolved_paths = [Path(path).resolve() for path in args.account_ledger]
+    if len(set(resolved_paths)) != len(resolved_paths):
+        raise FbarError("Duplicate --account-ledger paths detected; pass each confirmed account exactly once.", 2)
+    accounts = [load_confirmed_account(path) for path in resolved_paths]
     if not accounts:
         raise FbarError("At least one --account-ledger is required.", 2)
 
-    tax_years = {int(account.get("tax_year", 0)) for account in accounts}
+    seen_identities: set[tuple[object, ...]] = set()
+    for account_data, ledger_path in zip(accounts, resolved_paths, strict=True):
+        account = account_data.get("account", {})
+        if not isinstance(account, dict):
+            account = {}
+        identity = (
+            account.get("account_id"),
+            account.get("institution"),
+            tuple(account.get("account_number_hints") or []),
+        )
+        if identity in seen_identities:
+            raise FbarError(
+                f"{ledger_path} describes the same account as another ledger ({identity[0]!r} at {identity[1]!r}); "
+                "if these are truly different accounts, re-extract one with a distinct --account-id.",
+                2,
+            )
+        seen_identities.add(identity)
+
+    tax_years = {as_int(account.get("tax_year", 0), "tax_year") for account in accounts}
     if len(tax_years) != 1:
         raise FbarError("All account ledgers must have the same tax year.", 2)
     tax_year = tax_years.pop()
@@ -1247,16 +1341,27 @@ def command_aggregate(args: argparse.Namespace) -> int:
 
 
 def unique_account_labels(accounts: list[dict[str, object]]) -> list[str]:
-    labels: list[str] = []
-    counts: dict[str, int] = defaultdict(int)
-    for account_data in accounts:
+    bases: list[str] = []
+    for index, account_data in enumerate(accounts, start=1):
         account = account_data.get("account", {})
         if not isinstance(account, dict):
             account = {}
-        base = str(account.get("account_id") or f"account-{len(labels) + 1}")
-        base = re.sub(r"[^A-Za-z0-9_-]+", "-", base).strip("-") or f"account-{len(labels) + 1}"
-        counts[base] += 1
-        labels.append(base if counts[base] == 1 else f"{base}-{counts[base]}")
+        base = str(account.get("account_id") or f"account-{index}")
+        base = re.sub(r"[^A-Za-z0-9_-]+", "-", base).strip("-") or f"account-{index}"
+        bases.append(base)
+    # Suffix against the full label set: a naive per-base counter can collide
+    # with another account's literal id (acct, acct, acct-2) and silently
+    # drop/double-count ledgers in the daily combination.
+    used: set[str] = set()
+    labels: list[str] = []
+    for base in bases:
+        label = base
+        bump = 1
+        while label in used:
+            bump += 1
+            label = f"{base}-{bump}"
+        used.add(label)
+        labels.append(label)
     return labels
 
 
@@ -1413,11 +1518,19 @@ def command_self_test(_args: argparse.Namespace) -> int:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         test_decimal_parsing()
+        test_money_tokenization()
+        test_sign_formats()
+        test_line_extraction()
         test_build_daily_rows()
         test_leap_year()
         test_same_day_variance()
         test_carry_gap_gate(root)
         test_fx_guardrails(root)
+        test_fx_rate_guards(root)
+        test_boundary_rounding(root)
+        test_label_collisions()
+        test_duplicate_ledger_refused(root)
+        test_schema_gate(root)
         test_confirm_and_aggregate(root)
         test_maxima_disagreement(root)
         test_csv_naming()
@@ -1541,18 +1654,25 @@ def make_fbar_fx_workpaper(root: Path, currency: str = "COP", year: int = 2025) 
     return path
 
 
-def make_year_end_fx_workpaper(root: Path, currency: str = "COP", year: int = 2025) -> Path:
-    path = root / f"{currency.lower()}-{year}-year-end-workpaper.json"
+def make_year_end_fx_workpaper(
+    root: Path,
+    currency: str = "COP",
+    year: int = 2025,
+    foreign_per_usd: str | None = "4200",
+    usd_per_foreign: str | None = "0.0002380952",
+    name: str = "year-end-workpaper",
+) -> Path:
+    path = root / f"{currency.lower()}-{year}-{name}.json"
     data = {
         "skill": "get-year-end-fx-rate",
         "purpose": "FBAR-style year-end USD exchange-rate support",
         "currency": currency,
         "year": year,
         "year_end_date": f"{year}-12-31",
-        "rate": "4200",
-        "rate_direction": "foreign-per-usd",
-        "foreign_per_usd": "4200",
-        "usd_per_foreign": "0.0002380952",
+        "rate": foreign_per_usd or usd_per_foreign,
+        "rate_direction": "foreign-per-usd" if foreign_per_usd else "usd-per-foreign",
+        "foreign_per_usd": foreign_per_usd,
+        "usd_per_foreign": usd_per_foreign,
         "source": {
             # Deliberately neutral wording: the year-end skill must be accepted
             # without the yearly-average FBAR-keyword heuristic.
@@ -1595,6 +1715,172 @@ def make_yearly_average_workpaper(root: Path) -> Path:
     }
     write_json(path, data)
     return path
+
+
+def test_money_tokenization() -> None:
+    # Adjacent statement columns must tokenize separately, never merge.
+    tokens = [token for _amt, token, _pos, _n in parse_money_values("Saldo 100.00 200.00 300.00")]
+    assert tokens == ["100.00", "200.00", "300.00"], tokens
+    # Space-grouped French amounts (decimals required) stay one token.
+    values = parse_money_values("solde 1 234,56")
+    assert len(values) == 1 and values[0][0] == Decimal("1234.56")
+    # Columnar integers without decimals do not merge via space grouping.
+    # ("2000" is dropped by the bare-year guard, not merged into "1500".)
+    tokens = [token for _amt, token, _pos, _n in parse_money_values("balance 1500 2000")]
+    assert tokens == ["1500"], tokens
+    tokens = [token for _amt, token, _pos, _n in parse_money_values("balance 1500 2600")]
+    assert tokens == ["1500", "2600"], tokens
+    # Date masking removes date fragments from money candidates.
+    masked = mask_date_spans("31/12/2023 closing balance 1,234.56 1,300.00")
+    amounts = [amt for amt, _t, _p, _n in parse_money_values(masked)]
+    assert amounts == [Decimal("1234.56"), Decimal("1300.00")], amounts
+    masked = mask_date_spans("1,234.56 balance as of Dec 31, 2023")
+    amounts = [amt for amt, _t, _p, _n in parse_money_values(masked)]
+    assert amounts == [Decimal("1234.56")], amounts
+
+
+def test_sign_formats() -> None:
+    cases = {
+        "9.500,25-": Decimal("-9500.25"),
+        "−4,321.00": Decimal("-4321.00"),
+        "US$ -500": Decimal("-500"),
+        "(2,50)": Decimal("-2.50"),
+        "1.234,56": Decimal("1234.56"),
+    }
+    for raw, expected in cases.items():
+        amount, _notes = parse_amount(raw)
+        assert amount == expected, f"{raw!r} parsed to {amount}, expected {expected}"
+    # U+2212 minus survives tokenization end-to-end.
+    values = parse_money_values("balance −4,321.00")
+    assert len(values) == 1 and values[0][0] == Decimal("-4321.00")
+
+
+def test_line_extraction() -> None:
+    def extract_one(line: str, year: int = 2023, currency: str = "EUR") -> BalanceCandidate:
+        candidates, _warnings = extract_balance_candidates([(SourceRef("t.pdf", 1, 1, line), line)], year, currency)
+        assert candidates, f"no candidate extracted from {line!r}"
+        return candidates[-1]
+
+    us = extract_one("12/31/2023 Ending balance 1,234.56")
+    assert us.amount == Decimal("1234.56") and us.confidence == "high"
+    columnar = extract_one("2023-12-31 Saldo 100.00 200.00 300.00")
+    assert columnar.amount == Decimal("300.00"), columnar.amount
+    european = extract_one("31.12.2023 Saldo 1.500,00 12.345,67")
+    assert european.amount == Decimal("12345.67"), european.amount
+    date_after = extract_one("1,234.56 balance as of Dec 31, 2023")
+    assert date_after.amount == Decimal("1234.56"), date_after.amount
+    trailing = extract_one("31/12/2023 closing balance 9.500,25-")
+    assert trailing.amount == Decimal("-9500.25"), trailing.amount
+    bare = extract_one("31/12/2023 balance 5")
+    assert bare.amount == Decimal("5") and bare.confidence == "low"
+
+
+def test_fx_rate_guards(root: Path) -> None:
+    zero_rate = make_year_end_fx_workpaper(root, foreign_per_usd=None, usd_per_foreign="0", name="zero-rate")
+    try:
+        validate_fx_workpaper(zero_rate, "COP", 2025)
+    except FbarError as exc:
+        assert "positive" in str(exc)
+    else:
+        raise AssertionError("zero usd_per_foreign must be rejected")
+    negative_rate = make_year_end_fx_workpaper(root, foreign_per_usd=None, usd_per_foreign="-0.00025", name="negative-rate")
+    try:
+        validate_fx_workpaper(negative_rate, "COP", 2025)
+    except FbarError as exc:
+        assert "positive" in str(exc)
+    else:
+        raise AssertionError("negative usd_per_foreign must be rejected")
+
+    # Caveats must never count as positive FBAR/year-end evidence.
+    caveat_only = root / "caveat-only-workpaper.json"
+    write_json(
+        caveat_only,
+        {
+            "skill": "get-yearly-fx-rate",
+            "currency": "CAD",
+            "year": 2025,
+            "foreign_per_usd": "1.37",
+            "usd_per_foreign": "0.729927",
+            "source": {
+                "title": "IRS Yearly average currency exchange rates",
+                "url": "https://www.irs.gov/",
+                "retrieved": "2026-07-04",
+            },
+            "proof": {"workpaper_json": str(caveat_only)},
+            "caveats": ["Not intended for FBAR or year-end use."],
+        },
+    )
+    try:
+        validate_fx_workpaper(caveat_only, "CAD", 2025)
+    except FbarError:
+        pass
+    else:
+        raise AssertionError("caveat wording must not qualify a yearly-average workpaper as FBAR-compatible")
+
+
+def test_boundary_rounding(root: Path) -> None:
+    fx = make_year_end_fx_workpaper(root, foreign_per_usd=None, usd_per_foreign="0.010000004", name="boundary-rate")
+    ledger = synthetic_account(root, "boundary-a", 2025, "COP", Decimal("1000000"), {}, fx)
+    out = root / "boundary-summary.json"
+    command_aggregate(argparse.Namespace(account_ledger=[str(ledger)], out=str(out), csv=None, pdf=None))
+    summary = load_json(out)
+    daily = summary["daily_threshold"]
+    max_view = summary["fincen_max_value_view"]
+    assert isinstance(daily, dict) and isinstance(max_view, dict)
+    # True USD value is 10000.004: over the threshold, FinCEN whole-dollar 10001.
+    assert daily["answer"] == "yes", daily
+    assert max_view["exceeded"] is True, max_view
+    assert max_view["aggregate_account_max_whole_dollars"] == 10001, max_view
+
+
+def test_label_collisions() -> None:
+    accounts = [
+        {"account": {"account_id": "acct"}},
+        {"account": {"account_id": "acct"}},
+        {"account": {"account_id": "acct-2"}},
+    ]
+    labels = unique_account_labels(accounts)  # type: ignore[arg-type]
+    assert len(labels) == len(set(labels)) == 3, labels
+    assert labels[0] == "acct"
+
+
+def test_duplicate_ledger_refused(root: Path) -> None:
+    ledger = synthetic_account(root, "dup-a", 2025, "USD", Decimal("6000"), {})
+    out = root / "dup-summary.json"
+    try:
+        command_aggregate(argparse.Namespace(account_ledger=[str(ledger), str(ledger)], out=str(out), csv=None, pdf=None))
+    except FbarError as exc:
+        assert "Duplicate" in str(exc)
+    else:
+        raise AssertionError("duplicate ledger paths must be refused")
+    twin = root / "dup-a-copy.json"
+    twin.write_text(Path(ledger).read_text(encoding="utf-8"), encoding="utf-8")
+    try:
+        command_aggregate(argparse.Namespace(account_ledger=[str(ledger), str(twin)], out=str(out), csv=None, pdf=None))
+    except FbarError as exc:
+        assert "same account" in str(exc)
+    else:
+        raise AssertionError("two ledgers describing the same account must be refused")
+
+
+def test_schema_gate(root: Path) -> None:
+    stale = root / "v10-ledger.json"
+    write_json(
+        stale,
+        {
+            "schema_version": "1.0",
+            "skill": "fbar-threshold-check",
+            "status": "confirmed",
+            "tax_year": 2025,
+            "daily_ledger": [],
+        },
+    )
+    try:
+        require_account_data(stale)
+    except FbarError as exc:
+        assert "schema_version" in str(exc)
+    else:
+        raise AssertionError("pre-1.1 ledgers must be refused so coverage gating applies")
 
 
 def test_decimal_parsing() -> None:
