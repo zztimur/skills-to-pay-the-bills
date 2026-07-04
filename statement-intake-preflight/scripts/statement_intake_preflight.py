@@ -199,8 +199,9 @@ def load_pdf_files(paths: list[str]) -> list[dict[str, object]]:
             continue
         if not path.exists():
             warnings.append(f"{path} was not found.")
-            files.append(file_profile(path, [], warnings, is_pdf=True))
+            files.append(file_profile(path, [], warnings, is_pdf=True, text_layer_expected=False))
             continue
+        read_failed = False
         try:
             with pdfplumber.open(str(path)) as pdf:
                 for index, page in enumerate(pdf.pages, start=1):
@@ -208,15 +209,22 @@ def load_pdf_files(paths: list[str]) -> list[dict[str, object]]:
                     pages.append({"page": index, "text": text})
         except Exception as exc:  # pragma: no cover - depends on malformed PDF internals.
             warnings.append(f"{path.name} could not be read as a PDF: {exc}")
-        files.append(file_profile(path, pages, warnings, is_pdf=True))
+            read_failed = True
+        files.append(file_profile(path, pages, warnings, is_pdf=True, text_layer_expected=not read_failed))
     return files
 
 
-def file_profile(path: Path, pages: list[dict[str, object]], warnings: list[str], is_pdf: bool) -> dict[str, object]:
+def file_profile(
+    path: Path,
+    pages: list[dict[str, object]],
+    warnings: list[str],
+    is_pdf: bool,
+    text_layer_expected: bool = True,
+) -> dict[str, object]:
     text = "\n".join(str(page.get("text", "")) for page in pages)
     lines = split_lines(text)
     char_count = len(text.strip())
-    if is_pdf and char_count < MIN_TEXT_CHARS:
+    if is_pdf and text_layer_expected and char_count < MIN_TEXT_CHARS:
         warnings.append(f"{path.name} has little machine-readable text; scanned/image-only PDFs are out of scope for v1.")
     return {
         "file": str(path),
@@ -327,14 +335,25 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
     for item in files:
         file_warnings = [str(warning) for warning in item.get("warnings", [])]
         warnings.extend(file_warnings)
-        if not item.get("is_pdf", True):
+        is_pdf = bool(item.get("is_pdf", True))
+        missing_file = any("was not found" in warning for warning in file_warnings)
+        unreadable_pdf = any("could not be read as a PDF" in warning for warning in file_warnings)
+        structural_stop = False
+        if not is_pdf:
             add_gate(gates, "non-pdf-input", f"{Path(str(item.get('file'))).name} is not a PDF.", "stop")
-        if any("was not found" in warning for warning in file_warnings):
+            structural_stop = True
+        if missing_file:
             add_gate(gates, "missing-file", f"{item.get('file')} was not found.", "stop")
-        if int(item.get("character_count", 0)) < MIN_TEXT_CHARS:
+            structural_stop = True
+        if unreadable_pdf:
+            add_gate(gates, "unreadable-pdf", f"{Path(str(item.get('file'))).name} could not be read as a PDF.", "stop")
+            structural_stop = True
+        if not structural_stop and int(item.get("character_count", 0)) < MIN_TEXT_CHARS:
             add_gate(gates, "low-text-pdf", f"{Path(str(item.get('file'))).name} has little machine-readable text.", "stop")
+            structural_stop = True
         lines = [str(line) for line in item.get("lines", [])]
-        all_lines.extend(lines)
+        if not structural_stop:
+            all_lines.extend(lines)
         years = detect_years(lines)
         statement_files.append(
             {
@@ -359,7 +378,7 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
         message = f"Detected year(s) outside requested tax year {tax_year}: {', '.join(str(year) for year in outside_years)}."
         warnings.append(message)
         add_gate(gates, "mixed-years", message)
-    if not detected_years:
+    if all_lines and not detected_years:
         warnings.append("No statement years were detected; verify the PDFs belong to the requested tax year.")
         add_gate(gates, "unknown-year-coverage", "No statement years were detected; verify statement periods manually.")
 
@@ -368,7 +387,7 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
         message = "Currency uses '$' but no unambiguous ISO code or currency name was found."
         warnings.append(message)
         add_gate(gates, "ambiguous-dollar", message)
-    if currency["code"] == "UNKNOWN":
+    if all_lines and currency["code"] == "UNKNOWN":
         message = "No account currency marker was found; downstream extraction may need an explicit account currency."
         warnings.append(message)
         add_gate(gates, "unknown-currency", message)
@@ -382,7 +401,7 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
         message = f"Multiple account hints found; verify this is one account: {', '.join(account_hints[:8])}."
         warnings.append(message)
         add_gate(gates, "possible-mixed-accounts", message)
-    if scope == "one-account" and not account_hints:
+    if all_lines and scope == "one-account" and not account_hints:
         message = "No account number/designation hint was found; verify this is one account."
         warnings.append(message)
         add_gate(gates, "unknown-account", message)
@@ -393,7 +412,7 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
         message = f"Multiple institution hints found; verify this is one institution: {', '.join(institution_hints[:6])}."
         warnings.append(message)
         add_gate(gates, "possible-mixed-institutions", message)
-    if scope == "one-institution" and not institution_hints:
+    if all_lines and scope == "one-institution" and not institution_hints:
         message = "No institution hint was found in early statement text; verify the institution manually."
         warnings.append(message)
         add_gate(gates, "unknown-institution", message)
@@ -429,7 +448,13 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
             "low_text_files": [
                 str(item.get("file"))
                 for item in statement_files
-                if int(item.get("character_count") or 0) < MIN_TEXT_CHARS
+                if item.get("is_pdf")
+                and int(item.get("character_count") or 0) < MIN_TEXT_CHARS
+                and not any(
+                    marker in str(warning)
+                    for warning in item.get("warnings", [])
+                    for marker in ("was not found", "could not be read as a PDF")
+                )
             ],
         },
         "warnings": stable_unique(warnings),
@@ -527,6 +552,52 @@ def command_dependency_check(_args: argparse.Namespace) -> int:
     return 0
 
 
+def command_smoke_test(_args: argparse.Namespace) -> int:
+    if pdfplumber is None:
+        raise PreflightError("pdfplumber is required for smoke-test. Use a Python environment that has pdfplumber installed.")
+    try:
+        from reportlab.pdfgen import canvas
+    except ImportError as exc:
+        raise PreflightError("reportlab is required for smoke-test. Use a Python environment that has reportlab installed.") from exc
+
+    failures: list[str] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        pdf_path = root / "smoke-statement.pdf"
+        out_path = root / "smoke-preflight.json"
+        csv_path = root / "smoke-preflight-review.csv"
+
+        doc = canvas.Canvas(str(pdf_path))
+        doc.drawString(72, 740, "Example Bank Monthly Statement")
+        doc.drawString(72, 720, "Account number ACCT")
+        doc.drawString(72, 700, "Statement period January 1 2025 to January 31 2025")
+        doc.drawString(72, 680, "Currency EUR")
+        doc.drawString(72, 660, "Closing balance 100.00 EUR")
+        doc.save()
+
+        data = build_preflight(load_pdf_files([str(pdf_path)]), 2025, "one-account", out_path, csv_path)
+        write_json(out_path, data)
+        write_review_csv(csv_path, data)
+
+        if data["status"] != "ready-for-domain-extraction":
+            failures.append(f"status: expected ready, got {data['status']}")
+        if data["currency"]["code"] != "EUR":  # type: ignore[index]
+            failures.append(f"currency: expected EUR, got {data['currency']}")
+        if data["account_hints"] != ["ACCT"]:  # type: ignore[index]
+            failures.append(f"account: expected account hint ACCT, got {data['account_hints']}")
+        if not out_path.exists():
+            failures.append("json: expected smoke JSON to be written")
+        if not csv_path.exists():
+            failures.append("csv: expected smoke review CSV to be written")
+
+    if failures:
+        for failure in failures:
+            print(f"FAIL: {failure}", file=sys.stderr)
+        return 1
+    print("Smoke-test passed: real PDF preflight path")
+    return 0
+
+
 def synthetic_file(name: str, text: str, warnings: list[str] | None = None, is_pdf: bool = True) -> dict[str, object]:
     return file_profile(Path(name), [{"page": 1, "text": text}], warnings or [], is_pdf=is_pdf)
 
@@ -539,7 +610,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             [
                 synthetic_file(
                     "clean.pdf",
-                    "Example Bank\nAccount number 1234\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00",
+                    "Example Bank\nAccount number ACCT\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00",
                 )
             ],
             2025,
@@ -551,11 +622,11 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append(f"clean-status: expected ready, got {clean['status']}")
         if clean["currency"]["code"] != "USD":  # type: ignore[index]
             failures.append(f"clean-currency: expected USD, got {clean['currency']}")
-        if clean["account_hints"] != ["1234"]:  # type: ignore[index]
-            failures.append(f"clean-account: expected account hint 1234, got {clean['account_hints']}")
+        if clean["account_hints"] != ["ACCT"]:  # type: ignore[index]
+            failures.append(f"clean-account: expected account hint ACCT, got {clean['account_hints']}")
 
         mixed_year = build_preflight(
-            [synthetic_file("mixed-year.pdf", "Example Bank\nAccount number 1234\nStatement period December 2024 to January 2025\nCurrency USD")],
+            [synthetic_file("mixed-year.pdf", "Example Bank\nAccount number ACCT\nStatement period December 2024 to January 2025\nCurrency USD")],
             2025,
             "one-account",
             root / "mixed-year.json",
@@ -565,7 +636,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("mixed-year: expected mixed-years gate")
 
         mixed_currency = build_preflight(
-            [synthetic_file("mixed-currency.pdf", "Example Bank\nAccount number 1234\nStatement period January 2025\nCurrency USD\nCurrency COP")],
+            [synthetic_file("mixed-currency.pdf", "Example Bank\nAccount number ACCT\nStatement period January 2025\nCurrency USD\nCurrency COP")],
             2025,
             "one-account",
             root / "mixed-currency.json",
@@ -575,7 +646,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("mixed-currency: expected mixed-currencies gate")
 
         dollar = build_preflight(
-            [synthetic_file("dollar.pdf", "Example Bank\nAccount number 1234\nStatement period January 2025\nClosing balance $100.00")],
+            [synthetic_file("dollar.pdf", "Example Bank\nAccount number ACCT\nStatement period January 2025\nClosing balance $100.00")],
             2025,
             "one-account",
             root / "dollar.json",
@@ -585,7 +656,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("dollar: expected ambiguous-dollar gate")
 
         accounts = build_preflight(
-            [synthetic_file("accounts.pdf", "Example Bank\nAccount number 1234\nAccount number 9999\nStatement period January 2025\nCurrency USD")],
+            [synthetic_file("accounts.pdf", "Example Bank\nAccount number ACCT\nAccount number OTHR\nStatement period January 2025\nCurrency USD")],
             2025,
             "one-account",
             root / "accounts.json",
@@ -631,6 +702,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     dependency = subparsers.add_parser("dependency-check", help="Check extraction dependency availability.")
     dependency.set_defaults(func=command_dependency_check)
+
+    smoke = subparsers.add_parser("smoke-test", help="Run a real PDF extraction smoke test.")
+    smoke.set_defaults(func=command_smoke_test)
 
     self_test = subparsers.add_parser("self-test", help="Run deterministic preflight tests.")
     self_test.set_defaults(func=command_self_test)
