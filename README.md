@@ -9,7 +9,7 @@ Each top-level folder is a standalone skill package with its own `SKILL.md` entr
 - `skill-forge/` - the gatekeeper. It audits, pressure tests, validates, and grades skill packages before release. Source repo: https://github.com/zztimur/skill-forge
 - `statements-to-interest/` - turns one institution's machine-readable statement PDFs for one tax year into an IRS-oriented interest support packet.
 - `get-yearly-fx-rate/` - finds a published yearly average FX rate and leaves a cited proof workpaper instead of asking everyone to trust a number in chat.
-- `fbar-threshold-check/` - builds daily foreign-account ledgers, consumes `get-yearly-fx-rate` proof workpapers for non-USD accounts, and checks FBAR daily/max-value thresholds.
+- `fbar-threshold-check/` - builds daily foreign-account ledgers, consumes `get-year-end-fx-rate` (preferred) or FBAR-compatible `get-yearly-fx-rate` proof workpapers for non-USD accounts, and checks FBAR daily/max-value thresholds.
 - `get-year-end-fx-rate/` - finds a Treasury/Fiscal Data or verified manual year-end FX rate for FBAR-style conversion proof.
 
 ## Clone Setup

@@ -29,9 +29,12 @@ This skill reports both the day-by-day aggregate view and the FinCEN maximum-val
 
 ## FX Dependency Note
 
-The user has chosen `get-yearly-fx-rate` as this skill's single FX dependency. The FBAR checker must not duplicate FX sourcing. It may consume a dependency `workpaper.json`, but ordinary yearly-average workpapers are not accepted for FBAR conversion unless the dependency adds explicit FBAR/year-end-compatible metadata.
+This skill consumes FX proof workpapers from two sibling skills and must not duplicate FX sourcing:
 
-Accepted indicators include fields or source notes that clearly say FBAR, year-end, last day of calendar year, Treasury/FMS, Treasury Reporting Rates, FinCEN, or equivalent. Plain annual/yearly average language is rejected.
+- `get-year-end-fx-rate` (preferred): produces Treasury/Fiscal Data or verified manual year-end rates - the FBAR-style conversion basis - and is accepted by construction.
+- `get-yearly-fx-rate`: accepted only when the workpaper carries explicit FBAR/year-end-compatible metadata. Ordinary yearly-average workpapers are rejected.
+
+Accepted yearly-workpaper indicators include fields or source notes that clearly say FBAR, year-end, last day of calendar year, Treasury/FMS, Treasury Reporting Rates, FinCEN, or equivalent. Plain annual/yearly average language is rejected.
 
 ## Output Language
 
