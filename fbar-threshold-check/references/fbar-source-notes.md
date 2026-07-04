@@ -34,7 +34,7 @@ This skill consumes FX proof workpapers from two sibling skills and must not dup
 - `get-year-end-fx-rate` (preferred): produces Treasury/Fiscal Data or verified manual year-end rates - the FBAR-style conversion basis - and is accepted by construction.
 - `get-yearly-fx-rate`: accepted only when the workpaper carries explicit FBAR/year-end-compatible metadata. Ordinary yearly-average workpapers are rejected.
 
-Accepted yearly-workpaper indicators include fields or source notes that clearly say FBAR, year-end, last day of calendar year, Treasury/FMS, Treasury Reporting Rates, FinCEN, or equivalent. Plain annual/yearly average language is rejected.
+Accepted yearly-workpaper indicators include fields or source notes that clearly say FBAR, year-end, last day of calendar year (December 31 / Dec 31), Treasury, Fiscal Data, FMS, FinCEN, or equivalent. Caveat text never counts as positive evidence. Plain annual/yearly average language is rejected.
 
 ## Output Language
 

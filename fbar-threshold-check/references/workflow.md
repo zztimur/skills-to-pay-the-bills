@@ -38,7 +38,7 @@ Use careful language:
 For extraction, use a Python runtime with `pdfplumber`:
 
 ```bash
-python3 -c 'import pdfplumber; print("pdfplumber ok")'
+python3 "<package-root>/scripts/fbar_threshold_check.py" dependency-check
 ```
 
 If `pdfplumber` is unavailable, stop before extraction and report the missing dependency. `confirm-account`, `aggregate`, and `self-test` do not require `pdfplumber`.
@@ -77,6 +77,7 @@ Open the JSON and CSV before confirming. Confirm these fields:
 - `statement_files` are the expected PDFs.
 - `coverage.complete_year` is true.
 - `coverage.carry_gaps` is empty and `coverage.trailing_carry_days` is small; carried balances near year-end are evidence gaps, not observations.
+- `coverage.carried_forward_days` is plausible for the statement cycle. Carried spans under the 40-day gap threshold (for example one missing monthly statement) pass the automated gates, so a high carried-to-observed ratio still needs the user's explicit acceptance.
 - Every day in the year has a native balance.
 - Rows with ambiguous-separator notes match the magnitudes printed on the statement.
 - `warnings` are either resolved or explicitly accepted by the user.
@@ -112,11 +113,11 @@ The checker accepts the dependency only when `workpaper.json`:
 
 - Has `skill: "get-year-end-fx-rate"` or `skill: "get-yearly-fx-rate"`.
 - Matches the account currency and tax year.
-- Has usable `foreign_per_usd` or `usd_per_foreign` conversion data.
+- Has a positive `foreign_per_usd` or `usd_per_foreign` rate.
 - Includes source/proof metadata.
-- For `get-yearly-fx-rate` workpapers only: is marked as FBAR-compatible or year-end appropriate by fields such as `rate_kind`, `method`, `rate_type`, `conversion_context`, `use_case`, `fbar_compatible`, or source notes/categories/titles that clearly indicate FBAR, year-end, last-day, Treasury/FMS, or equivalent support. `get-year-end-fx-rate` workpapers are year-end by construction and need no extra marking.
+- For `get-yearly-fx-rate` workpapers only: carries FBAR/year-end wording (FBAR, FinCEN, year-end, December 31, last day, Treasury, Fiscal Data, FMS, or equivalent) in its rate fields (`rate_kind`, `method`, `rate_type`, `conversion_context`, `use_case`, `fbar_compatible: true`) or source metadata. Caveats never count as positive evidence. `get-year-end-fx-rate` workpapers are year-end by construction and need no extra marking.
 
-If a `get-yearly-fx-rate` workpaper only says yearly average or annual average, stop and ask the user to produce a `get-year-end-fx-rate` workpaper (or an explicitly FBAR-compatible yearly workpaper) first.
+In practice `get-year-end-fx-rate` is the supported path: the yearly dependency's normal output describes a yearly-average table and is rejected. If a `get-yearly-fx-rate` workpaper only says yearly average or annual average, stop and ask the user to produce a `get-year-end-fx-rate` workpaper instead.
 
 ## 7. Confirm One Account
 
