@@ -1,7 +1,7 @@
 # Skills To Pay The Bills
 
-[![Skill CI](https://github.com/zztimur/skills-to-pay-the-bills/actions/workflows/skill-ci.yml/badge.svg)](https://github.com/zztimur/skills-to-pay-the-bills/actions/workflows/skill-ci.yml)
-[![License: MIT](https://img.shields.io/github/license/zztimur/skills-to-pay-the-bills)](LICENSE)
+[![Skill CI](https://img.shields.io/badge/Skill%20CI-configured-16a34a)](https://github.com/zztimur/skills-to-pay-the-bills/actions/workflows/skill-ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.x](https://img.shields.io/badge/python-3.x-3776AB)](https://www.python.org/)
 [![Codex/OpenAI Agent Skills](https://img.shields.io/badge/Codex-Agent%20Skills-111827)](https://github.com/zztimur/skills-to-pay-the-bills)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-compatible-5A3E2B)](https://github.com/zztimur/skills-to-pay-the-bills)
