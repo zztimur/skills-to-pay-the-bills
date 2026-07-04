@@ -9,19 +9,17 @@ Collect or infer these inputs:
 - Statement PDF paths.
 - Tax year.
 - Institution name visible in the PDFs or clearly represented by the file paths.
-- Account currency, inferred from statement text such as `Movimientos de cuenta en COP` when available.
+- Reviewed `statement-intake-preflight` JSON for `--scope one-institution`.
+- Account currency only if preflight/extraction leaves it unresolved and the user or statement evidence can confirm it.
 - Output folder, defaulting to `outputs/`.
 - Work folder for JSON/CSV intermediates, defaulting to `work/`.
 
-Before running the script, verify scope:
+Before running this skill's extraction:
 
-- All PDFs belong to one institution.
-- All PDFs belong to one tax year.
-- All PDFs belong to one account currency bucket.
-- Files are PDFs, not screenshots/images.
-- The user wants an interest-income worksheet or tax-support packet, not official tax filing.
+- Use `statement-intake-preflight` to verify shared statement intake scope: one institution, one tax year, one currency bucket, readable PDFs, and institution/currency hints.
+- Verify only the interest-specific intent here: the user wants an interest-income worksheet or tax-support packet, not official tax filing.
 
-If the request mixes banks, accounts from unrelated providers, or tax years, stop and ask the user to split the job.
+If preflight reports mixed banks, unrelated account providers, mixed years, mixed currencies, low/no text, or ambiguous currency, resolve that in the preflight step before this skill extracts interest rows.
 
 ## 2. Runtime Setup
 
@@ -37,7 +35,7 @@ In Codex desktop:
 python -c 'import pdfplumber, reportlab, pypdf; print("deps ok")'
 ```
 
-If dependencies are unavailable, stop before analysis and tell the user which package is missing.
+If dependencies are unavailable, stop before analysis and tell the user which package is missing. The shared PDF text/readiness gate is owned by `statement-intake-preflight`; this runtime check is only for the downstream parser and PDF writer.
 
 ## 3. Preflight
 
@@ -57,7 +55,7 @@ python3 "<preflight-root>/scripts/statement_intake_preflight.py" preflight \
   --out "work/statement-preflight.json"
 ```
 
-Review the preflight JSON and CSV. Stop for user review when it reports non-PDF files, low/no text layer, mixed years, mixed currencies, ambiguous `$`, possible mixed accounts, possible mixed institutions, unknown institution context, or other review gates. Preflight does not replace interest-row extraction; it only standardizes the intake handoff.
+Review the preflight JSON and CSV. Stop here until preflight review gates are resolved or explicitly accepted. Do not duplicate those shared checks in this skill; preflight owns PDF readability, institution/year/currency scope, ambiguous `$`, and account/institution hints. Preflight does not replace interest-row extraction; it only standardizes the intake handoff.
 
 ## 4. Extraction
 
@@ -80,23 +78,14 @@ The script writes:
 - `institution_profile` with institution name, account currency, statement titles, detected periods, institution-label source, and statement count.
 - `preflight` summary when `--preflight-json` is supplied; the script rejects mismatched tax year, scope, or PDF set.
 
-Use `--account-currency` only when the account currency is known from file organization or statement review and the script cannot infer it. This is especially important for statements that use `$` for local currency, such as Colombian peso statements. Do not treat `$` alone as proof of USD.
-
-If extraction says the PDF has little machine-readable text, ask for text PDFs. Do not OCR or hand-transcribe unless the user explicitly changes the scope.
-
-For large or messy input sets, triage before extraction:
-
-- If the user provides many PDFs, confirm they are all for one institution, one tax year, and one currency bucket before running the whole set.
-- If filenames, folders, or visible statement periods suggest mixed institutions, accounts from unrelated providers, currencies, or tax years, stop and ask the user to split the job.
-- If the PDFs are unusually large or the text layer looks noisy, run a small extraction first and report what coverage was verified before continuing.
+Use `--account-currency` only when the reviewed preflight artifact or statement evidence confirms the currency and the interest extractor cannot infer it. Do not treat `$` alone as proof of USD; unresolved `$` belongs back in preflight before reporting.
 
 ## 5. Review The Extracted Results
 
 Open the JSON and review CSV before generating a report. The CSV is an internal audit/review aid; the final user-facing artifact should be the PDF packet. Review these JSON fields:
 
-- `preflight`: reviewed intake artifact summary, if present.
-- `statement_files`: files reviewed, page counts, detected periods, currency markers.
-- `institution_profile`: institution, account currency, title/period coverage, and institution-label source.
+- `preflight`: reviewed intake artifact summary.
+- `institution_profile`: consistency with the reviewed preflight artifact.
 - `rows`: counted interest rows.
 - `totals.row_count`: counted row count.
 - `totals.foreign_total_by_currency`: source-currency totals.
@@ -116,12 +105,11 @@ Ask the user to confirm before reporting when:
 
 - Any row has `confidence` set to `low`.
 - The notes say the transaction date is missing.
-- The institution label appears only in the file path.
-- Account currency was inferred only from folder/file naming, cannot be inferred, or conflicts across PDFs.
 - There are excluded interest-like candidates that could be real interest.
-- The account has multiple currency markers.
 - Counted rows include unexpected currencies.
 - The extracted total looks inconsistent with statement summaries.
+
+If the extractor repeats a preflight-style warning about institution, year, PDF text, or currency scope, return to the preflight artifact or rerun preflight/extraction with an explicit user-confirmed override instead of resolving that scope issue ad hoc here.
 
 Do not add, remove, or edit rows by guess. If a row is missing or wrong, explain the evidence and ask for confirmation or better source data.
 
@@ -285,11 +273,11 @@ Review flags: institution label was found only in the file path; verify the PDFs
 |---|---|
 | `pdfplumber is required` | Use bundled Codex Python or another environment with `pdfplumber`. |
 | `reportlab is required` | Use bundled Codex Python or install/use an environment with `reportlab`. |
-| `little machine-readable text` | Ask for text PDFs; scanned/image-only PDFs are out of scope for this script. |
-| Institution name not found | Retry with the visible statement title only if that is the best available text label, or use the file-path fallback warning when the file path clearly identifies the institution. |
-| Multiple currencies detected | Review rows and split the job if multiple currencies are truly present. |
-| `UNKNOWN` currency | Do not report until currency is confirmed. |
-| `$` rows from a COP statement are labeled USD | Rerun with the current parser and/or pass `--account-currency COP`; `$` alone is not proof of USD when the statement account currency is COP. |
+| `little machine-readable text` | Resolve the low-text gate in `statement-intake-preflight`; scanned/image-only PDFs are out of scope for the deterministic workflow. |
+| Institution name not found | Resolve or accept the institution hint in `statement-intake-preflight`; only then retry extraction with the best reviewed label. |
+| Multiple currencies detected | Resolve the currency-bucket issue in `statement-intake-preflight`; if counted interest rows still show unexpected currencies, stop for user review. |
+| `UNKNOWN` currency | Do not report until currency is confirmed through preflight review or an explicit user/preparer override. |
+| `$` rows from a COP statement are labeled USD | Resolve ambiguous `$` in preflight and rerun extraction with `--account-currency COP` only after the currency is confirmed. |
 | Non-USD report asks for FX | Run `get-yearly-fx-rate`, pass its `workpaper.json` to `fx-prompt`, ask the user to confirm it or provide a custom rate, then rerun `report` with `--fx-rate-confirmed`. |
 | `get-yearly-fx-rate` is unavailable | Run `dependency-check` if needed, then stop before the PDF and ask the user to install/run the dependency or provide a confirmed user/preparer custom rate. |
 | Only daily/monthly rates are available | Do not calculate an annual average yourself; use `get-yearly-fx-rate` only if it can produce a published annual workpaper, otherwise ask the user/preparer for a custom rate. |

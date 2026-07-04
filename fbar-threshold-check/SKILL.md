@@ -9,7 +9,7 @@ Build account-by-account FBAR threshold evidence for one calendar year. Produce 
 
 ## Required Workflow
 
-Read `references/workflow.md` before analysis. It contains the intake gates, review points, command sequence, FX dependency contract, and final-response shape. Read `references/fbar-source-notes.md` when explaining FBAR threshold wording, maximum account value, source limitations, or FX caveats. `<package-root>` below means the directory containing this SKILL.md.
+Read `references/workflow.md` before analysis. It contains the preflight handoff, FBAR ledger review points, command sequence, FX dependency contract, and final-response shape. Read `references/fbar-source-notes.md` when explaining FBAR threshold wording, maximum account value, source limitations, or FX caveats. `<package-root>` below means the directory containing this SKILL.md.
 
 Process one account at a time. First use the separate `statement-intake-preflight` skill with `--scope one-account` and review its JSON/CSV:
 
@@ -31,7 +31,7 @@ python3 "<package-root>/scripts/fbar_threshold_check.py" extract-account \
   --out work/account-1.json
 ```
 
-Review the JSON and CSV before confirming. The CSV is a row-review artifact with one row per calendar day. Stop for user review when the script reports mixed accounts, mixed years, mixed currencies, ambiguous `$`, ambiguous amount separators, missing opening coverage, scanned/image-only PDFs, incomplete coverage, carry-forward gaps, or low-confidence balance rows. `confirm-account` refuses ledgers with carry-forward gaps longer than 40 days unless the user has explicitly reviewed `coverage.carry_gaps` and you pass `--accept-carry-forward`.
+Review the account JSON and CSV before confirming. The CSV is a row-review artifact with one row per calendar day. Shared PDF/account/year/currency intake gates belong to `statement-intake-preflight`; this skill's review starts after that handoff and focuses on balance evidence. Stop for user review when the FBAR extractor reports ambiguous amount separators, missing opening coverage, incomplete daily balance coverage, carry-forward gaps, materially different same-day balance candidates, or low-confidence balance rows. `confirm-account` refuses ledgers with carry-forward gaps longer than 40 days unless the user has explicitly reviewed `coverage.carry_gaps` and you pass `--accept-carry-forward`.
 
 Confirm only after the user has reviewed the account ledger:
 
@@ -79,7 +79,7 @@ If the daily threshold is exceeded, list the dates. If records are incomplete, s
 
 ## Runtime
 
-`extract-account` requires machine-readable PDFs and `pdfplumber`; check availability with:
+`extract-account` still needs `pdfplumber` to parse balances from the reviewed PDFs; shared PDF readiness belongs to `statement-intake-preflight`. Check parser availability with:
 
 ```bash
 python3 "<package-root>/scripts/fbar_threshold_check.py" dependency-check

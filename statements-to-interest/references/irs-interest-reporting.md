@@ -6,7 +6,7 @@ Use these notes to keep the worksheet practical and conservative. Refresh the li
 
 - This skill package creates a support packet for tax preparation. It does not prepare or file official IRS forms.
 - Treat interest extracted from foreign bank statements as potentially taxable interest for review.
-- Use one institution and one tax year per run. Split mixed banks or mixed years.
+- Assume `statement-intake-preflight` has already scoped the reviewed statement set to one institution and one tax year. If mixed banks or mixed years appear later, return to preflight before reporting.
 
 ## Source anchors
 
