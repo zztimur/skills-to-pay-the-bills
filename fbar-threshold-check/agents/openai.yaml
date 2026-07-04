@@ -1,4 +1,4 @@
 interface:
   display_name: "FBAR Threshold Check"
-  short_description: "Check FBAR daily and max thresholds"
+  short_description: "Check the $10,000 FBAR threshold from foreign account statements"
   default_prompt: "Use $fbar-threshold-check to check whether my foreign accounts crossed the FBAR threshold for a tax year."
