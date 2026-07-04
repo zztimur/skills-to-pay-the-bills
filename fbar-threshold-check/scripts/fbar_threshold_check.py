@@ -19,10 +19,12 @@ from typing import Iterable
 
 getcontext().prec = 28
 
-SCHEMA_VERSION = "1.2"
+SCHEMA_VERSION = "1.3"
 # Ledgers older than 1.1 predate carry-gap coverage fields and would silently
-# bypass the confirmation gates; refuse them instead.
-SUPPORTED_SCHEMA_VERSIONS = {"1.1", "1.2"}
+# bypass the confirmation gates; refuse them instead. 1.3 stores native balances
+# at their full parsed precision (see fmt_native); 1.1/1.2 ledgers remain
+# readable but carry the older cent-rounded native balances.
+SUPPORTED_SCHEMA_VERSIONS = {"1.1", "1.2", "1.3"}
 THRESHOLD_USD = Decimal("10000")
 MIN_TEXT_CHARS = 40
 # Longest carry-forward run that is still routine for monthly statement cycles.
@@ -189,18 +191,24 @@ MONTH_DATE_PATTERNS = (
     re.compile(rf"\b(\d{{1,2}})\s+({MONTH_RE})\.?,?\s+(20\d{{2}})\b", re.I),
 )
 
-# One monetary token. Whitespace never bridges digit groups except in the
-# explicit space-grouped-with-decimals form, so adjacent statement columns
-# ("100.00 200.00 300.00") tokenize separately instead of merging.
+# One monetary token. Whitespace bridges digit groups only in the explicit
+# space-grouped form (French/NBSP thousands like "500 000" or "1 234,56"). A
+# decimal point breaks the run of 3-digit groups, so decimal-bearing columns
+# ("100.00 200.00 300.00") still tokenize separately; bare space-grouped
+# integers are flagged as ambiguous in parse_amount for magnitude review.
 MONEY_NUMBER = (
     r"(?:\d{1,2}(?:,\d{2})+,\d{3}(?:\.\d{1,2})?"  # lakh grouping: 1,23,456
     r"|\d{1,3}(?:[.,'’]\d{3})+(?:[.,]\d{1,6})?"  # punct-grouped thousands: 1.234,56
-    r"|\d{1,3}(?:[ \u00a0]\d{3})+[.,]\d{1,2}"  # space-grouped, decimals required: 1 234,56
+    r"|\d{1,3}(?:[ \u00a0]\d{3})+(?:[.,]\d{1,2})?"  # space-grouped: 1 234,56 or bare 500 000
     r"|\d+(?:[.,]\d{1,6})?)"  # plain: 1234.56
 )
 MONEY_RE = re.compile(
     r"(?<![A-Za-z0-9])"
-    r"(\(?\s*[-−]?\s*(?:[$€£¥]\s*)?" + MONEY_NUMBER + r"\s*\)?\s*[-−]?)"
+    # A sign binds only when glued to the number or its currency symbol:
+    # leading "-9,500", trailing accounting minus "9,500.00-". A space-separated
+    # dash ("9,500.00 - 31/12" or a column separator "1.234 - 5.678") is
+    # statement punctuation, not a sign, so no \s* surrounds the sign atoms.
+    r"(\(?\s*[-−]?(?:[$€£¥]\s*)?" + MONEY_NUMBER + r"(?:\s*\))?[-−]?)"
     r"(?![A-Za-z0-9])"
 )
 
@@ -263,6 +271,11 @@ def parse_amount(raw: str) -> tuple[Decimal, tuple[str, ...]]:
     value = original
     notes: list[str] = []
     negative = False
+    # Space-separated digit groups ("500 000", "1 234 567") are read as one
+    # grouped amount, but bare (no decimal separator) grouping is
+    # indistinguishable from two adjacent statement columns, so flag it for
+    # magnitude review. A decimal separator disambiguates it as one number.
+    space_grouped_bare = re.search(r"\d[ \u00a0]\d", original) is not None and not re.search(r"[.,]", original)
     if value.startswith("(") and value.endswith(")"):
         negative = True
     value = re.sub(r"[A-Za-z$€£¥()\s'’]", "", value)
@@ -310,6 +323,11 @@ def parse_amount(raw: str) -> tuple[Decimal, tuple[str, ...]]:
             )
 
     parsed = Decimal(value)
+    if space_grouped_bare:
+        notes.append(
+            f"Ambiguous space-separated digit groups in '{original}': read as one amount ({value}); "
+            "verify this is a single balance and not adjacent statement columns."
+        )
     return (-parsed if negative else parsed), tuple(notes)
 
 
@@ -322,6 +340,22 @@ def fmt_decimal(value: Decimal | None, places: str = "0.01") -> str | None:
         return None
     quantized = value.quantize(Decimal(places), rounding=ROUND_HALF_UP)
     text = format(quantized, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def fmt_native(value: Decimal | None) -> str | None:
+    """Format a native-currency balance without lossy rounding.
+
+    fmt_decimal quantizes to cents, which silently drops the third decimal of
+    3-decimal currencies (KWD/BHD/OMR/JOD) and can flip the answer at the
+    $10,000 boundary. Native balances must retain the exact parsed precision;
+    only trailing-zero display noise is trimmed.
+    """
+    if value is None:
+        return None
+    text = format(value, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text or "0"
@@ -393,6 +427,18 @@ def parse_line_dates(line: str) -> list[tuple[date, str, str]]:
     return list(unique.values())
 
 
+# Mask-only spans: two-digit-year numeric dates ("31/12/23") and clock times
+# ("23:59", "23:59:00"). These are deliberately NOT parsed as balance dates -
+# a two-digit year is ambiguous - but they must be blanked so their fragments
+# ("31", "12", "23", "59") cannot be picked as a balance on a line that also
+# carries a valid four-digit date. The trailing \b keeps the year group from
+# matching inside a four-digit year or a 3+ digit money group.
+MASK_ONLY_PATTERNS = (
+    re.compile(r"\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2}\b"),
+    re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b"),
+)
+
+
 def mask_date_spans(line: str) -> str:
     """Blank out date substrings so their fragments cannot parse as money.
 
@@ -400,7 +446,7 @@ def mask_date_spans(line: str) -> str:
     monetary tokens; character positions are preserved.
     """
     chars = list(line)
-    for pattern in (*DATE_PATTERNS, *MONTH_DATE_PATTERNS):
+    for pattern in (*DATE_PATTERNS, *MONTH_DATE_PATTERNS, *MASK_ONLY_PATTERNS):
         for match in pattern.finditer(line):
             for index in range(match.start(), match.end()):
                 chars[index] = "#"
@@ -645,7 +691,7 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                     if confidence == "high":
                         confidence = "medium"
                     notes.append(
-                        f"Same-day balance candidates ranged from {fmt_decimal(low_amount)} to {fmt_decimal(high_amount)}; "
+                        f"Same-day balance candidates ranged from {fmt_native(low_amount)} to {fmt_native(high_amount)}; "
                         "the maximum was selected for threshold safety - verify against the statement."
                     )
             last_balance = selected.amount
@@ -660,7 +706,7 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                 {
                     "date": iso_day(day),
                     "currency": currency,
-                    "native_balance": fmt_decimal(selected.amount),
+                    "native_balance": fmt_native(selected.amount),
                     "usd_balance": None,
                     "threshold_usd_value": None,
                     "balance_source": "observed",
@@ -678,7 +724,7 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                 {
                     "date": iso_day(day),
                     "currency": currency,
-                    "native_balance": fmt_decimal(last_balance),
+                    "native_balance": fmt_native(last_balance),
                     "usd_balance": None,
                     "threshold_usd_value": None,
                     "balance_source": "carried-forward",
@@ -916,6 +962,18 @@ def require_account_data(path: Path) -> dict[str, object]:
     return data
 
 
+def schema_tuple(version: object) -> tuple[int, ...]:
+    """Parse a "major.minor" schema string into a comparable tuple.
+
+    Unparseable versions sort below every real schema so a malformed value can
+    never satisfy a minimum-version floor.
+    """
+    try:
+        return tuple(int(part) for part in str(version).split("."))
+    except (TypeError, ValueError):
+        return (0,)
+
+
 def as_decimal(value: object, label: str) -> Decimal:
     if value is None or value == "":
         raise FbarError(f"Missing decimal value for {label}.", 2)
@@ -942,7 +1000,7 @@ def validate_fx_workpaper(path: Path, currency: str, year: int) -> dict[str, obj
         )
     if str(workpaper.get("currency", "")).upper() != currency:
         raise FbarError(f"FX workpaper currency {workpaper.get('currency')} does not match account currency {currency}.", 2)
-    if int(workpaper.get("year", 0)) != year:
+    if as_int(workpaper.get("year", 0), "FX workpaper year") != year:
         raise FbarError(f"FX workpaper year {workpaper.get('year')} does not match tax year {year}.", 2)
 
     source = workpaper.get("source")
@@ -978,6 +1036,7 @@ def validate_fx_workpaper(path: Path, currency: str, year: int) -> dict[str, obj
 
 
 def is_fbar_compatible_workpaper(workpaper: dict[str, object]) -> bool:
+    # Explicit self-certification by the FX skill is the only unconditional accept.
     if workpaper.get("fbar_compatible") is True:
         return True
 
@@ -1001,39 +1060,48 @@ def is_fbar_compatible_workpaper(workpaper: dict[str, object]) -> bool:
             value = proof.get(key)
             if value is not None:
                 values.append(str(value))
-    # Caveats are warnings by nature ("not for FBAR use") and must never
-    # count as positive FBAR/year-end evidence; they only feed the
-    # average-language check.
-    positive_text = " ".join(values).lower()
+    intent_text = " ".join(values).lower()
     caveat_text = " ".join(str(item) for item in caveats).lower() if isinstance(caveats, list) else ""
-    positive_terms = (
+
+    # Only explicit year-end / FBAR intent is positive evidence. Provenance
+    # alone (Treasury / Fiscal Data / FMS) is NOT sufficient: those sources
+    # publish both year-end AND yearly-average tables, so a Treasury-sourced
+    # yearly average must not pass. Source names are deliberately excluded here.
+    yearend_terms = (
         "fbar",
         "fincen",
         "year-end",
         "year end",
         "year_end",
         "last day",
+        "last business day",
         "12/31",
         "12-31",
         "december 31",
         "dec 31",
         "dec. 31",
-        "treasury",
-        "fiscal data",
-        "financial management service",
-        "fms",
+        "end of year",
+        "end-of-year",
     )
+    # Explicit average language anywhere - rate fields, source notes, or
+    # caveats - disqualifies the workpaper even if a year-end word also appears.
+    # Contradictory metadata is unsafe, so the correct action is to demand
+    # get-year-end-fx-rate rather than guess.
     average_terms = (
         "yearly average",
         "yearly-average",
+        "yearly avg",
         "annual average",
         "annual-average",
+        "annual avg",
         "period average",
         "average exchange rate",
+        "average rate",
     )
-    has_positive = any(term in positive_text for term in positive_terms)
-    has_only_average = any(term in positive_text + " " + caveat_text for term in average_terms) and not has_positive
-    return has_positive and not has_only_average
+    has_average = any(term in intent_text + " " + caveat_text for term in average_terms)
+    if has_average:
+        return False
+    return any(term in intent_text for term in yearend_terms)
 
 
 def command_confirm_account(args: argparse.Namespace) -> int:
@@ -1046,9 +1114,9 @@ def command_confirm_account(args: argparse.Namespace) -> int:
     coverage = data.get("coverage", {})
     if not isinstance(coverage, dict):
         raise FbarError("Account ledger has no coverage object.", 2)
-    if int(coverage.get("missing_days", 0)) > 0:
+    if as_int(coverage.get("missing_days", 0), "coverage.missing_days") > 0:
         raise FbarError("Account ledger has missing days; do not confirm until opening/prior balance coverage is resolved.", 2)
-    if int(coverage.get("low_confidence_days", 0)) > 0:
+    if as_int(coverage.get("low_confidence_days", 0), "coverage.low_confidence_days") > 0:
         raise FbarError("Account ledger has low-confidence balance days; resolve or regenerate before confirmation.", 2)
     carry_gaps = coverage.get("carry_gaps") if isinstance(coverage.get("carry_gaps"), list) else []
     accept_carry_forward = bool(getattr(args, "accept_carry_forward", False))
@@ -1176,8 +1244,20 @@ def load_confirmed_account(path: Path) -> dict[str, object]:
     data = require_account_data(path)
     if data.get("status") != "confirmed":
         raise FbarError(f"{path} is not confirmed. Run confirm-account first.", 2)
+    # Aggregation requires the native-precision era. Ledgers confirmed under
+    # schema < 1.3 carry cent-rounded native balances/thresholds, so importing
+    # them would silently reintroduce the boundary-rounding defect for 3-decimal
+    # currencies. Re-extract those accounts with the current skill first.
+    version = str(data.get("schema_version") or "missing")
+    if schema_tuple(version) < (1, 3):
+        raise FbarError(
+            f"{path} was confirmed under schema {version}, whose native balances are cent-rounded. "
+            f"Re-run extract-account and confirm-account with the current skill (schema {SCHEMA_VERSION}) "
+            "before aggregating so 3-decimal currencies and boundary values stay exact.",
+            2,
+        )
     coverage = data.get("coverage", {})
-    if isinstance(coverage, dict) and int(coverage.get("missing_days", 0)) > 0:
+    if isinstance(coverage, dict) and as_int(coverage.get("missing_days", 0), "coverage.missing_days") > 0:
         raise FbarError(f"{path} has incomplete coverage and cannot be aggregated.", 2)
     rows = data.get("daily_ledger", [])
     if not isinstance(rows, list):
@@ -1232,7 +1312,7 @@ def command_aggregate(args: argparse.Namespace) -> int:
         account_coverage = account_data.get("coverage", {})
         if not isinstance(account_coverage, dict):
             account_coverage = {}
-        if int(account_coverage.get("missing_days", 0)) > 0 or account_coverage.get("carry_gaps"):
+        if as_int(account_coverage.get("missing_days", 0), "coverage.missing_days") > 0 or account_coverage.get("carry_gaps"):
             records_complete = False
         rows = account_data["daily_ledger"]
         assert isinstance(rows, list)
@@ -1249,7 +1329,7 @@ def command_aggregate(args: argparse.Namespace) -> int:
                 "account_id": label,
                 "institution": account.get("institution"),
                 "currency": account.get("currency"),
-                "max_usd_value": fmt_decimal(max_value),
+                "max_usd_value": fmt_native(max_value),
                 "max_usd_value_whole_dollars": max_whole,
                 "source_json": account_data.get("artifacts", {}),
             }
@@ -1273,9 +1353,9 @@ def command_aggregate(args: argparse.Namespace) -> int:
             if account_day is None:
                 raise FbarError(f"Account {label} is missing day {day}.", 2)
             value = as_decimal(account_day.get("threshold_usd_value"), f"{label} {day} threshold")
-            row[label] = fmt_decimal(value)
+            row[label] = fmt_native(value)
             combined += value
-        row["combined_usd_value"] = fmt_decimal(combined)
+        row["combined_usd_value"] = fmt_native(combined)
         row["over_10000"] = combined > THRESHOLD_USD
         if combined > THRESHOLD_USD:
             over_limit_dates.append(day)
@@ -1307,7 +1387,7 @@ def command_aggregate(args: argparse.Namespace) -> int:
             "answer": daily_answer,
             "exceeded": bool(over_limit_dates),
             "over_limit_dates": over_limit_dates,
-            "max_combined_usd_value": fmt_decimal(max_combined),
+            "max_combined_usd_value": fmt_native(max_combined),
             "max_combined_date": max_combined_date,
             "records_complete": records_complete,
         },
@@ -1522,12 +1602,18 @@ def command_self_test(_args: argparse.Namespace) -> int:
         test_sign_formats()
         test_line_extraction()
         test_build_daily_rows()
+        test_native_balance_precision()
         test_leap_year()
         test_same_day_variance()
         test_carry_gap_gate(root)
+        test_mask_time_and_two_digit_year()
         test_fx_guardrails(root)
         test_fx_rate_guards(root)
+        test_fx_provenance_not_yearend(root)
+        test_hostile_inputs_clean_errors(root)
         test_boundary_rounding(root)
+        test_aggregate_rejects_pre_1_3(root)
+        test_aggregate_native_precision_display(root)
         test_label_collisions()
         test_duplicate_ledger_refused(root)
         test_schema_gate(root)
@@ -1721,10 +1807,21 @@ def test_money_tokenization() -> None:
     # Adjacent statement columns must tokenize separately, never merge.
     tokens = [token for _amt, token, _pos, _n in parse_money_values("Saldo 100.00 200.00 300.00")]
     assert tokens == ["100.00", "200.00", "300.00"], tokens
-    # Space-grouped French amounts (decimals required) stay one token.
+    # Space-grouped French amounts stay one token; a decimal disambiguates it
+    # as a single number, so no ambiguity note is attached.
     values = parse_money_values("solde 1 234,56")
     assert len(values) == 1 and values[0][0] == Decimal("1234.56")
-    # Columnar integers without decimals do not merge via space grouping.
+    assert not values[0][3], values[0][3]
+    # Bare space-grouped integers (French "500 000") are read as one amount at
+    # the correct magnitude - never split into "500" + "000" - but flagged as
+    # ambiguous so the review gate surfaces the possible-columns reading.
+    values = parse_money_values("solde 500 000")
+    assert len(values) == 1 and values[0][0] == Decimal("500000"), values
+    assert values[0][3], "bare space-grouped integer must carry an ambiguity note"
+    values = parse_money_values("solde 1 234 567")
+    assert len(values) == 1 and values[0][0] == Decimal("1234567"), values
+    # Columnar integers whose leading group is 4+ digits cannot start a
+    # space-grouped run, so they stay separate.
     # ("2000" is dropped by the bare-year guard, not merged into "1500".)
     tokens = [token for _amt, token, _pos, _n in parse_money_values("balance 1500 2000")]
     assert tokens == ["1500"], tokens
@@ -1737,6 +1834,23 @@ def test_money_tokenization() -> None:
     masked = mask_date_spans("1,234.56 balance as of Dec 31, 2023")
     amounts = [amt for amt, _t, _p, _n in parse_money_values(masked)]
     assert amounts == [Decimal("1234.56")], amounts
+
+
+def test_mask_time_and_two_digit_year() -> None:
+    # A clock time or 2-digit-year date sitting after the balance term must be
+    # masked so its fragments cannot be selected instead of the real balance.
+    masked = mask_date_spans("2023-12-31 balance 1,234.56 at 23:59")
+    assert [amt for amt, _t, _p, _n in parse_money_values(masked)] == [Decimal("1234.56")]
+    masked = mask_date_spans("2023-12-31 balance 9,999.99 prior 31/12/22")
+    assert [amt for amt, _t, _p, _n in parse_money_values(masked)] == [Decimal("9999.99")]
+    # End-to-end: the real balance wins even when the time trails the term.
+    line = "2023-12-31 Closing balance 1,234.56 at 23:59"
+    cands, _warnings = extract_balance_candidates([(SourceRef("t.pdf", 1, 1, line), line)], 2023, "USD")
+    assert cands and cands[-1].amount == Decimal("1234.56"), cands[-1].amount if cands else None
+    # Masking must not eat real amounts: European grouped money (3-digit groups)
+    # and comma decimals are left intact.
+    assert "#" not in mask_date_spans("balance 4.000.000,00")
+    assert "#" not in mask_date_spans("balance 1.234,56")
 
 
 def test_sign_formats() -> None:
@@ -1771,6 +1885,20 @@ def test_line_extraction() -> None:
     assert date_after.amount == Decimal("1234.56"), date_after.amount
     trailing = extract_one("31/12/2023 closing balance 9.500,25-")
     assert trailing.amount == Decimal("-9500.25"), trailing.amount
+    # A dash separated from the number by whitespace is punctuation, not an
+    # accounting sign: the balance must stay positive, not be zeroed. This holds
+    # for a trailing dash and for a dash used as a column separator (the leading
+    # side), both of which previously bound as a spurious negative sign.
+    dash_sep = extract_one("31/12/2023 Closing balance 9,500.00 - see note")
+    assert dash_sep.amount == Decimal("9500.00"), dash_sep.amount
+    separator = extract_one("31/12/2023 balance 1.234,00 - 5.678,00")
+    assert separator.amount == Decimal("5678.00"), separator.amount
+    # Bare space-grouped French integer: correct magnitude, but downgraded to a
+    # reviewable confidence with an ambiguity note (never a silent high-confidence pick).
+    french = extract_one("31/12/2023 Solde 500 000")
+    assert french.amount == Decimal("500000"), french.amount
+    assert french.confidence != "high"
+    assert any("space-separated" in note for note in french.notes), french.notes
     bare = extract_one("31/12/2023 balance 5")
     assert bare.amount == Decimal("5") and bare.confidence == "low"
 
@@ -1818,6 +1946,80 @@ def test_fx_rate_guards(root: Path) -> None:
         raise AssertionError("caveat wording must not qualify a yearly-average workpaper as FBAR-compatible")
 
 
+def test_fx_provenance_not_yearend(root: Path) -> None:
+    # A Treasury/Fiscal Data provenance is NOT a year-end signal: those sources
+    # publish both year-end and yearly-average tables. A Treasury-sourced yearly
+    # average that names its rate_kind "yearly average" must be rejected.
+    treasury_avg = root / "treasury-average-workpaper.json"
+    write_json(
+        treasury_avg,
+        {
+            "skill": "get-yearly-fx-rate",
+            "currency": "CAD",
+            "year": 2025,
+            "foreign_per_usd": "1.37",
+            "usd_per_foreign": "0.729927",
+            "rate_kind": "yearly average",
+            "source": {
+                "title": "Treasury Reporting Rates of Exchange - Fiscal Data",
+                "url": "https://fiscaldata.treasury.gov/",
+                "retrieved": "2026-07-04",
+                "note": "Fiscal Data yearly average table.",
+            },
+            "proof": {"workpaper_json": str(treasury_avg)},
+        },
+    )
+    assert is_fbar_compatible_workpaper(load_json(treasury_avg)) is False
+    try:
+        validate_fx_workpaper(treasury_avg, "CAD", 2025)
+    except FbarError as exc:
+        assert "yearly-average" in str(exc)
+    else:
+        raise AssertionError("Treasury-sourced yearly average must be rejected")
+
+    # Provenance alone (Treasury/Fiscal Data, no year-end wording) is not enough.
+    treasury_only = root / "treasury-only-workpaper.json"
+    write_json(
+        treasury_only,
+        {
+            "skill": "get-yearly-fx-rate",
+            "currency": "CAD",
+            "year": 2025,
+            "foreign_per_usd": "1.37",
+            "usd_per_foreign": "0.729927",
+            "source": {
+                "title": "Treasury Fiscal Data exchange rates",
+                "url": "https://fiscaldata.treasury.gov/",
+                "retrieved": "2026-07-04",
+            },
+            "proof": {"workpaper_json": str(treasury_only)},
+        },
+    )
+    assert is_fbar_compatible_workpaper(load_json(treasury_only)) is False
+
+    # Explicit year-end intent with no average language is accepted.
+    yearend_yearly = root / "yearend-yearly-workpaper.json"
+    write_json(
+        yearend_yearly,
+        {
+            "skill": "get-yearly-fx-rate",
+            "currency": "CAD",
+            "year": 2025,
+            "foreign_per_usd": "1.37",
+            "usd_per_foreign": "0.729927",
+            "rate_kind": "FBAR year-end rate (December 31 close)",
+            "source": {
+                "title": "Central bank year-end closing rate",
+                "url": "https://example.test/",
+                "retrieved": "2026-07-04",
+            },
+            "proof": {"workpaper_json": str(yearend_yearly)},
+        },
+    )
+    assert is_fbar_compatible_workpaper(load_json(yearend_yearly)) is True
+    assert validate_fx_workpaper(yearend_yearly, "CAD", 2025)["skill"] == "get-yearly-fx-rate"
+
+
 def test_boundary_rounding(root: Path) -> None:
     fx = make_year_end_fx_workpaper(root, foreign_per_usd=None, usd_per_foreign="0.010000004", name="boundary-rate")
     ledger = synthetic_account(root, "boundary-a", 2025, "COP", Decimal("1000000"), {}, fx)
@@ -1831,6 +2033,86 @@ def test_boundary_rounding(root: Path) -> None:
     assert daily["answer"] == "yes", daily
     assert max_view["exceeded"] is True, max_view
     assert max_view["aggregate_account_max_whole_dollars"] == 10001, max_view
+
+
+def test_aggregate_rejects_pre_1_3(root: Path) -> None:
+    # A ledger confirmed under a pre-1.3 schema carries cent-rounded native
+    # balances; aggregate must refuse it rather than silently re-import them.
+    ledger = synthetic_account(root, "stale-a", 2025, "USD", Decimal("6000"), {})
+    data = load_json(ledger)
+    data["schema_version"] = "1.2"
+    write_json(ledger, data)
+    out = root / "stale-summary.json"
+    try:
+        command_aggregate(argparse.Namespace(account_ledger=[str(ledger)], out=str(out), csv=None, pdf=None))
+    except FbarError as exc:
+        assert "1.2" in str(exc) and "schema" in str(exc).lower()
+    else:
+        raise AssertionError("aggregate must refuse pre-1.3 confirmed ledgers")
+
+
+def test_aggregate_native_precision_display(root: Path) -> None:
+    # A 3-decimal currency keeps full precision in the displayed max/combined USD.
+    fx = make_year_end_fx_workpaper(root, currency="KWD", foreign_per_usd=None, usd_per_foreign="3.26", name="kwd-disp")
+    ledger = synthetic_account(root, "kwd-disp-a", 2025, "KWD", Decimal("3067.485"), {}, fx)
+    out = root / "kwd-disp-summary.json"
+    command_aggregate(argparse.Namespace(account_ledger=[str(ledger)], out=str(out), csv=None, pdf=None))
+    summary = load_json(out)
+    account = summary["accounts"][0]
+    # 3067.485 KWD * 3.26 = 10000.0011 USD: displayed at full precision, not "10000".
+    assert account["max_usd_value"] == "10000.0011", account["max_usd_value"]
+    assert account["max_usd_value_whole_dollars"] == 10001, account["max_usd_value_whole_dollars"]
+
+
+def test_hostile_inputs_clean_errors(root: Path) -> None:
+    # A non-integer FX year must raise a clean FbarError, not a raw ValueError.
+    workpaper = root / "hostile-year-workpaper.json"
+    write_json(
+        workpaper,
+        {
+            "skill": "get-year-end-fx-rate",
+            "currency": "COP",
+            "year": "banana",
+            "usd_per_foreign": "0.00025",
+            "source": {"title": "t", "url": "u", "retrieved": "2026-01-01"},
+            "proof": {"workpaper_json": str(workpaper)},
+        },
+    )
+    try:
+        validate_fx_workpaper(workpaper, "COP", 2025)
+    except FbarError as exc:
+        assert "year" in str(exc).lower()
+    else:
+        raise AssertionError("hostile FX workpaper year must raise FbarError")
+
+    # A non-integer coverage counter must raise a clean FbarError.
+    ledger = root / "hostile-coverage-ledger.json"
+    write_json(
+        ledger,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "skill": "fbar-threshold-check",
+            "tax_year": 2025,
+            "account": {"currency": "USD"},
+            "coverage": {"missing_days": "lots"},
+            "daily_ledger": [],
+        },
+    )
+    try:
+        command_confirm_account(
+            argparse.Namespace(
+                input=str(ledger),
+                out=str(root / "hostile-out.json"),
+                csv=None,
+                balances_confirmed=True,
+                fx_workpaper_json=None,
+                accept_carry_forward=False,
+            )
+        )
+    except FbarError as exc:
+        assert "missing_days" in str(exc)
+    else:
+        raise AssertionError("hostile coverage counter must raise FbarError")
 
 
 def test_label_collisions() -> None:
@@ -1933,6 +2215,18 @@ def test_build_daily_rows() -> None:
     assert coverage["carry_gap_review_required"] is True
     assert coverage["carry_gaps"] and coverage["carry_gaps"][-1]["end"] == "2025-12-31"
     assert any("carried forward" in warning for warning in warnings)
+
+
+def test_native_balance_precision() -> None:
+    # 3-decimal currencies (KWD/BHD/OMR) must keep the third decimal in the
+    # stored and carried-forward native balance; cent-rounding flips boundaries.
+    candidates = [BalanceCandidate(date(2025, 1, 1), Decimal("1234.567"), "KWD", "high", SourceRef("k.pdf", 1, 1, ""))]
+    rows, _coverage, _warnings = build_daily_rows(2025, "KWD", candidates)
+    assert rows[0]["native_balance"] == "1234.567", rows[0]["native_balance"]
+    assert rows[0]["balance_source"] == "observed"
+    # The carried-forward days must also retain full precision.
+    assert rows[1]["native_balance"] == "1234.567", rows[1]["native_balance"]
+    assert rows[1]["balance_source"] == "carried-forward"
 
 
 def test_leap_year() -> None:
