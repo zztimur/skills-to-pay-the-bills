@@ -21,7 +21,7 @@ Use a Python runtime with `pdfplumber`:
 python3 "<package-root>/scripts/statement_intake_preflight.py" dependency-check
 ```
 
-If `pdfplumber` is unavailable, stop before preflight and report the missing dependency. Do not OCR scanned/image-only PDFs in v1.
+In Codex Desktop, if plain `python3` reports `pdfplumber missing`, call `load_workspace_dependencies` and retry the command with the bundled Python executable. If no available runtime has `pdfplumber`, stop before preflight and report the missing dependency. Do not OCR scanned/image-only PDFs in v1.
 
 ## 3. Run Preflight
 
@@ -58,6 +58,7 @@ Stop for user review when any `review_gates` entry appears. The most common gate
 
 - `missing-file`
 - `non-pdf-input`
+- `unreadable-pdf`
 - `low-text-pdf`
 - `mixed-years`
 - `ambiguous-dollar`
@@ -91,3 +92,7 @@ After preflight, return:
 - Suggested downstream command, if the user is continuing to FBAR or interest extraction.
 
 Do not say any FBAR or tax-support packet is complete after preflight alone.
+
+## 7. Maintainer Smoke Test
+
+After script changes, run `self-test` for deterministic parser logic and `smoke-test` with a dependency-backed Python runtime to verify the real PDF extraction path.
