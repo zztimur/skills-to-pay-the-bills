@@ -61,14 +61,18 @@ Downstream skills must reject preflight JSON when its skill name, tax year, scop
 python3 "<package-root>/scripts/statement_intake_preflight.py" dependency-check
 ```
 
-`self-test` uses only Python standard-library modules.
+In Codex Desktop, if the default `python3` reports `pdfplumber missing`, call `load_workspace_dependencies` and rerun with the bundled Python executable before treating the dependency as unavailable.
+
+`self-test` uses only Python standard-library modules. `smoke-test` uses `pdfplumber` and `reportlab` to exercise the real PDF extraction path.
 
 ## Maintainer Checks
 
 After changing this skill, run:
 
 ```bash
+python3 "<package-root>/scripts/statement_intake_preflight.py" dependency-check
 python3 "<package-root>/scripts/statement_intake_preflight.py" self-test
+python3 "<package-root>/scripts/statement_intake_preflight.py" smoke-test
 python3 -S skill-forge/scripts/inspect_skill_package.py "<package-root>" --json --strict
 claude plugin validate --strict "<package-root>"  # when Claude tooling is available
 ```

@@ -20,6 +20,8 @@ Do not OCR screenshots. Do not smooth over a mystery `$`. Do not pretend a folde
 
 This is support documentation, not a tax conclusion. A clean preflight means the input is ready for the next parser. It does not mean the account is complete, the interest total is right, or an FBAR threshold answer exists.
 
+In Codex Desktop, use the bundled workspace Python if plain `python3` does not have `pdfplumber`. The skill should check the available runtime before calling the dependency missing.
+
 ## What It Produces
 
 The preflight command writes:
@@ -105,6 +107,7 @@ python3 statements-to-interest/scripts/statements_to_interest.py extract \
 The skill should stop or ask for review when:
 
 - a file is missing or is not a PDF;
+- a `.pdf` file cannot actually be read as a PDF;
 - the PDF has little or no machine-readable text;
 - statement years do not line up with the requested year;
 - `$` appears without enough context to know the currency;
@@ -120,7 +123,9 @@ This is the good kind of early annoyance. Finding a scope problem here is cheape
 After script changes:
 
 ```bash
+python3 statement-intake-preflight/scripts/statement_intake_preflight.py dependency-check
 python3 statement-intake-preflight/scripts/statement_intake_preflight.py self-test
+python3 statement-intake-preflight/scripts/statement_intake_preflight.py smoke-test
 python3 -S skill-forge/scripts/inspect_skill_package.py statement-intake-preflight --json --strict
 ```
 
