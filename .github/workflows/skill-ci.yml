@@ -1,0 +1,39 @@
+name: Skill CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate-skills:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Inspect skill packages
+        run: |
+          python3 -S skill-forge/scripts/inspect_skill_package.py privacy-gate --json --strict
+          python3 -S skill-forge/scripts/inspect_skill_package.py skill-forge --json --strict
+          python3 -S skill-forge/scripts/inspect_skill_package.py get-yearly-fx-rate --json --strict
+          python3 -S skill-forge/scripts/inspect_skill_package.py get-year-end-fx-rate --json --strict
+          python3 -S skill-forge/scripts/inspect_skill_package.py fbar-threshold-check --json --strict
+          python3 -S skill-forge/scripts/inspect_skill_package.py statements-to-interest --json --strict
+
+      - name: Run deterministic self-tests
+        run: |
+          python3 -S skill-forge/scripts/run_self_tests.py
+          python3 privacy-gate/scripts/test_privacy_gate.py
+          python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py self-test
+          python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py self-test
+          python3 fbar-threshold-check/scripts/fbar_threshold_check.py self-test
+          python3 statements-to-interest/scripts/statements_to_interest.py self-test
