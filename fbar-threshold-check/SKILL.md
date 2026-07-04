@@ -1,6 +1,6 @@
 ---
 name: fbar-threshold-check
-description: Check FBAR thresholds for one tax year from foreign account statements. Use for daily ledgers, multi-account aggregation, and get-yearly-fx-rate workpaper conversion.
+description: Check FBAR thresholds for one tax year from foreign account statements. Use for daily ledgers, multi-account aggregation, and year-end FX workpaper conversion.
 ---
 
 # FBAR Threshold Check
@@ -20,7 +20,7 @@ python3 "<package-root>/scripts/fbar_threshold_check.py" extract-account \
   --out work/account-1.json
 ```
 
-Review the JSON and CSV before confirming. The CSV is a row-review artifact with one row per calendar day. Stop for user review when the script reports mixed accounts, mixed years, mixed currencies, ambiguous `$`, missing opening coverage, scanned/image-only PDFs, incomplete coverage, or low-confidence balance rows.
+Review the JSON and CSV before confirming. The CSV is a row-review artifact with one row per calendar day. Stop for user review when the script reports mixed accounts, mixed years, mixed currencies, ambiguous `$`, ambiguous amount separators, missing opening coverage, scanned/image-only PDFs, incomplete coverage, carry-forward gaps, or low-confidence balance rows. `confirm-account` refuses ledgers with carry-forward gaps longer than 40 days unless the user has explicitly reviewed `coverage.carry_gaps` and you pass `--accept-carry-forward`.
 
 Confirm only after the user has reviewed the account ledger:
 
@@ -31,17 +31,17 @@ python3 "<package-root>/scripts/fbar_threshold_check.py" confirm-account \
   --out work/account-1-confirmed.json
 ```
 
-For non-USD accounts, use the separate `get-yearly-fx-rate` skill to create the required workpaper, then pass its `workpaper.json`:
+For non-USD accounts, use the separate `get-year-end-fx-rate` skill (preferred for FBAR-style conversion) to create the required workpaper, then pass its `workpaper.json`:
 
 ```bash
 python3 "<package-root>/scripts/fbar_threshold_check.py" confirm-account \
   --input work/account-1.json \
   --balances-confirmed \
-  --fx-workpaper-json work/fx-rate-proof/cop-2025-source/workpaper.json \
+  --fx-workpaper-json work/fx-year-end-proof/cop-2025-source/workpaper.json \
   --out work/account-1-confirmed.json
 ```
 
-Important dependency guardrail: this skill consumes only `get-yearly-fx-rate` `workpaper.json` files. It rejects ordinary yearly-average workpapers unless that dependency marks the workpaper as FBAR-compatible or year-end appropriate. Do not source, calculate, or override FX rates inside this skill.
+Important dependency guardrail: this skill consumes only `workpaper.json` files from `get-year-end-fx-rate` (preferred) or `get-yearly-fx-rate`. A `get-yearly-fx-rate` workpaper is accepted only when that dependency marks it as FBAR-compatible or year-end appropriate; plain yearly-average workpapers are rejected. Do not source, calculate, or override FX rates inside this skill.
 
 After each confirmed account, ask whether the user has another foreign account for the same year. When the user says there are no more accounts, aggregate:
 
@@ -74,7 +74,6 @@ After changing this skill, run:
 
 ```bash
 python3 "<package-root>/scripts/fbar_threshold_check.py" self-test
-python3 /Users/timur/.codex/skills/.system/skill-creator/scripts/quick_validate.py "<package-root>"
 python3 -S skill-forge/scripts/inspect_skill_package.py "<package-root>" --json --strict
 ```
 
