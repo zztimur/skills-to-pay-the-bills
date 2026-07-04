@@ -1,0 +1,4 @@
+interface:
+  display_name: "Statement Intake Preflight"
+  short_description: "Preflight bank statement PDFs"
+  default_prompt: "Use $statement-intake-preflight to check one bank statement PDF set for one tax year, produce the review JSON/CSV, and flag account, institution, currency, text-layer, and scope issues before downstream analysis."

@@ -11,12 +11,23 @@ Build account-by-account FBAR threshold evidence for one calendar year. Produce 
 
 Read `references/workflow.md` before analysis. It contains the intake gates, review points, command sequence, FX dependency contract, and final-response shape. Read `references/fbar-source-notes.md` when explaining FBAR threshold wording, maximum account value, source limitations, or FX caveats. `<package-root>` below means the directory containing this SKILL.md.
 
-Process one account at a time:
+Process one account at a time. First use the separate `statement-intake-preflight` skill with `--scope one-account` and review its JSON/CSV:
+
+```bash
+python3 "<preflight-root>/scripts/statement_intake_preflight.py" preflight \
+  --pdf statement-01.pdf statement-02.pdf \
+  --tax-year 2025 \
+  --scope one-account \
+  --out work/statement-preflight.json
+```
+
+Then extract the account ledger and pass the reviewed preflight JSON:
 
 ```bash
 python3 "<package-root>/scripts/fbar_threshold_check.py" extract-account \
   --pdf statement-01.pdf statement-02.pdf \
   --tax-year 2025 \
+  --preflight-json work/statement-preflight.json \
   --out work/account-1.json
 ```
 

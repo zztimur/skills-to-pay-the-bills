@@ -43,7 +43,21 @@ python3 "<package-root>/scripts/fbar_threshold_check.py" dependency-check
 
 If `pdfplumber` is unavailable, stop before extraction and report the missing dependency. `confirm-account`, `aggregate`, and `self-test` do not require `pdfplumber`.
 
-## 4. Extract One Account
+## 4. Preflight One Account
+
+Before extracting balances, run the shared statement preflight with `--scope one-account`:
+
+```bash
+python3 "<preflight-root>/scripts/statement_intake_preflight.py" preflight \
+  --pdf "statement-01.pdf" "statement-02.pdf" \
+  --tax-year 2025 \
+  --scope one-account \
+  --out "work/statement-preflight.json"
+```
+
+Review the preflight JSON and CSV. Stop for user review when it reports non-PDF files, low/no text layer, mixed years, mixed currencies, ambiguous `$`, possible mixed accounts, possible mixed institutions, unknown account context, or other review gates. Preflight does not replace FBAR balance extraction; it only standardizes the intake handoff.
+
+## 5. Extract One Account
 
 Run:
 
@@ -51,6 +65,7 @@ Run:
 python3 "<package-root>/scripts/fbar_threshold_check.py" extract-account \
   --pdf "statement-01.pdf" "statement-02.pdf" \
   --tax-year 2025 \
+  --preflight-json "work/statement-preflight.json" \
   --out "work/account-1.json"
 ```
 
@@ -59,6 +74,7 @@ Optional flags:
 - `--account-id`: stable local identifier when the user has one.
 - `--institution`: institution label when visible in the statement set or known from the user.
 - `--account-currency`: ISO code when the statement text cannot safely infer it.
+- `--preflight-json`: reviewed JSON from `statement-intake-preflight`; the script rejects mismatched tax year, scope, or PDF set.
 - `--csv`: review CSV output path.
 
 The script writes:
@@ -68,10 +84,11 @@ The script writes:
 
 The review CSV has one row per day with native balance, USD balance placeholder, confidence, source references, and notes.
 
-## 5. Review Gate
+## 6. Review Gate
 
 Open the JSON and CSV before confirming. Confirm these fields:
 
+- `preflight` summary, if present, matches the reviewed intake artifact.
 - `account.account_id`, `institution`, and account hints represent one account.
 - `account.currency` is correct and not ambiguous.
 - `statement_files` are the expected PDFs.
@@ -97,7 +114,7 @@ Stop for user review when any of these appear:
 
 Do not edit rows by guess. If the statement set cannot support a complete daily ledger, say so and ask for better statements or explicit user/preparer review.
 
-## 6. FX Dependency
+## 7. FX Dependency
 
 For USD accounts, confirm without FX.
 
@@ -119,7 +136,7 @@ The checker accepts the dependency only when `workpaper.json`:
 
 In practice `get-year-end-fx-rate` is the supported path: the yearly dependency's normal output describes a yearly-average table and is rejected. If a `get-yearly-fx-rate` workpaper only says yearly average or annual average, stop and ask the user to produce a `get-year-end-fx-rate` workpaper instead.
 
-## 7. Confirm One Account
+## 8. Confirm One Account
 
 USD:
 
@@ -146,7 +163,7 @@ The confirmed JSON and CSV contain USD balances. Negative balances are treated a
 
 After confirmation, ask: "Do you have another foreign account for the same year to add?" Continue account-by-account until the user says no.
 
-## 8. Aggregate All Confirmed Accounts
+## 9. Aggregate All Confirmed Accounts
 
 Run:
 
@@ -166,7 +183,7 @@ The aggregate command writes:
 
 Use the final JSON/CSV as the data source for the final answer. The PDF is for human reading only.
 
-## 9. Final Response
+## 10. Final Response
 
 Lead with the answer, mapped from `daily_threshold.answer` in the final JSON (`yes` / `no` / `insufficient-records`):
 

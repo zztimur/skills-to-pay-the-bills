@@ -12,7 +12,7 @@ The point is not to file FinCEN Form 114 or give legal advice. The point is to t
 
 One calendar year. One account at a time. Confirm the ledger before aggregation.
 
-For each account, extract daily balances from machine-readable statement PDFs, review the generated JSON/CSV, and confirm the account only after the user has looked at the coverage and balance assumptions. For non-USD accounts, use a retained FX workpaper from `get-year-end-fx-rate` whenever possible. A plain yearly-average rate is not enough for FBAR-style conversion unless the dependency explicitly marks it as FBAR-compatible or year-end appropriate.
+For each account, preflight the machine-readable statement PDFs with `statement-intake-preflight`, extract daily balances with the reviewed preflight JSON, review the generated JSON/CSV, and confirm the account only after the user has looked at the coverage and balance assumptions. For non-USD accounts, use a retained FX workpaper from `get-year-end-fx-rate` whenever possible. A plain yearly-average rate is not enough for FBAR-style conversion unless the dependency explicitly marks it as FBAR-compatible or year-end appropriate.
 
 Do not source, calculate, or override FX rates inside this skill. Do not silently carry balances across suspicious coverage gaps. Do not return a confident "no" when the reviewed records are incomplete.
 
@@ -53,12 +53,23 @@ The command file is only an adapter. The root `SKILL.md`, `references/`, and scr
 
 ## Run The Script Manually
 
+Preflight one account:
+
+```bash
+python3 statement-intake-preflight/scripts/statement_intake_preflight.py preflight \
+  --pdf statement-01.pdf statement-02.pdf \
+  --tax-year 2025 \
+  --scope one-account \
+  --out work/statement-preflight.json
+```
+
 Extract one account:
 
 ```bash
 python3 fbar-threshold-check/scripts/fbar_threshold_check.py extract-account \
   --pdf statement-01.pdf statement-02.pdf \
   --tax-year 2025 \
+  --preflight-json work/statement-preflight.json \
   --out work/account-1.json
 ```
 

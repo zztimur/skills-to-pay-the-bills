@@ -39,13 +39,27 @@ python -c 'import pdfplumber, reportlab, pypdf; print("deps ok")'
 
 If dependencies are unavailable, stop before analysis and tell the user which package is missing.
 
-## 3. Extraction
+## 3. Preflight
 
 Create the work/output folders before running commands:
 
 ```bash
 mkdir -p work outputs
 ```
+
+Run the shared statement preflight with `--scope one-institution`:
+
+```bash
+python3 "<preflight-root>/scripts/statement_intake_preflight.py" preflight \
+  --pdf "statement-01.pdf" "statement-02.pdf" \
+  --tax-year 2025 \
+  --scope one-institution \
+  --out "work/statement-preflight.json"
+```
+
+Review the preflight JSON and CSV. Stop for user review when it reports non-PDF files, low/no text layer, mixed years, mixed currencies, ambiguous `$`, possible mixed accounts, possible mixed institutions, unknown institution context, or other review gates. Preflight does not replace interest-row extraction; it only standardizes the intake handoff.
+
+## 4. Extraction
 
 Run extraction:
 
@@ -55,6 +69,7 @@ python "<package-root>/scripts/statements_to_interest.py" extract \
   --tax-year 2025 \
   --institution "Example Bank" \
   --account-currency COP \
+  --preflight-json "work/statement-preflight.json" \
   --out "work/example-bank-2025-interest-analysis.json"
 ```
 
@@ -63,6 +78,7 @@ The script writes:
 - Analysis JSON at `--out`.
 - Review CSV beside the JSON unless `--csv` is supplied. This is for row inspection; do not make CSV the user-facing deliverable unless the user asks for it.
 - `institution_profile` with institution name, account currency, statement titles, detected periods, institution-label source, and statement count.
+- `preflight` summary when `--preflight-json` is supplied; the script rejects mismatched tax year, scope, or PDF set.
 
 Use `--account-currency` only when the account currency is known from file organization or statement review and the script cannot infer it. This is especially important for statements that use `$` for local currency, such as Colombian peso statements. Do not treat `$` alone as proof of USD.
 
@@ -74,10 +90,11 @@ For large or messy input sets, triage before extraction:
 - If filenames, folders, or visible statement periods suggest mixed institutions, accounts from unrelated providers, currencies, or tax years, stop and ask the user to split the job.
 - If the PDFs are unusually large or the text layer looks noisy, run a small extraction first and report what coverage was verified before continuing.
 
-## 4. Review The Extracted Results
+## 5. Review The Extracted Results
 
 Open the JSON and review CSV before generating a report. The CSV is an internal audit/review aid; the final user-facing artifact should be the PDF packet. Review these JSON fields:
 
+- `preflight`: reviewed intake artifact summary, if present.
 - `statement_files`: files reviewed, page counts, detected periods, currency markers.
 - `institution_profile`: institution, account currency, title/period coverage, and institution-label source.
 - `rows`: counted interest rows.
@@ -108,7 +125,7 @@ Ask the user to confirm before reporting when:
 
 Do not add, remove, or edit rows by guess. If a row is missing or wrong, explain the evidence and ask for confirmation or better source data.
 
-## 5. FX Decision
+## 6. FX Decision
 
 If all counted rows are USD:
 
@@ -213,7 +230,7 @@ python "<package-root>/scripts/statements_to_interest.py" report \
   --out "outputs/example-bank-2025-interest-support-packet.pdf"
 ```
 
-## 6. Report Verification
+## 7. Report Verification
 
 After generating the PDF:
 
@@ -229,7 +246,7 @@ Use `pypdf` for a quick text check:
 python -c 'from pypdf import PdfReader; p="outputs/example-bank-2025-interest-support-packet.pdf"; text="\n".join((page.extract_text() or "") for page in PdfReader(p).pages); print("Foreign Bank Interest Support Packet" in text, "USD" in text)'
 ```
 
-## 7. Final Response
+## 8. Final Response
 
 If FX confirmation is still pending, do not use a final-completion response. Ask the FX confirmation/custom-rate question directly and state that the support PDF is pending that answer.
 
@@ -262,7 +279,7 @@ Files:
 Review flags: institution label was found only in the file path; verify the PDFs are all from Example Bank.
 ```
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Action |
 |---|---|

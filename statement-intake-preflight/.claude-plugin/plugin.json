@@ -1,0 +1,8 @@
+{
+  "name": "statement-intake-preflight",
+  "description": "Shared statement PDF preflight for tax-support and FBAR workflows.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Timur"
+  }
+}
