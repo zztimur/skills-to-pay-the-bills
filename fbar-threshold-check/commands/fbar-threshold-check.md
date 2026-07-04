@@ -10,7 +10,7 @@ This command is a Claude plugin entrypoint only. The package root `SKILL.md` is 
 ## Command Handling
 
 1. Read the package root `SKILL.md`, then `references/workflow.md`, before doing anything else.
-2. Treat `$ARGUMENTS` as an opening hint: the first token is the tax year, remaining tokens are statement PDF paths for one account. Ask only for missing required values.
+2. Treat `$ARGUMENTS` as an opening hint: the first token is the tax year, remaining tokens are statement PDF paths intended for one account. Ask only for missing required values.
 3. Execute the workflow in `references/workflow.md` exactly, including the `statement-intake-preflight` run with `--scope one-account`, its reviewed `--preflight-json` handoff into `extract-account`, the mandatory stop-and-show-the-user review gate before `confirm-account` (do not self-confirm), the FX dependency contract, the carry-forward `--accept-carry-forward` gate, the per-account repeat loop, and the final-response shape.
 
 Do not prepare official FBAR forms and do not give legal or tax advice.

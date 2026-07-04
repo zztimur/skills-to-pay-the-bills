@@ -1,12 +1,10 @@
 # Statements to Interest
 
-Extract interest income from one institution's machine-readable statement PDFs for one tax year and generate an IRS-oriented support packet.
+Extract interest income from a reviewed statement set and generate an IRS-oriented support packet.
 
 This skill is intentionally narrow:
 
-- One institution or account provider.
-- One tax year.
-- Text PDFs, not screenshots or scanned/image-only PDFs.
+- The statement set has already passed `statement-intake-preflight` for one institution, one tax year, readable PDFs, and currency scope.
 - Interest-income support documentation, not official IRS forms or tax advice.
 
 The user-facing deliverable is the PDF packet. JSON and CSV outputs remain available for row review and audit support, but the CSV is not the primary result unless the user asks for it.
