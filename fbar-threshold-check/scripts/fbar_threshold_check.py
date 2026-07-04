@@ -427,6 +427,18 @@ def parse_line_dates(line: str) -> list[tuple[date, str, str]]:
     return list(unique.values())
 
 
+# Mask-only spans: two-digit-year numeric dates ("31/12/23") and clock times
+# ("23:59", "23:59:00"). These are deliberately NOT parsed as balance dates -
+# a two-digit year is ambiguous - but they must be blanked so their fragments
+# ("31", "12", "23", "59") cannot be picked as a balance on a line that also
+# carries a valid four-digit date. The trailing \b keeps the year group from
+# matching inside a four-digit year or a 3+ digit money group.
+MASK_ONLY_PATTERNS = (
+    re.compile(r"\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2}\b"),
+    re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b"),
+)
+
+
 def mask_date_spans(line: str) -> str:
     """Blank out date substrings so their fragments cannot parse as money.
 
@@ -434,7 +446,7 @@ def mask_date_spans(line: str) -> str:
     monetary tokens; character positions are preserved.
     """
     chars = list(line)
-    for pattern in (*DATE_PATTERNS, *MONTH_DATE_PATTERNS):
+    for pattern in (*DATE_PATTERNS, *MONTH_DATE_PATTERNS, *MASK_ONLY_PATTERNS):
         for match in pattern.finditer(line):
             for index in range(match.start(), match.end()):
                 chars[index] = "#"
@@ -950,6 +962,18 @@ def require_account_data(path: Path) -> dict[str, object]:
     return data
 
 
+def schema_tuple(version: object) -> tuple[int, ...]:
+    """Parse a "major.minor" schema string into a comparable tuple.
+
+    Unparseable versions sort below every real schema so a malformed value can
+    never satisfy a minimum-version floor.
+    """
+    try:
+        return tuple(int(part) for part in str(version).split("."))
+    except (TypeError, ValueError):
+        return (0,)
+
+
 def as_decimal(value: object, label: str) -> Decimal:
     if value is None or value == "":
         raise FbarError(f"Missing decimal value for {label}.", 2)
@@ -976,7 +1000,7 @@ def validate_fx_workpaper(path: Path, currency: str, year: int) -> dict[str, obj
         )
     if str(workpaper.get("currency", "")).upper() != currency:
         raise FbarError(f"FX workpaper currency {workpaper.get('currency')} does not match account currency {currency}.", 2)
-    if int(workpaper.get("year", 0)) != year:
+    if as_int(workpaper.get("year", 0), "FX workpaper year") != year:
         raise FbarError(f"FX workpaper year {workpaper.get('year')} does not match tax year {year}.", 2)
 
     source = workpaper.get("source")
@@ -1090,9 +1114,9 @@ def command_confirm_account(args: argparse.Namespace) -> int:
     coverage = data.get("coverage", {})
     if not isinstance(coverage, dict):
         raise FbarError("Account ledger has no coverage object.", 2)
-    if int(coverage.get("missing_days", 0)) > 0:
+    if as_int(coverage.get("missing_days", 0), "coverage.missing_days") > 0:
         raise FbarError("Account ledger has missing days; do not confirm until opening/prior balance coverage is resolved.", 2)
-    if int(coverage.get("low_confidence_days", 0)) > 0:
+    if as_int(coverage.get("low_confidence_days", 0), "coverage.low_confidence_days") > 0:
         raise FbarError("Account ledger has low-confidence balance days; resolve or regenerate before confirmation.", 2)
     carry_gaps = coverage.get("carry_gaps") if isinstance(coverage.get("carry_gaps"), list) else []
     accept_carry_forward = bool(getattr(args, "accept_carry_forward", False))
@@ -1220,8 +1244,20 @@ def load_confirmed_account(path: Path) -> dict[str, object]:
     data = require_account_data(path)
     if data.get("status") != "confirmed":
         raise FbarError(f"{path} is not confirmed. Run confirm-account first.", 2)
+    # Aggregation requires the native-precision era. Ledgers confirmed under
+    # schema < 1.3 carry cent-rounded native balances/thresholds, so importing
+    # them would silently reintroduce the boundary-rounding defect for 3-decimal
+    # currencies. Re-extract those accounts with the current skill first.
+    version = str(data.get("schema_version") or "missing")
+    if schema_tuple(version) < (1, 3):
+        raise FbarError(
+            f"{path} was confirmed under schema {version}, whose native balances are cent-rounded. "
+            f"Re-run extract-account and confirm-account with the current skill (schema {SCHEMA_VERSION}) "
+            "before aggregating so 3-decimal currencies and boundary values stay exact.",
+            2,
+        )
     coverage = data.get("coverage", {})
-    if isinstance(coverage, dict) and int(coverage.get("missing_days", 0)) > 0:
+    if isinstance(coverage, dict) and as_int(coverage.get("missing_days", 0), "coverage.missing_days") > 0:
         raise FbarError(f"{path} has incomplete coverage and cannot be aggregated.", 2)
     rows = data.get("daily_ledger", [])
     if not isinstance(rows, list):
@@ -1276,7 +1312,7 @@ def command_aggregate(args: argparse.Namespace) -> int:
         account_coverage = account_data.get("coverage", {})
         if not isinstance(account_coverage, dict):
             account_coverage = {}
-        if int(account_coverage.get("missing_days", 0)) > 0 or account_coverage.get("carry_gaps"):
+        if as_int(account_coverage.get("missing_days", 0), "coverage.missing_days") > 0 or account_coverage.get("carry_gaps"):
             records_complete = False
         rows = account_data["daily_ledger"]
         assert isinstance(rows, list)
@@ -1293,7 +1329,7 @@ def command_aggregate(args: argparse.Namespace) -> int:
                 "account_id": label,
                 "institution": account.get("institution"),
                 "currency": account.get("currency"),
-                "max_usd_value": fmt_decimal(max_value),
+                "max_usd_value": fmt_native(max_value),
                 "max_usd_value_whole_dollars": max_whole,
                 "source_json": account_data.get("artifacts", {}),
             }
@@ -1317,9 +1353,9 @@ def command_aggregate(args: argparse.Namespace) -> int:
             if account_day is None:
                 raise FbarError(f"Account {label} is missing day {day}.", 2)
             value = as_decimal(account_day.get("threshold_usd_value"), f"{label} {day} threshold")
-            row[label] = fmt_decimal(value)
+            row[label] = fmt_native(value)
             combined += value
-        row["combined_usd_value"] = fmt_decimal(combined)
+        row["combined_usd_value"] = fmt_native(combined)
         row["over_10000"] = combined > THRESHOLD_USD
         if combined > THRESHOLD_USD:
             over_limit_dates.append(day)
@@ -1351,7 +1387,7 @@ def command_aggregate(args: argparse.Namespace) -> int:
             "answer": daily_answer,
             "exceeded": bool(over_limit_dates),
             "over_limit_dates": over_limit_dates,
-            "max_combined_usd_value": fmt_decimal(max_combined),
+            "max_combined_usd_value": fmt_native(max_combined),
             "max_combined_date": max_combined_date,
             "records_complete": records_complete,
         },
@@ -1570,10 +1606,14 @@ def command_self_test(_args: argparse.Namespace) -> int:
         test_leap_year()
         test_same_day_variance()
         test_carry_gap_gate(root)
+        test_mask_time_and_two_digit_year()
         test_fx_guardrails(root)
         test_fx_rate_guards(root)
         test_fx_provenance_not_yearend(root)
+        test_hostile_inputs_clean_errors(root)
         test_boundary_rounding(root)
+        test_aggregate_rejects_pre_1_3(root)
+        test_aggregate_native_precision_display(root)
         test_label_collisions()
         test_duplicate_ledger_refused(root)
         test_schema_gate(root)
@@ -1796,6 +1836,23 @@ def test_money_tokenization() -> None:
     assert amounts == [Decimal("1234.56")], amounts
 
 
+def test_mask_time_and_two_digit_year() -> None:
+    # A clock time or 2-digit-year date sitting after the balance term must be
+    # masked so its fragments cannot be selected instead of the real balance.
+    masked = mask_date_spans("2023-12-31 balance 1,234.56 at 23:59")
+    assert [amt for amt, _t, _p, _n in parse_money_values(masked)] == [Decimal("1234.56")]
+    masked = mask_date_spans("2023-12-31 balance 9,999.99 prior 31/12/22")
+    assert [amt for amt, _t, _p, _n in parse_money_values(masked)] == [Decimal("9999.99")]
+    # End-to-end: the real balance wins even when the time trails the term.
+    line = "2023-12-31 Closing balance 1,234.56 at 23:59"
+    cands, _warnings = extract_balance_candidates([(SourceRef("t.pdf", 1, 1, line), line)], 2023, "USD")
+    assert cands and cands[-1].amount == Decimal("1234.56"), cands[-1].amount if cands else None
+    # Masking must not eat real amounts: European grouped money (3-digit groups)
+    # and comma decimals are left intact.
+    assert "#" not in mask_date_spans("balance 4.000.000,00")
+    assert "#" not in mask_date_spans("balance 1.234,56")
+
+
 def test_sign_formats() -> None:
     cases = {
         "9.500,25-": Decimal("-9500.25"),
@@ -1976,6 +2033,86 @@ def test_boundary_rounding(root: Path) -> None:
     assert daily["answer"] == "yes", daily
     assert max_view["exceeded"] is True, max_view
     assert max_view["aggregate_account_max_whole_dollars"] == 10001, max_view
+
+
+def test_aggregate_rejects_pre_1_3(root: Path) -> None:
+    # A ledger confirmed under a pre-1.3 schema carries cent-rounded native
+    # balances; aggregate must refuse it rather than silently re-import them.
+    ledger = synthetic_account(root, "stale-a", 2025, "USD", Decimal("6000"), {})
+    data = load_json(ledger)
+    data["schema_version"] = "1.2"
+    write_json(ledger, data)
+    out = root / "stale-summary.json"
+    try:
+        command_aggregate(argparse.Namespace(account_ledger=[str(ledger)], out=str(out), csv=None, pdf=None))
+    except FbarError as exc:
+        assert "1.2" in str(exc) and "schema" in str(exc).lower()
+    else:
+        raise AssertionError("aggregate must refuse pre-1.3 confirmed ledgers")
+
+
+def test_aggregate_native_precision_display(root: Path) -> None:
+    # A 3-decimal currency keeps full precision in the displayed max/combined USD.
+    fx = make_year_end_fx_workpaper(root, currency="KWD", foreign_per_usd=None, usd_per_foreign="3.26", name="kwd-disp")
+    ledger = synthetic_account(root, "kwd-disp-a", 2025, "KWD", Decimal("3067.485"), {}, fx)
+    out = root / "kwd-disp-summary.json"
+    command_aggregate(argparse.Namespace(account_ledger=[str(ledger)], out=str(out), csv=None, pdf=None))
+    summary = load_json(out)
+    account = summary["accounts"][0]
+    # 3067.485 KWD * 3.26 = 10000.0011 USD: displayed at full precision, not "10000".
+    assert account["max_usd_value"] == "10000.0011", account["max_usd_value"]
+    assert account["max_usd_value_whole_dollars"] == 10001, account["max_usd_value_whole_dollars"]
+
+
+def test_hostile_inputs_clean_errors(root: Path) -> None:
+    # A non-integer FX year must raise a clean FbarError, not a raw ValueError.
+    workpaper = root / "hostile-year-workpaper.json"
+    write_json(
+        workpaper,
+        {
+            "skill": "get-year-end-fx-rate",
+            "currency": "COP",
+            "year": "banana",
+            "usd_per_foreign": "0.00025",
+            "source": {"title": "t", "url": "u", "retrieved": "2026-01-01"},
+            "proof": {"workpaper_json": str(workpaper)},
+        },
+    )
+    try:
+        validate_fx_workpaper(workpaper, "COP", 2025)
+    except FbarError as exc:
+        assert "year" in str(exc).lower()
+    else:
+        raise AssertionError("hostile FX workpaper year must raise FbarError")
+
+    # A non-integer coverage counter must raise a clean FbarError.
+    ledger = root / "hostile-coverage-ledger.json"
+    write_json(
+        ledger,
+        {
+            "schema_version": SCHEMA_VERSION,
+            "skill": "fbar-threshold-check",
+            "tax_year": 2025,
+            "account": {"currency": "USD"},
+            "coverage": {"missing_days": "lots"},
+            "daily_ledger": [],
+        },
+    )
+    try:
+        command_confirm_account(
+            argparse.Namespace(
+                input=str(ledger),
+                out=str(root / "hostile-out.json"),
+                csv=None,
+                balances_confirmed=True,
+                fx_workpaper_json=None,
+                accept_carry_forward=False,
+            )
+        )
+    except FbarError as exc:
+        assert "missing_days" in str(exc)
+    else:
+        raise AssertionError("hostile coverage counter must raise FbarError")
 
 
 def test_label_collisions() -> None:

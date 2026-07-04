@@ -156,6 +156,8 @@ python3 "<package-root>/scripts/fbar_threshold_check.py" aggregate \
   --out "outputs/fbar-2025-summary.json"
 ```
 
+Every account ledger must have been confirmed with the current skill (schema 1.3 or later). Aggregate refuses ledgers confirmed under an older schema because their native balances are cent-rounded, which would reintroduce boundary-rounding error for 3-decimal currencies (KWD/BHD/OMR/JOD). If aggregate reports a stale schema, re-run `extract-account` and `confirm-account` for that account before aggregating.
+
 The aggregate command writes:
 
 - Final JSON decision file.
