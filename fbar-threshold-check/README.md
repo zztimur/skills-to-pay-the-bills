@@ -39,7 +39,7 @@ Ask for the skill directly:
 Use $fbar-threshold-check to check whether my foreign accounts crossed the FBAR threshold for 2025.
 ```
 
-Codex should read the root `SKILL.md`, then `references/workflow.md`, and use the script for extraction, confirmation, and aggregation. It should pause for ledger review when the script reports coverage gaps, mixed accounts, mixed years, ambiguous currencies, scanned PDFs, or low-confidence balance rows.
+Codex should read the root `SKILL.md`, then `references/workflow.md`, run `statement-intake-preflight` for shared intake, and use this script for extraction, confirmation, and aggregation. It should pause for FBAR ledger review when the script reports coverage gaps, ambiguous balance amounts, conflicting balance candidates, or low-confidence balance rows.
 
 ## Use It In Claude Code
 
@@ -102,11 +102,9 @@ python3 fbar-threshold-check/scripts/fbar_threshold_check.py aggregate \
 
 ## Failure Modes
 
-The skill should stop or ask for review when:
+The shared preflight skill owns unreadable PDFs, mixed accounts, mixed years, and ambiguous currency context. After that handoff, this skill should stop or ask for review when:
 
-- PDFs are scanned/image-only or missing machine-readable text.
-- A statement appears to contain mixed accounts, mixed years, or ambiguous currencies.
-- Amount separators or `$` symbols are ambiguous.
+- Amount separators in balance rows are ambiguous.
 - Opening coverage is missing or carry-forward gaps are too large.
 - Balance rows are low confidence.
 - A non-USD account lacks acceptable year-end FX proof.

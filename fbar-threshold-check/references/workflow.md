@@ -7,20 +7,16 @@ Use this workflow whenever the skill is triggered. Keep all work local unless th
 Collect or infer:
 
 - Calendar year.
-- Statement PDF paths for exactly one account.
-- Account currency, if the statement does not clearly identify it.
+- Statement PDF paths to hand to `statement-intake-preflight`.
 - Work folder, defaulting to `work/`.
 - Output folder, defaulting to `outputs/`.
 
-Before running extraction, verify scope:
+Before running extraction:
 
-- One account per pass.
-- One calendar year.
-- One currency bucket.
-- Machine-readable PDFs, not screenshots or image-only scans.
-- The user wants an FBAR threshold check, not an official filing.
+- Use `statement-intake-preflight` to verify shared statement intake scope: one account, one calendar year, one currency bucket, readable PDFs, and account/currency hints.
+- Verify only the FBAR-specific intent here: the user wants an FBAR threshold support check, not an official filing.
 
-If the user provides multiple accounts, split the work. If an account has multiple currencies, split by currency bucket or stop for manual review.
+If preflight reports multiple accounts, multiple currencies, mixed years, low/no text, or ambiguous currency, resolve that in the preflight step before this skill extracts balances.
 
 ## 2. Source Anchors
 
@@ -35,13 +31,13 @@ Use careful language:
 
 ## 3. Runtime Setup
 
-For extraction, use a Python runtime with `pdfplumber`:
+For balance extraction, use a Python runtime with `pdfplumber`:
 
 ```bash
 python3 "<package-root>/scripts/fbar_threshold_check.py" dependency-check
 ```
 
-If `pdfplumber` is unavailable, stop before extraction and report the missing dependency. `confirm-account`, `aggregate`, and `self-test` do not require `pdfplumber`.
+If `pdfplumber` is unavailable, stop before balance extraction and report the missing dependency. The shared text-layer readiness check is owned by `statement-intake-preflight`; `confirm-account`, `aggregate`, and `self-test` do not require `pdfplumber`.
 
 ## 4. Preflight One Account
 
@@ -55,7 +51,7 @@ python3 "<preflight-root>/scripts/statement_intake_preflight.py" preflight \
   --out "work/statement-preflight.json"
 ```
 
-Review the preflight JSON and CSV. Stop for user review when it reports non-PDF files, low/no text layer, mixed years, mixed currencies, ambiguous `$`, possible mixed accounts, possible mixed institutions, unknown account context, or other review gates. Preflight does not replace FBAR balance extraction; it only standardizes the intake handoff.
+Review the preflight JSON and CSV. Stop here until preflight review gates are resolved or explicitly accepted. Do not duplicate those shared checks in this skill; preflight owns PDF readability, year/account/currency scope, ambiguous `$`, and account/institution hints. Preflight does not replace FBAR balance extraction; it only standardizes the intake handoff.
 
 ## 5. Extract One Account
 
@@ -89,8 +85,7 @@ The review CSV has one row per day with native balance, USD balance placeholder,
 Open the JSON and CSV before confirming. Confirm these fields:
 
 - `preflight` summary, if present, matches the reviewed intake artifact.
-- `account.account_id`, `institution`, and account hints represent one account.
-- `account.currency` is correct and not ambiguous.
+- `account.account_id`, `institution`, and `account.currency` are usable for the confirmed ledger; if not, return to preflight or rerun extraction with an explicit override instead of adjudicating intake ad hoc here.
 - `statement_files` are the expected PDFs.
 - `coverage.complete_year` is true.
 - `coverage.carry_gaps` is empty and `coverage.trailing_carry_days` is small; carried balances near year-end are evidence gaps, not observations.
@@ -101,14 +96,10 @@ Open the JSON and CSV before confirming. Confirm these fields:
 
 Stop for user review when any of these appear:
 
-- Multiple account-number hints or conflicting institution labels.
-- Dates outside the requested tax year.
 - Missing opening balance or missing days.
 - Carry-forward gaps longer than 40 days (`coverage.carry_gaps`), including statements that stop before December 31.
-- Unknown or ambiguous currency, including `$` without country/context.
 - Ambiguous thousands/decimal separators flagged in row notes or warnings.
 - Materially different same-day balance candidates flagged in row notes.
-- Scanned/image-only PDFs.
 - Low-confidence candidate rows.
 - Extracted totals that visibly conflict with statement summaries.
 

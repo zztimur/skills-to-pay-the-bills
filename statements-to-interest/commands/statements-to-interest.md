@@ -1,5 +1,5 @@
 ---
-description: Analyze one bank statement set for one tax year and render an interest support packet
+description: Extract interest from a preflighted statement set and render a support packet
 argument-hint: "<tax-year> <institution> [account currency] <statement PDF paths...>"
 ---
 
@@ -11,12 +11,11 @@ Use the package root `SKILL.md` as the control plane and read `references/workfl
 
 1. Parse `$ARGUMENTS` for tax year, institution name, statement PDF paths, optional account currency, and optional output folder.
 2. Ask only for missing required values.
-3. Enforce one institution and one tax year.
-4. Use machine-readable text PDFs only.
-5. Run `statement-intake-preflight` with `--scope one-institution`, review its JSON/CSV, then pass the reviewed JSON to `scripts/statements_to_interest.py extract` with `--preflight-json`.
-6. Run `scripts/statements_to_interest.py` exactly as described in `references/workflow.md`.
-7. Review JSON and the review CSV internally, then make the PDF packet the user-facing deliverable.
-8. For non-USD rows, use the separate `get-yearly-fx-rate` skill to create a proof-backed yearly-average workpaper, then pass its `workpaper.json` to `fx-prompt` and `report` with `--fx-workpaper-json`. Do not source published yearly averages inside this command. If the dependency is unavailable, stop and ask the user to install/run it or provide a confirmed user/preparer custom rate with `--fx-method user-rate`; `--fx-source` is optional for custom rates.
-9. If FX confirmation is pending, ask the confirmation/custom-rate question and state that the PDF is pending. After confirmation, generate and verify the PDF, then return the PDF first with totals, review flags, and the `get-yearly-fx-rate` proof artifacts. Mention CSV only as an audit artifact if useful or requested.
+3. Run `statement-intake-preflight` with `--scope one-institution`; let that skill own one-institution, one-year, text-PDF, currency-bucket, and ambiguous `$` intake gates.
+4. Review the preflight JSON/CSV, then pass the reviewed JSON to `scripts/statements_to_interest.py extract` with `--preflight-json`.
+5. Run `scripts/statements_to_interest.py` exactly as described in `references/workflow.md`.
+6. Review interest rows, excluded candidates, totals, warnings, and FX readiness internally, then make the PDF packet the user-facing deliverable.
+7. For non-USD rows, use the separate `get-yearly-fx-rate` skill to create a proof-backed yearly-average workpaper, then pass its `workpaper.json` to `fx-prompt` and `report` with `--fx-workpaper-json`. Do not source published yearly averages inside this command. If the dependency is unavailable, stop and ask the user to install/run it or provide a confirmed user/preparer custom rate with `--fx-method user-rate`; `--fx-source` is optional for custom rates.
+8. If FX confirmation is pending, ask the confirmation/custom-rate question and state that the PDF is pending. After confirmation, generate and verify the PDF, then return the PDF first with totals, review flags, and the `get-yearly-fx-rate` proof artifacts. Mention CSV only as an audit artifact if useful or requested.
 
 Do not prepare official IRS forms and do not give tax advice.
