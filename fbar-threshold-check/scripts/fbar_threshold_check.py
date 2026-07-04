@@ -19,9 +19,14 @@ from typing import Iterable
 
 getcontext().prec = 28
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 THRESHOLD_USD = Decimal("10000")
 MIN_TEXT_CHARS = 40
+# Longest carry-forward run that is still routine for monthly statement cycles.
+# Anything longer means statement evidence is missing for part of the year and
+# must be reviewed by the user before confirmation.
+MAX_ROUTINE_CARRY_DAYS = 40
+ACCEPTED_FX_SKILLS = ("get-year-end-fx-rate", "get-yearly-fx-rate")
 
 CURRENCY_CODES = {
     "AED",
@@ -233,8 +238,18 @@ def normalize_currency(raw: str | None) -> str:
     return upper if upper in CURRENCY_CODES else "UNKNOWN"
 
 
-def decimal_from_text(raw: str) -> Decimal:
-    value = clean_text(raw)
+def parse_amount(raw: str) -> tuple[Decimal, tuple[str, ...]]:
+    """Parse one statement money token into a Decimal plus parsing notes.
+
+    Separator handling: when both `,` and `.` appear, the rightmost one is the
+    decimal separator. With a single separator, only a 3-digit trailing group
+    can be a thousands group; `1,234` / `1.234` / `2,500` are read as grouped
+    thousands (the common statement meaning) and flagged as ambiguous so the
+    review gate surfaces them.
+    """
+    original = clean_text(raw)
+    value = original
+    notes: list[str] = []
     negative = False
     if value.startswith("(") and value.endswith(")"):
         negative = True
@@ -253,21 +268,39 @@ def decimal_from_text(raw: str) -> Decimal:
         thousands_sep = "." if decimal_sep == "," else ","
         value = value.replace(thousands_sep, "")
         value = value.replace(decimal_sep, ".")
-    elif "," in value:
-        parts = value.split(",")
-        if len(parts[-1]) in {1, 2, 3} and len(parts) == 2:
-            value = parts[0].replace(".", "") + "." + parts[1]
-        else:
+    elif comma >= 0 or dot >= 0:
+        sep = "," if comma >= 0 else "."
+        parts = value.split(sep)
+        head, tail = parts[0], parts[-1]
+        if len(parts) > 2:
+            # Repeated separators are digit grouping (thousands or lakh-style).
             value = "".join(parts)
-    elif "." in value:
-        parts = value.split(".")
-        if len(parts) == 2 and len(parts[-1]) in {1, 2, 3}:
-            value = parts[0].replace(",", "") + "." + parts[1]
+        elif len(tail) != 3:
+            # Only 3-digit trailing groups can be thousands groups.
+            value = (head or "0") + "." + tail
+        elif not head or head == "0":
+            # `0,125` / `0.125` style values are always decimals.
+            value = (head or "0") + "." + tail
+        elif len(head) <= 3:
+            # One separator with a 3-digit tail: grouped thousands is the
+            # common statement meaning for both `1,234` and `1.234`.
+            value = head + tail
+            notes.append(
+                f"Ambiguous separator in '{original}': interpreted as thousands grouping ({head}{tail}); verify magnitude against the statement."
+            )
         else:
-            value = "".join(parts[:-1]) + "." + parts[-1] if len(parts[-1]) <= 2 else "".join(parts)
+            # A 4+ digit head cannot be a leading thousands group; read as decimal.
+            value = head + "." + tail
+            notes.append(
+                f"Ambiguous separator in '{original}': interpreted as decimal ({head}.{tail}); verify magnitude against the statement."
+            )
 
     parsed = Decimal(value)
-    return -parsed if negative else parsed
+    return (-parsed if negative else parsed), tuple(notes)
+
+
+def decimal_from_text(raw: str) -> Decimal:
+    return parse_amount(raw)[0]
 
 
 def fmt_decimal(value: Decimal | None, places: str = "0.01") -> str | None:
@@ -346,8 +379,8 @@ def parse_line_dates(line: str) -> list[tuple[date, str, str]]:
     return list(unique.values())
 
 
-def parse_money_values(line: str) -> list[tuple[Decimal, str]]:
-    values: list[tuple[Decimal, str]] = []
+def parse_money_values(line: str) -> list[tuple[Decimal, str, int, tuple[str, ...]]]:
+    values: list[tuple[Decimal, str, int, tuple[str, ...]]] = []
     for match in MONEY_RE.finditer(line):
         token = clean_text(match.group(1))
         if re.fullmatch(r"20\d{2}", token):
@@ -355,9 +388,10 @@ def parse_money_values(line: str) -> list[tuple[Decimal, str]]:
         if len(re.sub(r"\D", "", token)) > 16:
             continue
         try:
-            values.append((decimal_from_text(token), token))
+            amount, notes = parse_amount(token)
         except (InvalidOperation, ValueError):
             continue
+        values.append((amount, token, match.start(1), notes))
     return values
 
 
@@ -455,6 +489,7 @@ def extract_balance_candidates(
 
     outside_year = 0
     low_confidence = 0
+    ambiguous_amount_lines = 0
     for ref, line in lines:
         lower = line.lower()
         date_hits = parse_line_dates(line)
@@ -471,7 +506,17 @@ def extract_balance_candidates(
         if any(term in lower for term in LOW_VALUE_TERMS) and not has_balance_term:
             continue
 
-        amount, token = money_values[-1]
+        # Prefer the last monetary value that appears after the balance term,
+        # so amount/description columns before the balance column are skipped.
+        term_pos = -1
+        if has_balance_term:
+            term_pos = max(lower.rfind(term) for term in BALANCE_TERMS)
+        selected_values = [item for item in money_values if item[2] >= term_pos] if term_pos >= 0 else money_values
+        if not selected_values:
+            selected_values = money_values
+        amount, token, _pos, parse_notes = selected_values[-1]
+        if parse_notes:
+            ambiguous_amount_lines += 1
         for parsed_date, date_confidence, date_note in date_hits:
             if parsed_date.year != tax_year:
                 outside_year += 1
@@ -484,6 +529,9 @@ def extract_balance_candidates(
             if not has_balance_term:
                 confidence = "medium" if confidence == "high" else confidence
                 notes.append("Line inferred from a page/table containing balance language.")
+            if parse_notes:
+                confidence = "medium" if confidence == "high" else confidence
+                notes.extend(parse_notes)
             candidates.append(
                 BalanceCandidate(
                     balance_date=parsed_date,
@@ -499,6 +547,10 @@ def extract_balance_candidates(
         warnings.append(f"Ignored {outside_year} balance candidate date(s) outside the requested tax year.")
     if low_confidence:
         warnings.append(f"{low_confidence} balance candidate date(s) used ambiguous numeric date interpretation.")
+    if ambiguous_amount_lines:
+        warnings.append(
+            f"{ambiguous_amount_lines} balance line(s) had ambiguous thousands/decimal separators; verify native balance magnitudes in the review CSV."
+        )
     if not candidates:
         warnings.append("No balance candidates were extracted from the statement text.")
     return candidates, warnings
@@ -512,20 +564,55 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
 
     last_balance: Decimal | None = None
     last_ref: SourceRef | None = None
+    first_observed: date | None = None
+    last_observed: date | None = None
     rows: list[dict[str, object]] = []
     observed_days = 0
     carried_days = 0
     missing_days = 0
     low_confidence_days = 0
+    material_variance_days = 0
+    carry_run_start: date | None = None
+    carry_run_days = 0
+    longest_carry_run = 0
+    carry_gaps: list[dict[str, object]] = []
+
+    def close_carry_run(end_day: date) -> None:
+        nonlocal carry_run_start, carry_run_days, longest_carry_run
+        longest_carry_run = max(longest_carry_run, carry_run_days)
+        if carry_run_days > MAX_ROUTINE_CARRY_DAYS and carry_run_start is not None:
+            carry_gaps.append({"start": iso_day(carry_run_start), "end": iso_day(end_day), "days": carry_run_days})
+        carry_run_start = None
+        carry_run_days = 0
 
     for day in calendar_dates(tax_year):
         day_candidates = by_day.get(day, [])
         if day_candidates:
+            if carry_run_days:
+                close_carry_run(day - timedelta(days=1))
             selected = max(day_candidates, key=lambda item: item.amount)
+            confidence = selected.confidence
+            notes = list(selected.notes)
+            amounts = sorted({item.amount for item in day_candidates})
+            if len(amounts) > 1:
+                low_amount, high_amount = amounts[0], amounts[-1]
+                # Same-day balances that disagree materially (max more than
+                # double the min) may contain a non-balance token; surface for review.
+                if high_amount - low_amount > high_amount.copy_abs() * Decimal("0.5"):
+                    material_variance_days += 1
+                    if confidence == "high":
+                        confidence = "medium"
+                    notes.append(
+                        f"Same-day balance candidates ranged from {fmt_decimal(low_amount)} to {fmt_decimal(high_amount)}; "
+                        "the maximum was selected for threshold safety - verify against the statement."
+                    )
             last_balance = selected.amount
             last_ref = selected.source
+            if first_observed is None:
+                first_observed = day
+            last_observed = day
             observed_days += 1
-            if selected.confidence == "low":
+            if confidence == "low":
                 low_confidence_days += 1
             rows.append(
                 {
@@ -535,13 +622,16 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                     "usd_balance": None,
                     "threshold_usd_value": None,
                     "balance_source": "observed",
-                    "confidence": selected.confidence,
+                    "confidence": confidence,
                     "source_refs": [source_ref_to_string(selected.source)],
-                    "notes": list(selected.notes),
+                    "notes": notes,
                 }
             )
         elif last_balance is not None:
             carried_days += 1
+            if carry_run_start is None:
+                carry_run_start = day
+            carry_run_days += 1
             rows.append(
                 {
                     "date": iso_day(day),
@@ -571,10 +661,30 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                 }
             )
 
+    if carry_run_days:
+        close_carry_run(date(tax_year, 12, 31))
+    trailing_carry_days = (date(tax_year, 12, 31) - last_observed).days if last_observed else 0
+
     if missing_days:
         warnings.append(f"{missing_days} day(s) lack opening/prior balance coverage; do not return a confident daily-threshold no.")
     if low_confidence_days:
         warnings.append(f"{low_confidence_days} day(s) have low-confidence balances and need review.")
+    if material_variance_days:
+        warnings.append(
+            f"{material_variance_days} day(s) had materially different same-day balance candidates; the daily maximum was selected - verify those rows in the review CSV."
+        )
+    if last_observed is not None and trailing_carry_days > MAX_ROUTINE_CARRY_DAYS:
+        warnings.append(
+            f"Statement evidence stops on {iso_day(last_observed)}; the final {trailing_carry_days} day(s) of the year are carried forward, not observed. "
+            "Do not treat the year as fully evidenced without user review."
+        )
+    interior_gaps = [gap for gap in carry_gaps if gap["end"] != iso_day(date(tax_year, 12, 31))]
+    if interior_gaps:
+        longest_interior = max(int(gap["days"]) for gap in interior_gaps)
+        warnings.append(
+            f"{len(interior_gaps)} carry-forward gap(s) exceed {MAX_ROUTINE_CARRY_DAYS} days inside the year (longest {longest_interior} day(s)); "
+            "statement coverage may be missing periods."
+        )
 
     coverage = {
         "year": tax_year,
@@ -584,6 +694,13 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
         "missing_days": missing_days,
         "complete_year": missing_days == 0,
         "low_confidence_days": low_confidence_days,
+        "first_observed_date": iso_day(first_observed) if first_observed else None,
+        "last_observed_date": iso_day(last_observed) if last_observed else None,
+        "trailing_carry_days": trailing_carry_days,
+        "longest_carry_run_days": longest_carry_run,
+        "carry_gaps": carry_gaps,
+        "carry_gap_review_required": bool(carry_gaps),
+        "material_same_day_variance_days": material_variance_days,
     }
     return rows, coverage, warnings
 
@@ -610,7 +727,10 @@ def load_json(path: Path) -> dict[str, object]:
 
 def account_csv_path(out_path: Path, confirmed: bool = False) -> Path:
     suffix = "confirmed" if confirmed else "review"
-    return out_path.with_name(out_path.stem + f"-{suffix}.csv")
+    stem = out_path.stem
+    if stem.endswith(f"-{suffix}"):
+        return out_path.with_name(stem + ".csv")
+    return out_path.with_name(stem + f"-{suffix}.csv")
 
 
 def combined_csv_path(out_path: Path) -> Path:
@@ -758,8 +878,12 @@ def as_decimal(value: object, label: str) -> Decimal:
 
 def validate_fx_workpaper(path: Path, currency: str, year: int) -> dict[str, object]:
     workpaper = load_json(path)
-    if workpaper.get("skill") != "get-yearly-fx-rate":
-        raise FbarError("FX workpaper must come from get-yearly-fx-rate.", 2)
+    fx_skill = workpaper.get("skill")
+    if fx_skill not in ACCEPTED_FX_SKILLS:
+        raise FbarError(
+            "FX workpaper must come from get-year-end-fx-rate (preferred for FBAR conversion) or get-yearly-fx-rate.",
+            2,
+        )
     if str(workpaper.get("currency", "")).upper() != currency:
         raise FbarError(f"FX workpaper currency {workpaper.get('currency')} does not match account currency {currency}.", 2)
     if int(workpaper.get("year", 0)) != year:
@@ -781,9 +905,12 @@ def validate_fx_workpaper(path: Path, currency: str, year: int) -> dict[str, obj
     if not foreign_per_usd and not usd_per_foreign:
         raise FbarError("FX workpaper must include foreign_per_usd or usd_per_foreign.", 2)
 
-    if not is_fbar_compatible_workpaper(workpaper):
+    # get-year-end-fx-rate workpapers are year-end by construction; the
+    # FBAR-compatibility heuristic only guards yearly-average workpapers.
+    if fx_skill == "get-yearly-fx-rate" and not is_fbar_compatible_workpaper(workpaper):
         raise FbarError(
-            "FX workpaper appears to be yearly-average only. Complete/update get-yearly-fx-rate so the workpaper is explicitly FBAR/year-end compatible before confirming this account.",
+            "FX workpaper appears to be yearly-average only. Use get-year-end-fx-rate instead, or complete/update "
+            "get-yearly-fx-rate so the workpaper is explicitly FBAR/year-end compatible before confirming this account.",
             2,
         )
     return workpaper
@@ -859,6 +986,15 @@ def command_confirm_account(args: argparse.Namespace) -> int:
         raise FbarError("Account ledger has missing days; do not confirm until opening/prior balance coverage is resolved.", 2)
     if int(coverage.get("low_confidence_days", 0)) > 0:
         raise FbarError("Account ledger has low-confidence balance days; resolve or regenerate before confirmation.", 2)
+    carry_gaps = coverage.get("carry_gaps") if isinstance(coverage.get("carry_gaps"), list) else []
+    accept_carry_forward = bool(getattr(args, "accept_carry_forward", False))
+    if carry_gaps and not accept_carry_forward:
+        raise FbarError(
+            f"Account ledger has carry-forward gap(s) longer than {MAX_ROUTINE_CARRY_DAYS} days (statement evidence is missing "
+            "for part of the year; see coverage.carry_gaps). Obtain the missing statements, or re-run with "
+            "--accept-carry-forward only after the user has explicitly reviewed and accepted the carried balances.",
+            2,
+        )
 
     account = data.get("account", {})
     if not isinstance(account, dict):
@@ -900,7 +1036,17 @@ def command_confirm_account(args: argparse.Namespace) -> int:
     data["confirmation"] = {
         "balances_confirmed": True,
         "fx_confirmed": currency == "USD" or fx_workpaper is not None,
+        "carry_forward_accepted": bool(carry_gaps),
     }
+    if carry_gaps:
+        # Surface the acceptance so it propagates into the aggregate summary.
+        existing_warnings = data.get("warnings")
+        if not isinstance(existing_warnings, list):
+            existing_warnings = []
+        existing_warnings.append(
+            f"User accepted {len(carry_gaps)} carry-forward gap(s); daily results rely on carried, not observed, balances for those spans."
+        )
+        data["warnings"] = sorted({str(warning) for warning in existing_warnings})
     if fx_workpaper is not None:
         data["fx"] = {
             "required": True,
@@ -986,8 +1132,14 @@ def command_aggregate(args: argparse.Namespace) -> int:
     account_summaries: list[dict[str, object]] = []
     warnings: list[str] = []
     fx_workpapers: list[object] = []
+    records_complete = True
 
     for label, account_data in zip(account_labels, accounts, strict=True):
+        account_coverage = account_data.get("coverage", {})
+        if not isinstance(account_coverage, dict):
+            account_coverage = {}
+        if int(account_coverage.get("missing_days", 0)) > 0 or account_coverage.get("carry_gaps"):
+            records_complete = False
         rows = account_data["daily_ledger"]
         assert isinstance(rows, list)
         by_date = {str(row.get("date")): row for row in rows if isinstance(row, dict)}
@@ -1042,6 +1194,13 @@ def command_aggregate(args: argparse.Namespace) -> int:
     csv_path = Path(args.csv) if args.csv else combined_csv_path(out_path)
     pdf_path = Path(args.pdf) if args.pdf else summary_pdf_path(out_path)
 
+    if over_limit_dates:
+        daily_answer = "yes"
+    elif records_complete:
+        daily_answer = "no"
+    else:
+        daily_answer = "insufficient-records"
+
     summary: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "skill": "fbar-threshold-check",
@@ -1051,11 +1210,12 @@ def command_aggregate(args: argparse.Namespace) -> int:
         "account_count": len(accounts),
         "daily_threshold": {
             "threshold_usd": "10000",
+            "answer": daily_answer,
             "exceeded": bool(over_limit_dates),
             "over_limit_dates": over_limit_dates,
             "max_combined_usd_value": fmt_decimal(max_combined),
             "max_combined_date": max_combined_date,
-            "records_complete": True,
+            "records_complete": records_complete,
         },
         "fincen_max_value_view": {
             "threshold_usd": "10000",
@@ -1076,7 +1236,7 @@ def command_aggregate(args: argparse.Namespace) -> int:
     write_summary_pdf(pdf_path, summary)
     write_json(out_path, summary)
 
-    print(f"Daily threshold exceeded: {'yes' if over_limit_dates else 'no'}")
+    print(f"Daily threshold answer: {daily_answer}")
     print(f"FinCEN max-value view exceeded: {'yes' if aggregate_max_whole > 10000 else 'no'}")
     if over_limit_dates:
         print(f"Over-limit dates: {', '.join(over_limit_dates[:20])}{' ...' if len(over_limit_dates) > 20 else ''}")
@@ -1122,10 +1282,16 @@ def write_summary_pdf(path: Path, summary: dict[str, object]) -> None:
     max_view = summary["fincen_max_value_view"]
     assert isinstance(daily, dict)
     assert isinstance(max_view, dict)
+    daily_answer = str(daily.get("answer") or ("yes" if daily["exceeded"] else "no"))
+    daily_labels = {
+        "yes": "YES",
+        "no": "NO",
+        "insufficient-records": "INSUFFICIENT RECORDS FOR A CONFIDENT NO",
+    }
     lines = [
         f"FBAR Threshold Check - {summary['tax_year']}",
         "",
-        f"Daily threshold: {'YES' if daily['exceeded'] else 'NO'}",
+        f"Daily threshold: {daily_labels.get(daily_answer, daily_answer.upper())}",
         f"Maximum combined daily USD value: {daily.get('max_combined_usd_value')} on {daily.get('max_combined_date')}",
         f"FinCEN maximum-value view: {'YES' if max_view['exceeded'] else 'NO'}",
         f"Aggregate account maximums, rounded up to whole dollars: {max_view.get('aggregate_account_max_whole_dollars')}",
@@ -1246,13 +1412,24 @@ def command_dependency_check(_args: argparse.Namespace) -> int:
 def command_self_test(_args: argparse.Namespace) -> int:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
+        test_decimal_parsing()
         test_build_daily_rows()
         test_leap_year()
+        test_same_day_variance()
+        test_carry_gap_gate(root)
         test_fx_guardrails(root)
         test_confirm_and_aggregate(root)
         test_maxima_disagreement(root)
+        test_csv_naming()
     print("self-test ok")
     return 0
+
+
+def month_end_dates(year: int) -> list[date]:
+    ends: list[date] = []
+    for month in range(1, 13):
+        ends.append(date(year, 12, 31) if month == 12 else date(year, month + 1, 1) - timedelta(days=1))
+    return ends
 
 
 def synthetic_account(
@@ -1264,6 +1441,15 @@ def synthetic_account(
     changes: dict[str, Decimal],
     fx_workpaper: Path | None = None,
 ) -> Path:
+    events = sorted((date.fromisoformat(raw_day), value) for raw_day, value in changes.items())
+
+    def balance_on(day: date) -> Decimal:
+        balance = start_balance
+        for event_day, value in events:
+            if event_day <= day:
+                balance = value
+        return balance
+
     candidates = [
         BalanceCandidate(
             balance_date=date(year, 1, 1),
@@ -1274,14 +1460,27 @@ def synthetic_account(
             notes=("synthetic self-test row",),
         )
     ]
-    for raw_day, value in changes.items():
+    for event_day, value in events:
         candidates.append(
             BalanceCandidate(
-                balance_date=date.fromisoformat(raw_day),
+                balance_date=event_day,
                 amount=value,
                 currency=currency,
                 confidence="high",
                 source=SourceRef(f"{name}.pdf", 1, 2, "synthetic balance"),
+                notes=("synthetic self-test row",),
+            )
+        )
+    # Month-end closing balances keep every carry-forward run routine,
+    # mirroring a normal monthly statement cycle.
+    for month_end in month_end_dates(year):
+        candidates.append(
+            BalanceCandidate(
+                balance_date=month_end,
+                amount=balance_on(month_end),
+                currency=currency,
+                confidence="high",
+                source=SourceRef(f"{name}.pdf", 1, 3, "synthetic month-end closing balance"),
                 notes=("synthetic self-test row",),
             )
         )
@@ -1308,6 +1507,7 @@ def synthetic_account(
         csv=None,
         balances_confirmed=True,
         fx_workpaper_json=str(fx_workpaper) if fx_workpaper else None,
+        accept_carry_forward=False,
     )
     command_confirm_account(confirm_args)
     return confirmed
@@ -1341,6 +1541,35 @@ def make_fbar_fx_workpaper(root: Path, currency: str = "COP", year: int = 2025) 
     return path
 
 
+def make_year_end_fx_workpaper(root: Path, currency: str = "COP", year: int = 2025) -> Path:
+    path = root / f"{currency.lower()}-{year}-year-end-workpaper.json"
+    data = {
+        "skill": "get-year-end-fx-rate",
+        "purpose": "FBAR-style year-end USD exchange-rate support",
+        "currency": currency,
+        "year": year,
+        "year_end_date": f"{year}-12-31",
+        "rate": "4200",
+        "rate_direction": "foreign-per-usd",
+        "foreign_per_usd": "4200",
+        "usd_per_foreign": "0.0002380952",
+        "source": {
+            # Deliberately neutral wording: the year-end skill must be accepted
+            # without the yearly-average FBAR-keyword heuristic.
+            "title": "Example central bank closing table",
+            "url": "https://example.test/closing-table",
+            "retrieved": "2026-01-05",
+        },
+        "proof": {
+            "workpaper_json": str(path),
+            "workpaper_pdf": str(root / "year-end-proof.pdf"),
+            "saved_files": [{"path": str(root / "year-end-proof.json"), "sha256": "abc"}],
+        },
+    }
+    write_json(path, data)
+    return path
+
+
 def make_yearly_average_workpaper(root: Path) -> Path:
     path = root / "yearly-average-workpaper.json"
     data = {
@@ -1368,6 +1597,37 @@ def make_yearly_average_workpaper(root: Path) -> Path:
     return path
 
 
+def test_decimal_parsing() -> None:
+    cases = {
+        "1.234,56": Decimal("1234.56"),
+        "1,234.56": Decimal("1234.56"),
+        "2,500": Decimal("2500"),
+        "1,234": Decimal("1234"),
+        "1.234": Decimal("1234"),
+        "0.125": Decimal("0.125"),
+        "0,125": Decimal("0.125"),
+        "12,00": Decimal("12.00"),
+        "1234.56": Decimal("1234.56"),
+        "4.000.000": Decimal("4000000"),
+        "1,23,456": Decimal("123456"),
+        "0.00025": Decimal("0.00025"),
+        "(2,50)": Decimal("-2.50"),
+        "1 234,56": Decimal("1234.56"),
+        "2.500,00": Decimal("2500.00"),
+        "$1,250.75": Decimal("1250.75"),
+        "1234,567": Decimal("1234.567"),
+    }
+    for raw, expected in cases.items():
+        amount, _notes = parse_amount(raw)
+        assert amount == expected, f"{raw!r} parsed to {amount}, expected {expected}"
+    grouped, grouped_notes = parse_amount("2,500")
+    assert grouped == Decimal("2500")
+    assert grouped_notes, "grouped-thousands reading must carry an ambiguity note"
+    plain, plain_notes = parse_amount("1,234.56")
+    assert plain == Decimal("1234.56")
+    assert not plain_notes
+
+
 def test_build_daily_rows() -> None:
     candidates = [
         BalanceCandidate(date(2025, 1, 1), Decimal("100"), "USD", "high", SourceRef("a.pdf", 1, 1, "")),
@@ -1379,8 +1639,14 @@ def test_build_daily_rows() -> None:
     assert rows[0]["native_balance"] == "150"
     assert rows[1]["native_balance"] == "150"
     assert rows[2]["native_balance"] == "125"
+    assert rows[0]["confidence"] == "high"
     assert coverage["complete_year"] is True
-    assert not warnings
+    # Statements stop on Jan 3: the trailing carry to Dec 31 must be flagged.
+    assert coverage["last_observed_date"] == "2025-01-03"
+    assert coverage["trailing_carry_days"] == 362
+    assert coverage["carry_gap_review_required"] is True
+    assert coverage["carry_gaps"] and coverage["carry_gaps"][-1]["end"] == "2025-12-31"
+    assert any("carried forward" in warning for warning in warnings)
 
 
 def test_leap_year() -> None:
@@ -1388,12 +1654,80 @@ def test_leap_year() -> None:
     rows, coverage, _warnings = build_daily_rows(2024, "USD", candidates)
     assert len(rows) == 366
     assert coverage["calendar_days"] == 366
+    assert coverage["trailing_carry_days"] == 365
+
+
+def test_same_day_variance() -> None:
+    candidates = [
+        BalanceCandidate(date(2025, 1, 1), Decimal("100"), "USD", "high", SourceRef("a.pdf", 1, 1, "")),
+        BalanceCandidate(date(2025, 1, 1), Decimal("100000"), "USD", "high", SourceRef("a.pdf", 1, 2, "")),
+    ]
+    rows, coverage, warnings = build_daily_rows(2025, "USD", candidates)
+    assert rows[0]["native_balance"] == "100000"
+    assert rows[0]["confidence"] == "medium"
+    assert any("maximum was selected" in note for note in rows[0]["notes"])
+    assert coverage["material_same_day_variance_days"] == 1
+    assert any("same-day balance candidates" in warning for warning in warnings)
+
+
+def test_carry_gap_gate(root: Path) -> None:
+    candidates = [
+        BalanceCandidate(date(2025, 1, 1), Decimal("5000"), "USD", "high", SourceRef("gap.pdf", 1, 1, "")),
+        BalanceCandidate(date(2025, 6, 30), Decimal("6000"), "USD", "high", SourceRef("gap.pdf", 1, 2, "")),
+    ]
+    rows, coverage, warnings = build_daily_rows(2025, "USD", candidates)
+    assert coverage["complete_year"] is True
+    assert coverage["carry_gap_review_required"] is True
+    assert coverage["trailing_carry_days"] == 184
+    assert len(coverage["carry_gaps"]) == 2
+    assert any("carried forward" in warning for warning in warnings)
+    data: dict[str, object] = {
+        "schema_version": SCHEMA_VERSION,
+        "skill": "fbar-threshold-check",
+        "status": "extracted-review-required",
+        "tax_year": 2025,
+        "account": {"account_id": "gap-a", "institution": "Self Test Bank", "currency": "USD", "account_number_hints": ["gap-a"]},
+        "statement_files": [],
+        "coverage": coverage,
+        "fx": {"required": False, "workpaper_json": None, "workpaper": None},
+        "warnings": warnings,
+        "daily_ledger": rows,
+        "artifacts": {},
+    }
+    extracted = root / "gap-a.json"
+    confirmed = root / "gap-a-confirmed.json"
+    write_json(extracted, data)
+    gate_args = argparse.Namespace(
+        input=str(extracted),
+        out=str(confirmed),
+        csv=None,
+        balances_confirmed=True,
+        fx_workpaper_json=None,
+        accept_carry_forward=False,
+    )
+    try:
+        command_confirm_account(gate_args)
+    except FbarError as exc:
+        assert "carry-forward" in str(exc)
+    else:
+        raise AssertionError("carry-forward gaps must block confirmation without --accept-carry-forward")
+    gate_args.accept_carry_forward = True
+    assert command_confirm_account(gate_args) == 0
+    confirmed_data = load_json(confirmed)
+    assert confirmed_data["confirmation"]["carry_forward_accepted"] is True  # type: ignore[index]
+    assert any("accepted" in str(warning) for warning in confirmed_data["warnings"])  # type: ignore[union-attr]
 
 
 def test_fx_guardrails(root: Path) -> None:
-    valid = make_fbar_fx_workpaper(root)
-    data = validate_fx_workpaper(valid, "COP", 2025)
+    year_end = make_year_end_fx_workpaper(root)
+    year_end_data = validate_fx_workpaper(year_end, "COP", 2025)
+    assert year_end_data["skill"] == "get-year-end-fx-rate"
+    assert year_end_data["foreign_per_usd"] == "4200"
+
+    compatible_yearly = make_fbar_fx_workpaper(root)
+    data = validate_fx_workpaper(compatible_yearly, "COP", 2025)
     assert data["foreign_per_usd"] == "4000"
+
     invalid = make_yearly_average_workpaper(root)
     try:
         validate_fx_workpaper(invalid, "CAD", 2025)
@@ -1402,15 +1736,26 @@ def test_fx_guardrails(root: Path) -> None:
     else:
         raise AssertionError("yearly-average-only workpaper should be rejected")
 
+    bogus = root / "bogus-workpaper.json"
+    write_json(bogus, {"skill": "some-other-skill", "currency": "COP", "year": 2025})
+    try:
+        validate_fx_workpaper(bogus, "COP", 2025)
+    except FbarError as exc:
+        assert "get-year-end-fx-rate" in str(exc)
+    else:
+        raise AssertionError("workpapers from unknown skills should be rejected")
+
 
 def test_confirm_and_aggregate(root: Path) -> None:
-    fx = make_fbar_fx_workpaper(root)
+    fx = make_year_end_fx_workpaper(root)
     usd = synthetic_account(root, "usd-a", 2025, "USD", Decimal("5000"), {"2025-06-01": Decimal("8000")})
     cop = synthetic_account(root, "cop-b", 2025, "COP", Decimal("4000000"), {"2025-06-01": Decimal("12000000")}, fx)
     out = root / "summary.json"
     command_aggregate(argparse.Namespace(account_ledger=[str(usd), str(cop)], out=str(out), csv=None, pdf=None))
     summary = load_json(out)
+    assert summary["daily_threshold"]["answer"] == "yes"  # type: ignore[index]
     assert summary["daily_threshold"]["exceeded"] is True  # type: ignore[index]
+    assert summary["daily_threshold"]["records_complete"] is True  # type: ignore[index]
     assert "2025-06-01" in summary["daily_threshold"]["over_limit_dates"]  # type: ignore[index]
     assert (root / "summary.csv").exists()
     assert (root / "summary.pdf").read_bytes().startswith(b"%PDF")
@@ -1422,8 +1767,15 @@ def test_maxima_disagreement(root: Path) -> None:
     out = root / "max-summary.json"
     command_aggregate(argparse.Namespace(account_ledger=[str(a), str(b)], out=str(out), csv=None, pdf=None))
     summary = load_json(out)
+    assert summary["daily_threshold"]["answer"] == "no"  # type: ignore[index]
     assert summary["daily_threshold"]["exceeded"] is False  # type: ignore[index]
     assert summary["fincen_max_value_view"]["exceeded"] is True  # type: ignore[index]
+
+
+def test_csv_naming() -> None:
+    assert account_csv_path(Path("work/account-1.json")).name == "account-1-review.csv"
+    assert account_csv_path(Path("work/account-1-confirmed.json"), confirmed=True).name == "account-1-confirmed.csv"
+    assert account_csv_path(Path("work/account-1.json"), confirmed=True).name == "account-1-confirmed.csv"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1445,7 +1797,15 @@ def build_parser() -> argparse.ArgumentParser:
     confirm.add_argument("--out", required=True, help="Confirmed account JSON.")
     confirm.add_argument("--csv", help="Optional confirmed CSV path.")
     confirm.add_argument("--balances-confirmed", action="store_true", help="Required after review of the account ledger.")
-    confirm.add_argument("--fx-workpaper-json", help="get-yearly-fx-rate workpaper JSON for non-USD accounts.")
+    confirm.add_argument(
+        "--fx-workpaper-json",
+        help="FX workpaper JSON for non-USD accounts, from get-year-end-fx-rate (preferred) or FBAR-compatible get-yearly-fx-rate.",
+    )
+    confirm.add_argument(
+        "--accept-carry-forward",
+        action="store_true",
+        help=f"Accept carry-forward gaps longer than {MAX_ROUTINE_CARRY_DAYS} days; use only after the user reviewed coverage.carry_gaps.",
+    )
     confirm.set_defaults(func=command_confirm_account)
 
     aggregate = subparsers.add_parser("aggregate", help="Aggregate confirmed account ledgers into final FBAR threshold artifacts.")

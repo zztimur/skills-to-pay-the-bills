@@ -76,7 +76,9 @@ Open the JSON and CSV before confirming. Confirm these fields:
 - `account.currency` is correct and not ambiguous.
 - `statement_files` are the expected PDFs.
 - `coverage.complete_year` is true.
+- `coverage.carry_gaps` is empty and `coverage.trailing_carry_days` is small; carried balances near year-end are evidence gaps, not observations.
 - Every day in the year has a native balance.
+- Rows with ambiguous-separator notes match the magnitudes printed on the statement.
 - `warnings` are either resolved or explicitly accepted by the user.
 
 Stop for user review when any of these appear:
@@ -84,7 +86,10 @@ Stop for user review when any of these appear:
 - Multiple account-number hints or conflicting institution labels.
 - Dates outside the requested tax year.
 - Missing opening balance or missing days.
+- Carry-forward gaps longer than 40 days (`coverage.carry_gaps`), including statements that stop before December 31.
 - Unknown or ambiguous currency, including `$` without country/context.
+- Ambiguous thousands/decimal separators flagged in row notes or warnings.
+- Materially different same-day balance candidates flagged in row notes.
 - Scanned/image-only PDFs.
 - Low-confidence candidate rows.
 - Extracted totals that visibly conflict with statement summaries.
@@ -97,21 +102,21 @@ For USD accounts, confirm without FX.
 
 For non-USD accounts:
 
-1. Use the separate `get-yearly-fx-rate` skill to create a retained workpaper.
-2. Pass the dependency's `workpaper.json` to `confirm-account`.
-3. Do not search for FX sources inside this skill.
-4. Do not accept a bare rate in chat.
-5. Do not accept an ordinary yearly-average workpaper for FBAR conversion.
+1. Prefer the separate `get-year-end-fx-rate` skill to create a retained year-end workpaper; FBAR-style conversion uses the December 31 rate, not a yearly average.
+2. A `get-yearly-fx-rate` workpaper is accepted only when it is explicitly FBAR/year-end compatible (see below).
+3. Pass the dependency's `workpaper.json` to `confirm-account`.
+4. Do not search for FX sources inside this skill.
+5. Do not accept a bare rate in chat.
 
 The checker accepts the dependency only when `workpaper.json`:
 
-- Has `skill: "get-yearly-fx-rate"`.
+- Has `skill: "get-year-end-fx-rate"` or `skill: "get-yearly-fx-rate"`.
 - Matches the account currency and tax year.
 - Has usable `foreign_per_usd` or `usd_per_foreign` conversion data.
 - Includes source/proof metadata.
-- Is marked as FBAR-compatible or year-end appropriate by fields such as `rate_kind`, `method`, `rate_type`, `conversion_context`, `use_case`, `fbar_compatible`, or source notes/categories/titles that clearly indicate FBAR, year-end, last-day, Treasury/FMS, or equivalent support.
+- For `get-yearly-fx-rate` workpapers only: is marked as FBAR-compatible or year-end appropriate by fields such as `rate_kind`, `method`, `rate_type`, `conversion_context`, `use_case`, `fbar_compatible`, or source notes/categories/titles that clearly indicate FBAR, year-end, last-day, Treasury/FMS, or equivalent support. `get-year-end-fx-rate` workpapers are year-end by construction and need no extra marking.
 
-If the workpaper only says yearly average or annual average, stop and ask the user to complete the FX dependency in an FBAR-compatible mode first.
+If a `get-yearly-fx-rate` workpaper only says yearly average or annual average, stop and ask the user to produce a `get-year-end-fx-rate` workpaper (or an explicitly FBAR-compatible yearly workpaper) first.
 
 ## 7. Confirm One Account
 
@@ -130,9 +135,11 @@ Non-USD:
 python3 "<package-root>/scripts/fbar_threshold_check.py" confirm-account \
   --input "work/account-1.json" \
   --balances-confirmed \
-  --fx-workpaper-json "work/fx-rate-proof/cop-2025-fbar/workpaper.json" \
+  --fx-workpaper-json "work/fx-year-end-proof/cop-2025-fbar/workpaper.json" \
   --out "work/account-1-confirmed.json"
 ```
+
+If `confirm-account` reports carry-forward gaps, show the user `coverage.carry_gaps`, ask for the missing statements first, and only re-run with `--accept-carry-forward` after the user explicitly accepts carried balances for those spans. Accepted gaps make the final daily answer `insufficient-records` instead of a confident `no`.
 
 The confirmed JSON and CSV contain USD balances. Negative balances are treated as zero for threshold aggregation and maximum-value calculations.
 
@@ -158,7 +165,7 @@ Use the final JSON/CSV as the data source for the final answer. The PDF is for h
 
 ## 9. Final Response
 
-Lead with the answer:
+Lead with the answer, mapped from `daily_threshold.answer` in the final JSON (`yes` / `no` / `insufficient-records`):
 
 ```text
 Daily threshold: Yes/No/Insufficient records.
