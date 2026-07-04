@@ -1,6 +1,6 @@
 ---
 name: fbar-threshold-check
-description: Check FBAR thresholds for one tax year from foreign account statements. Use for daily ledgers, multi-account aggregation, and year-end FX workpaper conversion.
+description: Check whether foreign accounts crossed the $10,000 FBAR (FinCEN Form 114) threshold for a tax year. Use for account statements, daily ledgers, multi-account aggregation, year-end FX conversion.
 ---
 
 # FBAR Threshold Check
@@ -9,7 +9,7 @@ Build account-by-account FBAR threshold evidence for one calendar year. Produce 
 
 ## Required Workflow
 
-Read `references/workflow.md` before analysis. It contains the intake gates, review points, command sequence, FX dependency contract, and final-response shape. Read `references/fbar-source-notes.md` when explaining FBAR threshold wording, maximum account value, source limitations, or FX caveats.
+Read `references/workflow.md` before analysis. It contains the intake gates, review points, command sequence, FX dependency contract, and final-response shape. Read `references/fbar-source-notes.md` when explaining FBAR threshold wording, maximum account value, source limitations, or FX caveats. `<package-root>` below means the directory containing this SKILL.md.
 
 Process one account at a time:
 
@@ -68,19 +68,22 @@ If the daily threshold is exceeded, list the dates. If records are incomplete, s
 
 ## Runtime
 
-`extract-account` requires machine-readable PDFs and `pdfplumber`. `confirm-account`, `aggregate`, and `self-test` use only Python standard-library modules.
+`extract-account` requires machine-readable PDFs and `pdfplumber`; check availability with:
 
-After changing this skill, run:
+```bash
+python3 "<package-root>/scripts/fbar_threshold_check.py" dependency-check
+```
+
+`confirm-account`, `aggregate`, and `self-test` use only Python standard-library modules.
+
+## Maintainer Checks
+
+After changing this skill (not needed for normal use), run `self-test` plus the repo gatekeeper:
 
 ```bash
 python3 "<package-root>/scripts/fbar_threshold_check.py" self-test
 python3 -S skill-forge/scripts/inspect_skill_package.py "<package-root>" --json --strict
-```
-
-If Claude tooling is available, also run:
-
-```bash
-claude plugin validate --strict "<package-root>"
+claude plugin validate --strict "<package-root>"  # when Claude tooling is available
 ```
 
 ## Package Compatibility
