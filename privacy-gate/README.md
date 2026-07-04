@@ -37,6 +37,7 @@ python3 privacy-gate/scripts/privacy_gate.py install-hook
 - `.env` and local environment files except placeholder examples such as `.env.example`.
 - Generated `work/` and `outputs/` artifacts.
 - Binary/private export formats such as PDFs, images, spreadsheets, and office documents.
+- Missing scan paths, symlinked paths, and text files too large for a complete bounded read.
 
 ## What Warns
 

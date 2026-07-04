@@ -14,6 +14,7 @@ Block commits and releases for high-confidence sensitive content:
 - OpenAI, Anthropic, GitHub, Slack, JWT-like, API key, access token, refresh token, client secret, and password assignments that look real.
 - Files under generated `work/` or `outputs/` directories.
 - PDFs, images, scans, spreadsheets, and office documents, because they often carry statements, account data, or private exports that text sanitizers cannot safely inspect.
+- Missing scan paths, symlinked paths, and text files that exceed the bounded full-read limit.
 
 ## Warning Findings
 
@@ -34,3 +35,5 @@ Sanitization is opt-in and text-only. It may replace PII-like values with placeh
 Do not auto-sanitize credentials. Remove them, rotate them, and rerun the scan.
 
 Do not sanitize PDFs, images, scans, spreadsheets, or binary statement exports in place. Regenerate a sanitized source artifact instead.
+
+Do not follow symlinks during direct folder scans. Scan the real target path explicitly only after confirming it is inside the intended review boundary.

@@ -500,47 +500,107 @@ def scan_bytes(display_path: str, data: bytes) -> List[Finding]:
                     "binary file cannot be safely inspected by the text scanner",
                     remediation="Remove the file or regenerate a sanitized text artifact.",
                 )
-            )
+        )
         return findings
+    if len(data) > MAX_TEXT_BYTES:
+        findings.append(
+            Finding(
+                "block",
+                "text_read_limit_exceeded",
+                normalize_display_path(display_path),
+                "text file exceeds the safe full-read limit, so the scan would be partial",
+                remediation="Split, remove, or manually review the file before committing.",
+            )
+        )
     findings.extend(scan_text_content(display_path, text))
     return findings
 
 
-def iter_path_files(root: Path) -> Iterable[Path]:
-    if root.is_file():
-        yield root
-        return
-    for current_root, dirnames, filenames in os.walk(root):
-        dirnames[:] = [name for name in sorted(dirnames) if name not in SKIP_DIR_NAMES]
-        for filename in sorted(filenames):
-            yield Path(current_root) / filename
+def relative_display_path(file_path: Path, base: Path) -> str:
+    try:
+        display = str(file_path.relative_to(base))
+    except ValueError:
+        display = str(file_path)
+    if display == ".":
+        display = file_path.name
+    return normalize_display_path(display)
+
+
+def symlink_finding(display_path: str) -> Finding:
+    return Finding(
+        "block",
+        "symlink_found",
+        normalize_display_path(display_path),
+        "symlinked paths are not scanned because they can point outside the intended tree",
+        remediation="Replace the symlink with an intentionally reviewed regular file or scan the real target path explicitly.",
+    )
+
+
+def read_limited_bytes(file_path: Path) -> bytes:
+    with file_path.open("rb") as handle:
+        return handle.read(MAX_TEXT_BYTES + 1)
 
 
 def scan_path(path: Path) -> ScanResult:
     findings: List[Finding] = []
     scanned = 0
+    if path.is_symlink():
+        return ScanResult(0, [symlink_finding(str(path))])
+    if not path.exists():
+        return ScanResult(
+            0,
+            [
+                Finding(
+                    "block",
+                    "scan_path_missing",
+                    str(path),
+                    "scan path does not exist",
+                    remediation="Fix the path and rerun the scan.",
+                )
+            ],
+        )
+
     base = path if path.is_dir() else path.parent
-    for file_path in iter_path_files(path):
+    if path.is_file():
+        candidate_files = [path]
+    else:
+        candidate_files = []
+        for current_root, dirnames, filenames in os.walk(path):
+            current = Path(current_root)
+            kept_dirnames = []
+            for dirname in sorted(dirnames):
+                dir_path = current / dirname
+                display = relative_display_path(dir_path, base)
+                if dirname in SKIP_DIR_NAMES:
+                    continue
+                if dir_path.is_symlink():
+                    findings.append(symlink_finding(display))
+                    continue
+                kept_dirnames.append(dirname)
+            dirnames[:] = kept_dirnames
+
+            for filename in sorted(filenames):
+                candidate_files.append(current / filename)
+
+    for file_path in candidate_files:
+        display = relative_display_path(file_path, base)
+        if file_path.is_symlink():
+            findings.append(symlink_finding(display))
+            continue
         try:
-            data = file_path.read_bytes()
+            data = read_limited_bytes(file_path)
         except OSError as exc:
             findings.append(
                 Finding(
                     "warning",
                     "file_read_failed",
-                    str(file_path),
+                    display,
                     f"could not read file: {exc}",
                     remediation="Inspect this file manually.",
                 )
             )
             continue
         scanned += 1
-        try:
-            display = str(file_path.relative_to(base))
-        except ValueError:
-            display = str(file_path)
-        if display == ".":
-            display = file_path.name
         findings.extend(scan_bytes(display, data))
     return ScanResult(scanned, findings)
 
