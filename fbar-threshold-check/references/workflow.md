@@ -115,7 +115,7 @@ The checker accepts the dependency only when `workpaper.json`:
 - Matches the account currency and tax year.
 - Has a positive `foreign_per_usd` or `usd_per_foreign` rate.
 - Includes source/proof metadata.
-- For `get-yearly-fx-rate` workpapers only: carries FBAR/year-end wording (FBAR, FinCEN, year-end, December 31, last day, Treasury, Fiscal Data, FMS, or equivalent) in its rate fields (`rate_kind`, `method`, `rate_type`, `conversion_context`, `use_case`, `fbar_compatible: true`) or source metadata. Caveats never count as positive evidence. `get-year-end-fx-rate` workpapers are year-end by construction and need no extra marking.
+- For `get-yearly-fx-rate` workpapers only: carries explicit year-end/FBAR wording (FBAR, FinCEN, year-end, December 31, last day, end of year, or equivalent) in its rate fields (`rate_kind`, `method`, `rate_type`, `conversion_context`, `use_case`, `rate_context`) or source metadata, or sets `fbar_compatible: true`. Source provenance alone (Treasury, Fiscal Data, FMS) does not qualify a rate as year-end - those publishers issue both year-end and yearly-average tables. Any yearly/annual/period-average language anywhere (rate fields, source notes, or caveats) disqualifies the workpaper, even if a year-end word also appears. Caveats never count as positive evidence. `get-year-end-fx-rate` workpapers are year-end by construction and need no extra marking.
 
 In practice `get-year-end-fx-rate` is the supported path: the yearly dependency's normal output describes a yearly-average table and is rejected. If a `get-yearly-fx-rate` workpaper only says yearly average or annual average, stop and ask the user to produce a `get-year-end-fx-rate` workpaper instead.
 
