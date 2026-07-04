@@ -32,6 +32,8 @@ MIN_TEXT_CHARS = 40
 # must be reviewed by the user before confirmation.
 MAX_ROUTINE_CARRY_DAYS = 40
 ACCEPTED_FX_SKILLS = ("get-year-end-fx-rate", "get-yearly-fx-rate")
+PREFLIGHT_SKILL = "statement-intake-preflight"
+PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0"}
 
 CURRENCY_CODES = {
     "AED",
@@ -873,14 +875,100 @@ def write_account_csv(path: Path, account_data: dict[str, object]) -> None:
             )
 
 
+def normalize_preflight_path(path: str | Path) -> str:
+    return str(Path(path).expanduser().resolve(strict=False))
+
+
+def load_preflight_json(path: str | None, expected_scope: str, tax_year: int, pdf_paths: list[str]) -> dict[str, object] | None:
+    if not path:
+        return None
+    preflight_path = Path(path)
+    try:
+        data = json.loads(preflight_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise FbarError(f"Could not read preflight JSON {preflight_path}: {exc}", 2) from exc
+    except json.JSONDecodeError as exc:
+        raise FbarError(f"Preflight JSON {preflight_path} is not valid JSON: {exc}", 2) from exc
+
+    if data.get("skill") != PREFLIGHT_SKILL:
+        raise FbarError(f"Preflight JSON must come from {PREFLIGHT_SKILL}.", 2)
+    if str(data.get("schema_version", "")) not in PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS:
+        raise FbarError(f"Unsupported preflight schema_version {data.get('schema_version')!r}.", 2)
+    if as_int(data.get("tax_year", 0), "preflight.tax_year") != tax_year:
+        raise FbarError(f"Preflight tax_year {data.get('tax_year')} does not match extraction tax year {tax_year}.", 2)
+    if data.get("scope") != expected_scope:
+        raise FbarError(f"Preflight scope {data.get('scope')!r} does not match required scope {expected_scope!r}.", 2)
+
+    expected = {normalize_preflight_path(path_item) for path_item in pdf_paths}
+    statement_files = data.get("statement_files")
+    if not isinstance(statement_files, list):
+        raise FbarError("Preflight JSON has no statement_files list.", 2)
+    actual: set[str] = set()
+    for item in statement_files:
+        if not isinstance(item, dict):
+            continue
+        file_value = item.get("resolved_file") or item.get("file")
+        if file_value:
+            actual.add(normalize_preflight_path(str(file_value)))
+    if expected != actual:
+        raise FbarError(
+            "Preflight PDF set does not match extraction PDFs. "
+            f"Expected {sorted(expected)}; preflight has {sorted(actual)}.",
+            2,
+        )
+    return data
+
+
+def preflight_warning_lines(preflight: dict[str, object] | None) -> list[str]:
+    if not preflight:
+        return []
+    lines: list[str] = []
+    for warning in preflight.get("warnings", []):
+        if isinstance(warning, str) and warning.strip():
+            lines.append(f"Preflight: {warning.strip()}")
+    for gate in preflight.get("review_gates", []):
+        if isinstance(gate, dict):
+            code = str(gate.get("code") or "review-gate")
+            message = str(gate.get("message") or "").strip()
+            if message:
+                lines.append(f"Preflight gate {code}: {message}")
+    return sorted(set(lines))
+
+
+def preflight_profile(preflight: dict[str, object] | None, source_path: str | None) -> dict[str, object] | None:
+    if not preflight:
+        return None
+    return {
+        "source_json": source_path,
+        "status": preflight.get("status"),
+        "scope": preflight.get("scope"),
+        "currency": preflight.get("currency"),
+        "profile": preflight.get("profile"),
+        "review_gates": preflight.get("review_gates", []),
+        "review_csv": (preflight.get("artifacts") or {}).get("review_csv") if isinstance(preflight.get("artifacts"), dict) else None,
+    }
+
+
 def command_extract_account(args: argparse.Namespace) -> int:
     out_path = Path(args.out)
     warnings: list[str] = []
+    preflight = load_preflight_json(args.preflight_json, "one-account", args.tax_year, args.pdf)
+    warnings.extend(preflight_warning_lines(preflight))
     lines, file_profiles, full_text, pdf_warnings = load_pdf_lines(args.pdf)
     warnings.extend(pdf_warnings)
 
     currency = infer_currency(full_text, args.account_currency, warnings)
+    if currency in {"UNKNOWN", "MIXED"} and preflight:
+        preflight_currency = preflight.get("currency")
+        if isinstance(preflight_currency, dict):
+            preflight_code = str(preflight_currency.get("code") or "").upper()
+            if preflight_code not in {"", "UNKNOWN", "MIXED"}:
+                currency = preflight_code
     account_hints = extract_account_hints(full_text)
+    if not account_hints and preflight:
+        preflight_account_hints = preflight.get("account_hints")
+        if isinstance(preflight_account_hints, list):
+            account_hints = [str(hint) for hint in preflight_account_hints if str(hint).strip()]
     if len(account_hints) > 1:
         warnings.append(f"Multiple account hints found; verify this is one account: {', '.join(account_hints[:8])}.")
     if not account_hints:
@@ -906,6 +994,7 @@ def command_extract_account(args: argparse.Namespace) -> int:
             "currency": currency,
             "account_number_hints": account_hints,
         },
+        "preflight": preflight_profile(preflight, args.preflight_json),
         "statement_files": file_profiles,
         "coverage": coverage,
         "fx": {
@@ -1620,6 +1709,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         test_confirm_and_aggregate(root)
         test_maxima_disagreement(root)
         test_csv_naming()
+        test_preflight_handoff(root)
     print("self-test ok")
     return 0
 
@@ -2358,6 +2448,47 @@ def test_csv_naming() -> None:
     assert account_csv_path(Path("work/account-1.json"), confirmed=True).name == "account-1-confirmed.csv"
 
 
+def write_preflight_fixture(root: Path, name: str, tax_year: int, scope: str, pdf_paths: list[Path]) -> Path:
+    path = root / f"{name}.json"
+    data = {
+        "schema_version": "1.0",
+        "skill": PREFLIGHT_SKILL,
+        "status": "review-required",
+        "tax_year": tax_year,
+        "scope": scope,
+        "statement_files": [{"file": str(pdf), "resolved_file": normalize_preflight_path(pdf)} for pdf in pdf_paths],
+        "currency": {"code": "USD", "candidates": ["USD"]},
+        "profile": {"primary_institution": "Preflight Bank"},
+        "warnings": ["sample review warning"],
+        "review_gates": [{"code": "sample-gate", "message": "sample gate message"}],
+        "artifacts": {"review_csv": str(root / f"{name}.csv")},
+    }
+    write_json(path, data)
+    return path
+
+
+def test_preflight_handoff(root: Path) -> None:
+    pdf = root / "statement.pdf"
+    preflight = write_preflight_fixture(root, "preflight-ok", 2025, "one-account", [pdf])
+    data = load_preflight_json(str(preflight), "one-account", 2025, [str(pdf)])
+    warnings = preflight_warning_lines(data)
+    assert any("sample review warning" in warning for warning in warnings), warnings
+    assert any("sample-gate" in warning for warning in warnings), warnings
+
+    for name, year, scope, pdfs, expected in (
+        ("bad-year", 2024, "one-account", [pdf], "tax_year"),
+        ("bad-scope", 2025, "one-institution", [pdf], "scope"),
+        ("bad-pdfs", 2025, "one-account", [root / "other.pdf"], "PDF set"),
+    ):
+        bad = write_preflight_fixture(root, name, year, scope, pdfs)
+        try:
+            load_preflight_json(str(bad), "one-account", 2025, [str(pdf)])
+        except FbarError as exc:
+            assert expected in str(exc), str(exc)
+        else:
+            raise AssertionError(f"{name} preflight fixture should be rejected")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2370,6 +2501,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--account-id", help="Optional stable local account identifier.")
     extract.add_argument("--institution", help="Optional institution label.")
     extract.add_argument("--account-currency", help="Optional ISO currency code when statement text is ambiguous.")
+    extract.add_argument("--preflight-json", help="statement-intake-preflight JSON reviewed before extraction.")
     extract.set_defaults(func=command_extract_account)
 
     confirm = subparsers.add_parser("confirm-account", help="Confirm reviewed account ledger and convert to USD when needed.")

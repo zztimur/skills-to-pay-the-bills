@@ -23,7 +23,17 @@ Read `references/workflow.md` before running analysis. It contains the operation
 
 Dependency: for non-USD published yearly-average FX, use the separate `get-yearly-fx-rate` skill to create a retained FX proof workpaper. `statements-to-interest` consumes that skill's `workpaper.json` and passes its proof documents through in the final output. If `get-yearly-fx-rate` is unavailable, stop before the PDF and ask the user to install/run it or provide a confirmed user/preparer custom rate; do not recreate annual-rate source search inside this skill. Use `dependency-check` when you need a quick installed-dependency preflight.
 
-Use `scripts/statements_to_interest.py` for the deterministic work:
+First use the separate `statement-intake-preflight` skill with `--scope one-institution` and review its JSON/CSV:
+
+```bash
+python3 "<preflight-root>/scripts/statement_intake_preflight.py" preflight \
+  --pdf statement-01.pdf statement-02.pdf \
+  --tax-year 2025 \
+  --scope one-institution \
+  --out work/statement-preflight.json
+```
+
+Then use `scripts/statements_to_interest.py` for the deterministic extraction and pass the reviewed preflight JSON:
 
 ```bash
 python "<package-root>/scripts/statements_to_interest.py" extract \
@@ -31,6 +41,7 @@ python "<package-root>/scripts/statements_to_interest.py" extract \
   --tax-year 2025 \
   --institution "Example Bank" \
   --account-currency COP \
+  --preflight-json work/statement-preflight.json \
   --out work/interest-analysis.json
 ```
 

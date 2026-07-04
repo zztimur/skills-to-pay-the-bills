@@ -43,6 +43,8 @@ except ImportError:  # pragma: no cover - exercised by users without deps.
 
 SCHEMA_VERSION = "1.0"
 MIN_TEXT_CHARS = 40
+PREFLIGHT_SKILL = "statement-intake-preflight"
+PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0"}
 
 CURRENCY_CODES = {
     "AED",
@@ -837,13 +839,88 @@ def write_csv(rows: list[dict], path: Path) -> None:
             writer.writerow({field: row.get(field, "") for field in fields})
 
 
+def normalize_preflight_path(path: str | Path) -> str:
+    return str(Path(path).expanduser().resolve(strict=False))
+
+
+def load_preflight_json(path: str | None, expected_scope: str, tax_year: int, pdf_paths: list[str]) -> dict | None:
+    if not path:
+        return None
+    preflight_path = Path(path)
+    try:
+        data = json.loads(preflight_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise SystemExit(f"Could not read preflight JSON {preflight_path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Preflight JSON {preflight_path} is not valid JSON: {exc}") from exc
+
+    if data.get("skill") != PREFLIGHT_SKILL:
+        raise SystemExit(f"Preflight JSON must come from {PREFLIGHT_SKILL}.")
+    if str(data.get("schema_version", "")) not in PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS:
+        raise SystemExit(f"Unsupported preflight schema_version {data.get('schema_version')!r}.")
+    if int(data.get("tax_year", 0)) != int(tax_year):
+        raise SystemExit(f"Preflight tax_year {data.get('tax_year')} does not match extraction tax year {tax_year}.")
+    if data.get("scope") != expected_scope:
+        raise SystemExit(f"Preflight scope {data.get('scope')!r} does not match required scope {expected_scope!r}.")
+
+    expected = {normalize_preflight_path(path_item) for path_item in pdf_paths}
+    statement_files = data.get("statement_files")
+    if not isinstance(statement_files, list):
+        raise SystemExit("Preflight JSON has no statement_files list.")
+    actual: set[str] = set()
+    for item in statement_files:
+        if not isinstance(item, dict):
+            continue
+        file_value = item.get("resolved_file") or item.get("file")
+        if file_value:
+            actual.add(normalize_preflight_path(str(file_value)))
+    if expected != actual:
+        raise SystemExit(
+            "Preflight PDF set does not match extraction PDFs. "
+            f"Expected {sorted(expected)}; preflight has {sorted(actual)}."
+        )
+    return data
+
+
+def preflight_warning_lines(preflight: dict | None) -> list[str]:
+    if not preflight:
+        return []
+    lines: list[str] = []
+    for warning in preflight.get("warnings", []):
+        if isinstance(warning, str) and warning.strip():
+            lines.append(f"Preflight: {warning.strip()}")
+    for gate in preflight.get("review_gates", []):
+        if isinstance(gate, dict):
+            code = str(gate.get("code") or "review-gate")
+            message = str(gate.get("message") or "").strip()
+            if message:
+                lines.append(f"Preflight gate {code}: {message}")
+    return sorted(set(lines))
+
+
+def preflight_profile(preflight: dict | None, source_path: str | None) -> dict | None:
+    if not preflight:
+        return None
+    artifacts = preflight.get("artifacts") if isinstance(preflight.get("artifacts"), dict) else {}
+    return {
+        "source_json": source_path,
+        "status": preflight.get("status"),
+        "scope": preflight.get("scope"),
+        "currency": preflight.get("currency"),
+        "profile": preflight.get("profile"),
+        "review_gates": preflight.get("review_gates", []),
+        "review_csv": artifacts.get("review_csv") if isinstance(artifacts, dict) else None,
+    }
+
+
 def command_extract(args: argparse.Namespace) -> int:
     tax_year = int(args.tax_year)
     account_currency_override = normalize_currency_code(args.account_currency, "account currency")
     pdf_paths = [Path(p) for p in args.pdf]
+    preflight = load_preflight_json(args.preflight_json, "one-institution", tax_year, args.pdf)
     all_rows: list[dict] = []
     all_excluded: list[dict] = []
-    all_warnings: list[str] = []
+    all_warnings: list[str] = preflight_warning_lines(preflight)
     statement_files: list[dict] = []
     for pdf_path in pdf_paths:
         pages = load_pdf_text(pdf_path)
@@ -891,6 +968,7 @@ def command_extract(args: argparse.Namespace) -> int:
             "one_tax_year_only": True,
             "text_pdfs_only": True,
         },
+        "preflight": preflight_profile(preflight, args.preflight_json),
         "statement_files": statement_files,
         "rows": sorted(all_rows, key=lambda row: (row.get("date") or "9999-99-99", row.get("source_file", ""))),
         "excluded_candidates": all_excluded,
@@ -1814,6 +1892,25 @@ def command_self_test(args: argparse.Namespace) -> int:
     }
     with tempfile.TemporaryDirectory(prefix="statements-to-interest-self-test-") as tmp:
         tmp_path = Path(tmp)
+        pdf_path = tmp_path / "statement.pdf"
+        preflight_path = write_preflight_fixture(tmp_path, "preflight-ok", 2025, "one-institution", [pdf_path])
+        preflight = load_preflight_json(str(preflight_path), "one-institution", 2025, [str(pdf_path)])
+        preflight_warnings = preflight_warning_lines(preflight)
+        if not any("sample review warning" in warning for warning in preflight_warnings):
+            failures.append("preflight-warning-import: expected sample warning")
+        for name, year, scope, pdfs, expected in (
+            ("bad-year", 2024, "one-institution", [pdf_path], "tax_year"),
+            ("bad-scope", 2025, "one-account", [pdf_path], "scope"),
+            ("bad-pdfs", 2025, "one-institution", [tmp_path / "other.pdf"], "PDF set"),
+        ):
+            bad_preflight = write_preflight_fixture(tmp_path, name, year, scope, pdfs)
+            try:
+                load_preflight_json(str(bad_preflight), "one-institution", 2025, [str(pdf_path)])
+                failures.append(f"{name}: expected preflight rejection")
+            except SystemExit as exc:
+                if expected not in str(exc):
+                    failures.append(f"{name}: expected {expected!r} in rejection, got {exc}")
+
         workpaper_path = tmp_path / "workpaper.json"
         workpaper = {
             "skill": "get-yearly-fx-rate",
@@ -1870,8 +1967,27 @@ def command_self_test(args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print(f"Self-test passed: {len(cases) + 1} parser cases, 6 FX/dependency cases")
+    print(f"Self-test passed: {len(cases) + 1} parser cases, 6 FX/dependency cases, 4 preflight cases")
     return 0
+
+
+def write_preflight_fixture(root: Path, name: str, tax_year: int, scope: str, pdf_paths: list[Path]) -> Path:
+    path = root / f"{name}.json"
+    data = {
+        "schema_version": "1.0",
+        "skill": PREFLIGHT_SKILL,
+        "status": "review-required",
+        "tax_year": tax_year,
+        "scope": scope,
+        "statement_files": [{"file": str(pdf), "resolved_file": normalize_preflight_path(pdf)} for pdf in pdf_paths],
+        "currency": {"code": "USD", "candidates": ["USD"]},
+        "profile": {"primary_institution": "Preflight Bank"},
+        "warnings": ["sample review warning"],
+        "review_gates": [{"code": "sample-gate", "message": "sample gate message"}],
+        "artifacts": {"review_csv": str(root / f"{name}.csv")},
+    }
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1885,6 +2001,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--account-currency", help="Optional account currency override, e.g. COP when statements use $ for pesos.")
     extract.add_argument("--out", required=True, help="Output JSON path, e.g. work/interest-analysis.json.")
     extract.add_argument("--csv", help="Optional CSV path. Defaults to interest-items.csv beside the JSON.")
+    extract.add_argument("--preflight-json", help="statement-intake-preflight JSON reviewed before extraction.")
     extract.set_defaults(func=command_extract)
 
     fx_prompt = subparsers.add_parser("fx-prompt", help="Print the user-facing FX confirmation prompt for non-USD rows.")
