@@ -17,6 +17,7 @@ Collect or infer these inputs:
 Before running this skill's extraction:
 
 - Use `statement-intake-preflight` to verify shared statement intake scope: one institution, one tax year, one currency bucket, readable PDFs, and institution/currency hints.
+- Treat `statement-intake-preflight` as a required companion skill, not optional setup. If it is not installed or discoverable, stop before extraction and ask the user to install or run it.
 - Verify only the interest-specific intent here: the user wants an interest-income worksheet or tax-support packet, not official tax filing.
 
 If preflight reports mixed banks, unrelated account providers, mixed years, mixed currencies, low/no text, or ambiguous currency, resolve that in the preflight step before this skill extracts interest rows.
@@ -124,7 +125,7 @@ If counted rows are not USD:
 
 1. Use the separate `get-yearly-fx-rate` skill to find a published yearly average and create a retained proof workpaper.
 2. Pass that skill's `workpaper.json` into `statements_to_interest.py` with `--fx-workpaper-json`.
-3. Do not search for or validate published annual FX sources inside `statements-to-interest`; that is the dependency's job.
+3. Treat `get-yearly-fx-rate` as the conditional FX dependency for this path. Do not search for or validate published annual FX sources inside `statements-to-interest`; that is the dependency's job.
 4. If `get-yearly-fx-rate` is unavailable or cannot produce a workpaper, stop before the PDF and ask the user to install/run it or provide a confirmed user/preparer custom rate.
 5. Accept a user/preparer custom rate when preferred. Use `--fx-method user-rate`; `--fx-source` is optional for custom rates.
 6. Show the user the workpaper rate, source, proof documents, direction, and resulting USD total before generating the PDF. Use `fx-prompt` to print the exact confirmation question when a workpaper is available. Ask: "Confirm this published yearly average rate, or send a custom rate to use instead."

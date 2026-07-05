@@ -31,10 +31,9 @@ This skill reports both the day-by-day aggregate view and the FinCEN maximum-val
 
 This skill consumes FX proof workpapers from two sibling skills and must not duplicate FX sourcing:
 
-- `get-year-end-fx-rate` (preferred): produces Treasury/Fiscal Data or verified manual year-end rates - the FBAR-style conversion basis - and is accepted by construction.
-- `get-yearly-fx-rate`: accepted only when the workpaper carries explicit FBAR/year-end-compatible metadata. Ordinary yearly-average workpapers are rejected.
+- `get-year-end-fx-rate`: produces Treasury/Fiscal Data or verified manual year-end rates - the FBAR-style conversion basis - and is accepted by construction.
 
-A `get-yearly-fx-rate` workpaper qualifies only when its rate-kind or source metadata explicitly says FBAR, FinCEN year-end, last day of the calendar year (December 31 / Dec 31), or sets `fbar_compatible: true`. Provenance alone is not enough: Treasury, Fiscal Data, and FMS publish both year-end and yearly-average tables, so naming one of those sources does not make a rate a year-end rate. Any yearly/annual/period-average language - in the rate fields, source notes, or caveats - disqualifies the workpaper, even if a year-end word also appears (contradictory metadata is treated as unsafe). Caveat text never counts as positive evidence.
+Do not use `get-yearly-fx-rate` workpapers for FBAR conversion. Yearly-average rates belong to income-tax support workflows, not year-end FBAR threshold evidence.
 
 ## Output Language
 

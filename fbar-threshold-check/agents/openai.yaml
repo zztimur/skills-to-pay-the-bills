@@ -2,3 +2,11 @@ interface:
   display_name: "FBAR Threshold Check"
   short_description: "Check the $10,000 FBAR threshold from foreign account statements"
   default_prompt: "Use $fbar-threshold-check to check whether my foreign accounts crossed the FBAR threshold for a tax year."
+dependencies:
+  skills:
+    - name: "statement-intake-preflight"
+      required: true
+      description: "Runs shared machine-readable statement PDF intake with --scope one-account before FBAR balance extraction."
+    - name: "get-year-end-fx-rate"
+      required: false
+      description: "Creates retained year-end FX workpapers required for non-USD FBAR conversion."
