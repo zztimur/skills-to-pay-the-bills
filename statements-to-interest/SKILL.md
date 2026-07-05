@@ -1,6 +1,6 @@
 ---
 name: statements-to-interest
-description: Use after statement-intake-preflight for tax/Schedule B/FBAR support: extract interest income, apply FX if needed, and create an IRS-oriented packet.
+description: "Use after statement-intake-preflight for tax/Schedule B/FBAR support: extract interest income, apply FX if needed, and create an IRS-oriented packet."
 ---
 # Statements To Interest
 
@@ -11,6 +11,12 @@ Analyze a preflighted statement set, extract interest income, convert to USD onl
 Proceed only when the request is for interest-income extraction or tax/Schedule B/FBAR support documentation. Shared statement intake belongs to `statement-intake-preflight`; use its reviewed `--scope one-institution` JSON before this skill extracts interest rows.
 
 If preflight reports mixed institutions, mixed years, unreadable/scanned PDFs, mixed currencies, or ambiguous `$`, resolve that in `statement-intake-preflight` before continuing here. CSV or pasted rows require manual review outside this deterministic PDF workflow.
+
+## Skill Dependencies
+
+Required companion skill: `statement-intake-preflight`. Use it first for shared PDF intake with `--scope one-institution`; this skill consumes the reviewed preflight JSON through `--preflight-json` and keeps only interest-row extraction, FX confirmation, and packet generation here.
+
+Conditional FX dependency: `get-yearly-fx-rate`. Use it for non-USD published yearly-average FX workpapers; if it is unavailable or cannot produce a published annual workpaper, stop before PDF generation and ask the user/preparer for a confirmed custom rate instead of sourcing or calculating annual FX here.
 
 ## Required Workflow
 

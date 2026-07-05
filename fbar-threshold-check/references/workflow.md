@@ -14,6 +14,7 @@ Collect or infer:
 Before running extraction:
 
 - Use `statement-intake-preflight` to verify shared statement intake scope: one account, one calendar year, one currency bucket, readable PDFs, and account/currency hints.
+- Treat `statement-intake-preflight` as a required companion skill, not optional setup. If it is not installed or discoverable, stop before extraction and ask the user to install or run it.
 - Verify only the FBAR-specific intent here: the user wants an FBAR threshold support check, not an official filing.
 
 If preflight reports multiple accounts, multiple currencies, mixed years, low/no text, or ambiguous currency, resolve that in the preflight step before this skill extracts balances.
@@ -111,21 +112,19 @@ For USD accounts, confirm without FX.
 
 For non-USD accounts:
 
-1. Prefer the separate `get-year-end-fx-rate` skill to create a retained year-end workpaper; FBAR-style conversion uses the December 31 rate, not a yearly average.
-2. A `get-yearly-fx-rate` workpaper is accepted only when it is explicitly FBAR/year-end compatible (see below).
-3. Pass the dependency's `workpaper.json` to `confirm-account`.
-4. Do not search for FX sources inside this skill.
-5. Do not accept a bare rate in chat.
+1. Use the separate `get-year-end-fx-rate` skill to create a retained year-end workpaper; FBAR-style conversion uses the December 31 rate, not a yearly average.
+2. Pass that dependency's `workpaper.json` to `confirm-account`.
+3. Do not search for FX sources inside this skill.
+4. Do not accept a bare rate in chat.
 
 The checker accepts the dependency only when `workpaper.json`:
 
-- Has `skill: "get-year-end-fx-rate"` or `skill: "get-yearly-fx-rate"`.
+- Has `skill: "get-year-end-fx-rate"`.
 - Matches the account currency and tax year.
 - Has a positive `foreign_per_usd` or `usd_per_foreign` rate.
 - Includes source/proof metadata.
-- For `get-yearly-fx-rate` workpapers only: carries explicit year-end/FBAR wording (FBAR, FinCEN, year-end, December 31, last day, end of year, or equivalent) in its rate fields (`rate_kind`, `method`, `rate_type`, `conversion_context`, `use_case`, `rate_context`) or source metadata, or sets `fbar_compatible: true`. Source provenance alone (Treasury, Fiscal Data, FMS) does not qualify a rate as year-end - those publishers issue both year-end and yearly-average tables. Any yearly/annual/period-average language anywhere (rate fields, source notes, or caveats) disqualifies the workpaper, even if a year-end word also appears. Caveats never count as positive evidence. `get-year-end-fx-rate` workpapers are year-end by construction and need no extra marking.
 
-In practice `get-year-end-fx-rate` is the supported path: the yearly dependency's normal output describes a yearly-average table and is rejected. If a `get-yearly-fx-rate` workpaper only says yearly average or annual average, stop and ask the user to produce a `get-year-end-fx-rate` workpaper instead.
+Do not use `get-yearly-fx-rate` workpapers for FBAR conversion; yearly-average rates belong to tax-support workflows, not year-end FBAR support.
 
 ## 8. Confirm One Account
 

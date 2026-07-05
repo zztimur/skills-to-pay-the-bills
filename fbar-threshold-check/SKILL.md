@@ -11,6 +11,12 @@ Build account-by-account FBAR threshold evidence for one calendar year. Produce 
 
 Read `references/workflow.md` before analysis. It contains the preflight handoff, FBAR ledger review points, command sequence, FX dependency contract, and final-response shape. Read `references/fbar-source-notes.md` when explaining FBAR threshold wording, maximum account value, source limitations, or FX caveats. `<package-root>` below means the directory containing this SKILL.md.
 
+## Skill Dependencies
+
+Required companion skill: `statement-intake-preflight`. Use it first for shared PDF intake with `--scope one-account`; this skill consumes the reviewed preflight JSON through `--preflight-json` and keeps only FBAR balance, FX, confirmation, and aggregation logic here.
+
+FX workpaper dependency for non-USD accounts: `get-year-end-fx-rate`. Use its retained year-end `workpaper.json` for FBAR-style conversion; do not use yearly-average workpapers from `get-yearly-fx-rate`.
+
 Process one account at a time. First use the separate `statement-intake-preflight` skill with `--scope one-account` and review its JSON/CSV:
 
 ```bash
@@ -52,7 +58,7 @@ python3 "<package-root>/scripts/fbar_threshold_check.py" confirm-account \
   --out work/account-1-confirmed.json
 ```
 
-Important dependency guardrail: this skill consumes only `workpaper.json` files from `get-year-end-fx-rate` (preferred) or `get-yearly-fx-rate`. A `get-yearly-fx-rate` workpaper is accepted only when that dependency marks it as FBAR-compatible or year-end appropriate; plain yearly-average workpapers are rejected. Do not source, calculate, or override FX rates inside this skill.
+Important dependency guardrail: this skill consumes only `workpaper.json` files from `get-year-end-fx-rate` for non-USD accounts. Do not source, calculate, or override FX rates inside this skill. Do not use yearly-average workpapers from `get-yearly-fx-rate` for FBAR conversion.
 
 After each confirmed account, ask whether the user has another foreign account for the same year. When the user says there are no more accounts, aggregate:
 

@@ -7,6 +7,8 @@ This skill is intentionally narrow:
 - The statement set has already passed `statement-intake-preflight` for one institution, one tax year, readable PDFs, and currency scope.
 - Interest-income support documentation, not official IRS forms or tax advice.
 
+Required companion skill: `statement-intake-preflight`. This skill assumes the reviewed intake JSON/CSV exists before interest extraction starts.
+
 The user-facing deliverable is the PDF packet. JSON and CSV outputs remain available for row review and audit support, but the CSV is not the primary result unless the user asks for it.
 
 ## Package Map
@@ -21,6 +23,8 @@ The user-facing deliverable is the PDF packet. JSON and CSV outputs remain avail
 ## FX Rule
 
 For non-USD published yearly-average FX, use the separate `get-yearly-fx-rate` skill and pass its `workpaper.json` into this skill. Do not recreate annual FX source search inside `statements-to-interest`.
+
+Conditional FX dependency: `get-yearly-fx-rate`. Use it when the packet needs a published yearly-average FX workpaper; use a confirmed user/preparer custom rate only when that dependency cannot produce one or the user chooses a custom rate.
 
 If no published annual workpaper is available, ask for a confirmed user/preparer custom rate. A custom-rate source is optional; when absent, the PDF discloses that no independent source was provided and adds a preparer-review warning.
 
