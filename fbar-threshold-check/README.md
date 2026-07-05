@@ -12,7 +12,11 @@ The point is not to file FinCEN Form 114 or give legal advice. The point is to t
 
 One calendar year. One account at a time. Confirm the ledger before aggregation.
 
-For each account, preflight the machine-readable statement PDFs with `statement-intake-preflight`, extract daily balances with the reviewed preflight JSON, review the generated JSON/CSV, and confirm the account only after the user has looked at the coverage and balance assumptions. For non-USD accounts, use a retained FX workpaper from `get-year-end-fx-rate` whenever possible. A plain yearly-average rate is not enough for FBAR-style conversion unless the dependency explicitly marks it as FBAR-compatible or year-end appropriate.
+For each account, preflight the machine-readable statement PDFs with `statement-intake-preflight`, extract daily balances with the reviewed preflight JSON, review the generated JSON/CSV, and confirm the account only after the user has looked at the coverage and balance assumptions. For non-USD accounts, use a retained FX workpaper from `get-year-end-fx-rate`.
+
+Required companion skill: `statement-intake-preflight`. This skill assumes the intake JSON/CSV has already been reviewed before FBAR balance extraction starts.
+
+FX workpaper dependency for non-USD accounts: `get-year-end-fx-rate`. The normal yearly-average output from `get-yearly-fx-rate` belongs to tax-support workflows, not FBAR conversion.
 
 Do not source, calculate, or override FX rates inside this skill. Do not silently carry balances across suspicious coverage gaps. Do not return a confident "no" when the reviewed records are incomplete.
 

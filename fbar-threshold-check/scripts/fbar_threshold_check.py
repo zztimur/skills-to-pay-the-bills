@@ -31,7 +31,7 @@ MIN_TEXT_CHARS = 40
 # Anything longer means statement evidence is missing for part of the year and
 # must be reviewed by the user before confirmation.
 MAX_ROUTINE_CARRY_DAYS = 40
-ACCEPTED_FX_SKILLS = ("get-year-end-fx-rate", "get-yearly-fx-rate")
+ACCEPTED_FX_SKILLS = ("get-year-end-fx-rate",)
 PREFLIGHT_SKILL = "statement-intake-preflight"
 PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0"}
 
@@ -1084,7 +1084,7 @@ def validate_fx_workpaper(path: Path, currency: str, year: int) -> dict[str, obj
     fx_skill = workpaper.get("skill")
     if fx_skill not in ACCEPTED_FX_SKILLS:
         raise FbarError(
-            "FX workpaper must come from get-year-end-fx-rate (preferred for FBAR conversion) or get-yearly-fx-rate.",
+            "FX workpaper must come from get-year-end-fx-rate for FBAR year-end conversion.",
             2,
         )
     if str(workpaper.get("currency", "")).upper() != currency:
@@ -1113,84 +1113,7 @@ def validate_fx_workpaper(path: Path, currency: str, year: int) -> dict[str, obj
             if rate <= 0:
                 raise FbarError(f"FX workpaper {rate_key} must be a positive rate; got {rate_value}.", 2)
 
-    # get-year-end-fx-rate workpapers are year-end by construction; the
-    # FBAR-compatibility heuristic only guards yearly-average workpapers.
-    if fx_skill == "get-yearly-fx-rate" and not is_fbar_compatible_workpaper(workpaper):
-        raise FbarError(
-            "FX workpaper appears to be yearly-average only. Use get-year-end-fx-rate instead, or complete/update "
-            "get-yearly-fx-rate so the workpaper is explicitly FBAR/year-end compatible before confirming this account.",
-            2,
-        )
     return workpaper
-
-
-def is_fbar_compatible_workpaper(workpaper: dict[str, object]) -> bool:
-    # Explicit self-certification by the FX skill is the only unconditional accept.
-    if workpaper.get("fbar_compatible") is True:
-        return True
-
-    source = workpaper.get("source", {})
-    if not isinstance(source, dict):
-        source = {}
-    caveats = workpaper.get("caveats", [])
-    proof = workpaper.get("proof", {})
-
-    values: list[str] = []
-    for key in ("rate_kind", "method", "rate_type", "conversion_context", "use_case", "rate_context"):
-        value = workpaper.get(key)
-        if value is not None:
-            values.append(str(value))
-    for key in ("title", "category", "note", "url"):
-        value = source.get(key)
-        if value is not None:
-            values.append(str(value))
-    if isinstance(proof, dict):
-        for key in ("note", "source_kind"):
-            value = proof.get(key)
-            if value is not None:
-                values.append(str(value))
-    intent_text = " ".join(values).lower()
-    caveat_text = " ".join(str(item) for item in caveats).lower() if isinstance(caveats, list) else ""
-
-    # Only explicit year-end / FBAR intent is positive evidence. Provenance
-    # alone (Treasury / Fiscal Data / FMS) is NOT sufficient: those sources
-    # publish both year-end AND yearly-average tables, so a Treasury-sourced
-    # yearly average must not pass. Source names are deliberately excluded here.
-    yearend_terms = (
-        "fbar",
-        "fincen",
-        "year-end",
-        "year end",
-        "year_end",
-        "last day",
-        "last business day",
-        "12/31",
-        "12-31",
-        "december 31",
-        "dec 31",
-        "dec. 31",
-        "end of year",
-        "end-of-year",
-    )
-    # Explicit average language anywhere - rate fields, source notes, or
-    # caveats - disqualifies the workpaper even if a year-end word also appears.
-    # Contradictory metadata is unsafe, so the correct action is to demand
-    # get-year-end-fx-rate rather than guess.
-    average_terms = (
-        "yearly average",
-        "yearly-average",
-        "yearly avg",
-        "annual average",
-        "annual-average",
-        "annual avg",
-        "period average",
-        "average exchange rate",
-        "average rate",
-    )
-    has_average = any(term in intent_text + " " + caveat_text for term in average_terms)
-    if has_average:
-        return False
-    return any(term in intent_text for term in yearend_terms)
 
 
 def command_confirm_account(args: argparse.Namespace) -> int:
@@ -1229,8 +1152,7 @@ def command_confirm_account(args: argparse.Namespace) -> int:
     if currency != "USD":
         if not args.fx_workpaper_json:
             raise FbarError(
-                "Non-USD account requires --fx-workpaper-json from get-year-end-fx-rate (preferred) "
-                "or an FBAR-compatible get-yearly-fx-rate workpaper.",
+                "Non-USD account requires --fx-workpaper-json from get-year-end-fx-rate.",
                 2,
             )
         fx_workpaper = validate_fx_workpaper(Path(args.fx_workpaper_json), currency, tax_year)
@@ -1698,7 +1620,6 @@ def command_self_test(_args: argparse.Namespace) -> int:
         test_mask_time_and_two_digit_year()
         test_fx_guardrails(root)
         test_fx_rate_guards(root)
-        test_fx_provenance_not_yearend(root)
         test_hostile_inputs_clean_errors(root)
         test_boundary_rounding(root)
         test_aggregate_rejects_pre_1_3(root)
@@ -1802,34 +1723,6 @@ def synthetic_account(
     return confirmed
 
 
-def make_fbar_fx_workpaper(root: Path, currency: str = "COP", year: int = 2025) -> Path:
-    path = root / f"{currency.lower()}-{year}-workpaper.json"
-    data = {
-        "skill": "get-yearly-fx-rate",
-        "currency": currency,
-        "year": year,
-        "rate": "4000",
-        "rate_direction": "foreign-per-usd",
-        "foreign_per_usd": "4000",
-        "usd_per_foreign": "0.00025",
-        "rate_kind": "FBAR year-end Treasury/FMS compatible rate",
-        "source": {
-            "title": "Example Treasury year-end source",
-            "url": "https://example.test/fbar",
-            "retrieved": "2026-07-04",
-            "category": "FBAR year-end source",
-            "note": "Source supports FBAR year-end conversion.",
-        },
-        "proof": {
-            "workpaper_json": str(path),
-            "workpaper_pdf": str(root / "proof.pdf"),
-            "saved_files": [{"path": str(root / "proof.json"), "sha256": "abc"}],
-        },
-    }
-    write_json(path, data)
-    return path
-
-
 def make_year_end_fx_workpaper(
     root: Path,
     currency: str = "COP",
@@ -1850,8 +1743,8 @@ def make_year_end_fx_workpaper(
         "foreign_per_usd": foreign_per_usd,
         "usd_per_foreign": usd_per_foreign,
         "source": {
-            # Deliberately neutral wording: the year-end skill must be accepted
-            # without the yearly-average FBAR-keyword heuristic.
+            # Deliberately neutral wording: the year-end skill itself is the
+            # dependency proof, so source title keywords are not required.
             "title": "Example central bank closing table",
             "url": "https://example.test/closing-table",
             "retrieved": "2026-01-05",
@@ -2009,10 +1902,9 @@ def test_fx_rate_guards(root: Path) -> None:
     else:
         raise AssertionError("negative usd_per_foreign must be rejected")
 
-    # Caveats must never count as positive FBAR/year-end evidence.
-    caveat_only = root / "caveat-only-workpaper.json"
+    yearly_workpaper = root / "yearly-workpaper.json"
     write_json(
-        caveat_only,
+        yearly_workpaper,
         {
             "skill": "get-yearly-fx-rate",
             "currency": "CAD",
@@ -2020,94 +1912,19 @@ def test_fx_rate_guards(root: Path) -> None:
             "foreign_per_usd": "1.37",
             "usd_per_foreign": "0.729927",
             "source": {
-                "title": "IRS Yearly average currency exchange rates",
-                "url": "https://www.irs.gov/",
+                "title": "Example yearly average table",
+                "url": "https://example.test/yearly-average",
                 "retrieved": "2026-07-04",
             },
-            "proof": {"workpaper_json": str(caveat_only)},
-            "caveats": ["Not intended for FBAR or year-end use."],
+            "proof": {"workpaper_json": str(yearly_workpaper)},
         },
     )
     try:
-        validate_fx_workpaper(caveat_only, "CAD", 2025)
-    except FbarError:
-        pass
-    else:
-        raise AssertionError("caveat wording must not qualify a yearly-average workpaper as FBAR-compatible")
-
-
-def test_fx_provenance_not_yearend(root: Path) -> None:
-    # A Treasury/Fiscal Data provenance is NOT a year-end signal: those sources
-    # publish both year-end and yearly-average tables. A Treasury-sourced yearly
-    # average that names its rate_kind "yearly average" must be rejected.
-    treasury_avg = root / "treasury-average-workpaper.json"
-    write_json(
-        treasury_avg,
-        {
-            "skill": "get-yearly-fx-rate",
-            "currency": "CAD",
-            "year": 2025,
-            "foreign_per_usd": "1.37",
-            "usd_per_foreign": "0.729927",
-            "rate_kind": "yearly average",
-            "source": {
-                "title": "Treasury Reporting Rates of Exchange - Fiscal Data",
-                "url": "https://fiscaldata.treasury.gov/",
-                "retrieved": "2026-07-04",
-                "note": "Fiscal Data yearly average table.",
-            },
-            "proof": {"workpaper_json": str(treasury_avg)},
-        },
-    )
-    assert is_fbar_compatible_workpaper(load_json(treasury_avg)) is False
-    try:
-        validate_fx_workpaper(treasury_avg, "CAD", 2025)
+        validate_fx_workpaper(yearly_workpaper, "CAD", 2025)
     except FbarError as exc:
-        assert "yearly-average" in str(exc)
+        assert "get-year-end-fx-rate" in str(exc)
     else:
-        raise AssertionError("Treasury-sourced yearly average must be rejected")
-
-    # Provenance alone (Treasury/Fiscal Data, no year-end wording) is not enough.
-    treasury_only = root / "treasury-only-workpaper.json"
-    write_json(
-        treasury_only,
-        {
-            "skill": "get-yearly-fx-rate",
-            "currency": "CAD",
-            "year": 2025,
-            "foreign_per_usd": "1.37",
-            "usd_per_foreign": "0.729927",
-            "source": {
-                "title": "Treasury Fiscal Data exchange rates",
-                "url": "https://fiscaldata.treasury.gov/",
-                "retrieved": "2026-07-04",
-            },
-            "proof": {"workpaper_json": str(treasury_only)},
-        },
-    )
-    assert is_fbar_compatible_workpaper(load_json(treasury_only)) is False
-
-    # Explicit year-end intent with no average language is accepted.
-    yearend_yearly = root / "yearend-yearly-workpaper.json"
-    write_json(
-        yearend_yearly,
-        {
-            "skill": "get-yearly-fx-rate",
-            "currency": "CAD",
-            "year": 2025,
-            "foreign_per_usd": "1.37",
-            "usd_per_foreign": "0.729927",
-            "rate_kind": "FBAR year-end rate (December 31 close)",
-            "source": {
-                "title": "Central bank year-end closing rate",
-                "url": "https://example.test/",
-                "retrieved": "2026-07-04",
-            },
-            "proof": {"workpaper_json": str(yearend_yearly)},
-        },
-    )
-    assert is_fbar_compatible_workpaper(load_json(yearend_yearly)) is True
-    assert validate_fx_workpaper(yearend_yearly, "CAD", 2025)["skill"] == "get-yearly-fx-rate"
+        raise AssertionError("get-yearly-fx-rate workpaper must be rejected for FBAR")
 
 
 def test_boundary_rounding(root: Path) -> None:
@@ -2394,17 +2211,13 @@ def test_fx_guardrails(root: Path) -> None:
     assert year_end_data["skill"] == "get-year-end-fx-rate"
     assert year_end_data["foreign_per_usd"] == "4200"
 
-    compatible_yearly = make_fbar_fx_workpaper(root)
-    data = validate_fx_workpaper(compatible_yearly, "COP", 2025)
-    assert data["foreign_per_usd"] == "4000"
-
     invalid = make_yearly_average_workpaper(root)
     try:
         validate_fx_workpaper(invalid, "CAD", 2025)
     except FbarError as exc:
-        assert "yearly-average" in str(exc) or "yearly-average" in exc.args[0]
+        assert "get-year-end-fx-rate" in str(exc)
     else:
-        raise AssertionError("yearly-average-only workpaper should be rejected")
+        raise AssertionError("get-yearly-fx-rate workpaper should be rejected")
 
     bogus = root / "bogus-workpaper.json"
     write_json(bogus, {"skill": "some-other-skill", "currency": "COP", "year": 2025})
@@ -2511,7 +2324,7 @@ def build_parser() -> argparse.ArgumentParser:
     confirm.add_argument("--balances-confirmed", action="store_true", help="Required after review of the account ledger.")
     confirm.add_argument(
         "--fx-workpaper-json",
-        help="FX workpaper JSON for non-USD accounts, from get-year-end-fx-rate (preferred) or FBAR-compatible get-yearly-fx-rate.",
+        help="FX workpaper JSON for non-USD accounts from get-year-end-fx-rate.",
     )
     confirm.add_argument(
         "--accept-carry-forward",

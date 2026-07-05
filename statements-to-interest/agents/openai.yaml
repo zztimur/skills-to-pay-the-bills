@@ -2,3 +2,11 @@ interface:
   display_name: "Statements to Interest"
   short_description: "Extract statement interest for tax support"
   default_prompt: "Use $statements-to-interest after $statement-intake-preflight to extract interest rows, generate the PDF support packet, and pause for FX confirmation when needed."
+dependencies:
+  skills:
+    - name: "statement-intake-preflight"
+      required: true
+      description: "Runs shared machine-readable statement PDF intake with --scope one-institution before interest extraction."
+    - name: "get-yearly-fx-rate"
+      required: false
+      description: "Creates proof-backed published yearly-average FX workpapers for non-USD interest reports."

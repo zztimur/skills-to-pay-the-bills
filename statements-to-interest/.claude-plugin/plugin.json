@@ -2,6 +2,20 @@
   "name": "statements-to-interest",
   "description": "Model-agnostic tax-support workflow for statements-to-interest analysis.",
   "version": "1.0.0",
+  "dependencies": [
+    {
+      "type": "skill",
+      "name": "statement-intake-preflight",
+      "required": true,
+      "description": "Runs shared machine-readable statement PDF intake with --scope one-institution before interest extraction."
+    },
+    {
+      "type": "skill",
+      "name": "get-yearly-fx-rate",
+      "required": false,
+      "description": "Creates proof-backed published yearly-average FX workpapers for non-USD interest reports."
+    }
+  ],
   "author": {
     "name": "Timur"
   }
