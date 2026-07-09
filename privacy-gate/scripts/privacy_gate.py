@@ -779,6 +779,12 @@ def sanitize_path(path: Path, write: bool) -> int:
     return 0
 
 
+HOOKS_DIR_NAME = ".githooks"
+# Present in every hook this tool writes; used to tell our managed hook apart
+# from a hook the user authored, so a refresh never clobbers a foreign hook.
+HOOK_MARKER = "Installed by Privacy Gate"
+
+
 def hook_body() -> str:
     # The scanner is resolved at hook run time so the hook works whether or not
     # this repo vendors privacy-gate/ at its root: an explicit override wins,
@@ -789,8 +795,8 @@ def hook_body() -> str:
     return (
         "#!/usr/bin/env sh\n"
         "set -eu\n\n"
-        "# Installed by Privacy Gate. Do not hardcode a single path here; the\n"
-        "# block below resolves the scanner across vendored and installed layouts.\n"
+        f"# {HOOK_MARKER}. Do not hardcode a single path here; the block below\n"
+        "# resolves the scanner across vendored and installed layouts.\n"
         'repo_root="$(git rev-parse --show-toplevel)"\n'
         'cd "$repo_root"\n\n'
         'if [ -n "${PRIVACY_GATE_SCRIPT:-}" ] && [ -f "${PRIVACY_GATE_SCRIPT}" ]; then\n'
@@ -807,22 +813,50 @@ def hook_body() -> str:
     )
 
 
-def ensure_hook_file(root: Path) -> Path:
-    hook_path = root / ".githooks" / "pre-commit"
+def write_managed_hook(hook_path: Path) -> None:
     hook_path.parent.mkdir(parents=True, exist_ok=True)
-    if not hook_path.exists():
-        hook_path.write_text(hook_body(), encoding="utf-8")
+    hook_path.write_text(hook_body(), encoding="utf-8")
     current_mode = hook_path.stat().st_mode
     hook_path.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    return hook_path
 
 
-def install_hook() -> int:
+def current_hooks_path(root: Path) -> str:
+    result = run_git(["config", "--get", "core.hooksPath"], cwd=root, check=False)
+    return result.stdout.decode("utf-8", errors="replace").strip()
+
+
+def install_hook(force: bool = False) -> int:
     root = git_root()
-    hook_path = ensure_hook_file(root)
-    run_git(["config", "core.hooksPath", ".githooks"], cwd=root)
+    hook_path = root / HOOKS_DIR_NAME / "pre-commit"
+
+    # Never silently overwrite a pre-commit hook we did not author. Our own
+    # managed hook carries HOOK_MARKER, so re-running is a safe idempotent
+    # refresh (it also updates a stale embedded script path).
+    if hook_path.exists():
+        existing = hook_path.read_text(encoding="utf-8", errors="replace")
+        if HOOK_MARKER not in existing and not force:
+            print(
+                f"Privacy Gate: {hook_path} already exists and was not created by Privacy Gate. "
+                "Re-run with --force to replace it, or call the scan from your own hook.",
+                file=sys.stderr,
+            )
+            return 2
+
+    # Never silently hijack another hook manager (husky, pre-commit, lefthook).
+    existing_hooks_path = current_hooks_path(root)
+    if existing_hooks_path and existing_hooks_path != HOOKS_DIR_NAME and not force:
+        print(
+            f"Privacy Gate: core.hooksPath is already set to '{existing_hooks_path}'; another hook "
+            f"manager may own it. Re-run with --force to point it at '{HOOKS_DIR_NAME}', or add "
+            "'privacy_gate.py scan --staged' to that manager's pre-commit step instead.",
+            file=sys.stderr,
+        )
+        return 2
+
+    write_managed_hook(hook_path)
+    run_git(["config", "core.hooksPath", HOOKS_DIR_NAME], cwd=root)
     print(f"Privacy Gate: installed Git hook at {hook_path}")
-    print("Privacy Gate: core.hooksPath is now .githooks")
+    print(f"Privacy Gate: core.hooksPath is now {HOOKS_DIR_NAME}")
     return 0
 
 
@@ -909,7 +943,12 @@ def build_parser() -> argparse.ArgumentParser:
     sanitize.set_defaults(func=lambda args: sanitize_path(Path(args.path), args.write))
 
     hook = subparsers.add_parser("install-hook", help="configure this repo to use .githooks")
-    hook.set_defaults(func=lambda args: install_hook())
+    hook.add_argument(
+        "--force",
+        action="store_true",
+        help="replace a foreign pre-commit hook or reassign an existing core.hooksPath",
+    )
+    hook.set_defaults(func=lambda args: install_hook(args.force))
 
     return parser
 
