@@ -9,24 +9,44 @@ Use this skill when repository content needs a privacy and secret check before c
 
 ## Core Rule
 
-Call the bundled CLI. Do not reimplement detection logic in chat or in a client-specific adapter.
+Call the bundled CLI. Do not reimplement detection logic in chat or in a client-specific adapter. `<package-root>` below means the directory containing this SKILL.md (for example the installed skill path or a vendored `privacy-gate/`).
 
 ```bash
-python3 privacy-gate/scripts/privacy_gate.py scan --staged --strict
-python3 privacy-gate/scripts/privacy_gate.py scan --path .
-python3 privacy-gate/scripts/privacy_gate.py sanitize --path <file> --write
-python3 privacy-gate/scripts/privacy_gate.py install-hook
+python3 "<package-root>/scripts/privacy_gate.py" scan --staged
+python3 "<package-root>/scripts/privacy_gate.py" scan --path .
+python3 "<package-root>/scripts/privacy_gate.py" sanitize --path FILE --write
+python3 "<package-root>/scripts/privacy_gate.py" install-hook
 ```
+
+The `install-hook` command writes a `.githooks/pre-commit` that resolves the scanner at run time (a vendored copy, an installed absolute path, or the `PRIVACY_GATE_SCRIPT` override), so it keeps working from any repository, not only one that vendors `privacy-gate/`. Pass `install-hook --force` to replace a foreign pre-commit hook or reassign an existing `core.hooksPath`.
+
+## Flags And Exit Codes
+
+- Default `scan` exits nonzero only on `BLOCK` findings (high-confidence secrets); `WARN` findings (PII) print but do not fail. This is the pre-commit default.
+- `--fail-on-warn` (or its alias `--strict`) also fails on `WARN` findings; use it for stricter CI gates and release checks.
+- `--json` emits a structured report instead of text.
+
+Allowlist reviewed false positives without disabling the gate: put `privacy-gate: allow` in a comment on a line to suppress that line, or list glob patterns in a committed `.privacygateignore` to skip paths. Both leave a visible audit trail; see `references/policy.md`.
 
 ## Workflow
 
-1. Run `scan --staged --strict` before committing staged changes.
+1. Run `scan --staged` before committing staged changes; add `--strict` in CI to also fail on PII warnings.
 2. Run `scan --path .` before publishing, packaging, or syncing a repo copy.
 3. Treat `BLOCK` findings as release blockers.
 4. Treat `WARN` findings as review items that may need redaction or manual confirmation.
-5. Use `sanitize --path <file> --write` only for text-file PII cleanup.
+5. Use `sanitize --path FILE --write` only for text-file PII cleanup; review the printed preview first.
 6. Remove and rotate credentials instead of sanitizing them.
 
 ## Policy Reference
 
 Read `references/policy.md` before changing detection rules, hook behavior, or sanitizer behavior. The policy distinguishes high-confidence secrets that block release from privacy-like content that should be reviewed.
+
+## Maintainer Checks
+
+After changing this skill (not needed for normal use), run the regression tests plus the repo gatekeeper:
+
+```bash
+python3 "<package-root>/scripts/test_privacy_gate.py"
+python3 -S skill-forge/scripts/inspect_skill_package.py "<package-root>" --json --strict
+claude plugin validate --strict "<package-root>"  # when Claude tooling is available
+```
