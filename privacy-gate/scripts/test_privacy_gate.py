@@ -284,6 +284,30 @@ class PrivacyGateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_strict_flag_fails_on_warnings(self):
+        # PG6: --strict is a real alias for --fail-on-warn (no longer a no-op).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "notes.txt"
+            email = "jane" + "@" + "private.test"
+            target.write_text("contact " + email + "\n", encoding="utf-8")
+
+            def run(*flags):
+                return subprocess.run(
+                    [sys.executable, str(SCRIPT_PATH), "scan", "--path", str(target), *flags],
+                    check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                ).returncode
+
+            # A PII warning does not fail the default gate, but does under --strict.
+            self.assertEqual(run(), 0)
+            self.assertEqual(run("--strict"), 1)
+            self.assertEqual(run("--fail-on-warn"), 1)
+
+    def test_generated_hook_uses_block_only_default(self):
+        # The installed hook must use the block-only default so PII does not
+        # hard-block every commit.
+        self.assertIn("scan --staged\n", privacy_gate.hook_body())
+        self.assertNotIn("--strict", privacy_gate.hook_body())
+
     def test_staged_scan_reads_index_blob(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
