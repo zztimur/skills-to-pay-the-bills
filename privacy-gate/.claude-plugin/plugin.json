@@ -1,7 +1,7 @@
 {
   "name": "privacy-gate",
   "description": "Agent-agnostic workflow for scanning staged commits, repo trees, and files for secrets or private data before sharing.",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": {
     "name": "Timur"
   }
