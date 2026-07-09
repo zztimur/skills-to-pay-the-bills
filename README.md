@@ -102,6 +102,16 @@ If the package has a Claude plugin manifest and Claude Code is available locally
 claude plugin validate --strict <skill-folder>
 ```
 
+## Releasing A Skill
+
+Each skill's `.claude-plugin/plugin.json` versions independently, so releases are tagged per skill (`<skill-folder>-vX.Y.Z`), not for the whole repo. Before tagging, review what actually changed:
+
+```bash
+scripts/release-diff.sh <skill-folder>
+```
+
+This prints the commit log and diff scoped to that skill's directory since its latest `<skill-folder>-v*` tag (or the full history if there is no prior tag), plus the `plugin.json` version change. Pass `--from <ref>` to compare against something other than the latest tag, or `--out <path>` to write the diff to a file instead of stdout. Run `scripts/release-diff.sh --help` for the full option list.
+
 ## CI
 
 The root GitHub Actions workflow runs the checks that are stable on a clean runner:
