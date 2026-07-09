@@ -29,9 +29,13 @@ import re
 import shutil
 import sys
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 from typing import Iterable, Sequence
+
+# Reciprocal division and quantization run inside a fixed-precision context so
+# output never depends on the caller's ambient decimal context.
+_DECIMAL_PREC = 28
 
 
 class RateError(Exception):
@@ -65,8 +69,10 @@ def fmt_decimal(value: Decimal, max_places: int = 12) -> str:
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     if "." in text and len(text.split(".", 1)[1]) > max_places:
-        quant = Decimal("1").scaleb(-max_places)
-        text = format(value.quantize(quant), "f").rstrip("0").rstrip(".")
+        with localcontext() as ctx:
+            ctx.prec = _DECIMAL_PREC
+            quant = Decimal("1").scaleb(-max_places)
+            text = format(value.quantize(quant), "f").rstrip("0").rstrip(".")
     return text
 
 
@@ -87,13 +93,18 @@ def build_rate_values(rate: Decimal, direction: str) -> tuple[Decimal, Decimal]:
 
     The kit computes the reciprocal here; it never parses the rate itself.
     """
-    if rate <= 0:
-        raise RateError("Rate must be greater than zero.", 2)
+    # Guard finiteness before the ordering check: NaN <= 0 raises
+    # InvalidOperation, and Infinity would slip a garbage rate through.
+    if not rate.is_finite() or rate <= 0:
+        raise RateError("Rate must be a finite number greater than zero.", 2)
+    if direction not in ("foreign-per-usd", "usd-per-foreign"):
+        raise RateError(f"Unsupported rate direction: {direction}", 2)
+    with localcontext() as ctx:
+        ctx.prec = _DECIMAL_PREC
+        reciprocal = Decimal(1) / rate
     if direction == "foreign-per-usd":
-        return rate, Decimal(1) / rate
-    if direction == "usd-per-foreign":
-        return Decimal(1) / rate, rate
-    raise RateError(f"Unsupported rate direction: {direction}", 2)
+        return rate, reciprocal
+    return reciprocal, rate
 
 
 # --------------------------------------------------------------------------- #
@@ -697,6 +708,36 @@ def final_text(workpaper: dict[str, object]) -> str:
 # --------------------------------------------------------------------------- #
 
 
+# Top-level keys the kit computes itself; extra_json may add new keys and
+# deep-merge into ``source``, but must not overwrite these (doing so could
+# clobber the proof block or forge the skill name).
+_RESERVED_TOP_KEYS = frozenset(
+    {
+        "skill",
+        "currency",
+        "year",
+        "rate",
+        "rate_direction",
+        "foreign_per_usd",
+        "usd_per_foreign",
+        "proof",
+        "caveats",
+    }
+)
+
+
+def _validate_extra_json(extra: object) -> None:
+    if not isinstance(extra, dict):
+        raise RateError("extra_json must be a dict.", 2)
+    clobbered = _RESERVED_TOP_KEYS & set(extra)
+    if clobbered:
+        raise RateError(
+            f"extra_json must not overwrite reserved keys: {', '.join(sorted(clobbered))}.", 2
+        )
+    if "source" in extra and not isinstance(extra["source"], dict):
+        raise RateError("extra_json['source'] must be a dict to merge into the source block.", 2)
+
+
 def _deep_merge(base: dict, extra: dict) -> dict:
     """Overlay ``extra`` onto ``base`` in place, recursing into nested dicts.
 
@@ -721,9 +762,11 @@ def _copy_saved_proofs(folder: Path, saved_proofs: Iterable[Path], *, proof_requ
     entries: list[dict[str, object]] = []
     for index, original_path in enumerate(saved_proofs, start=1):
         proof_path = original_path
-        if not proof_path.exists():
+        # is_file() (not exists()) so a directory or broken symlink fails as a
+        # clean RateError instead of an IsADirectoryError from copy2/hashing.
+        if not proof_path.is_file():
             if proof_required:
-                raise RateError(f"Proof file does not exist: {proof_path}", 2)
+                raise RateError(f"Proof file does not exist or is not a regular file: {proof_path}", 2)
             continue
         if proof_path.parent.resolve() != folder.resolve():
             copied_name = f"source-proof-{index}{proof_path.suffix}"
@@ -750,8 +793,16 @@ def build_workpaper(spec: WorkpaperSpec) -> dict[str, object]:
     existing packet - the hardened behavior both skills now inherit.
     """
     foreign_per_usd, usd_per_foreign = build_rate_values(spec.rate, spec.rate_direction)
+    if spec.extra_json:
+        _validate_extra_json(spec.extra_json)
+    try:
+        year = int(spec.year)
+    except (TypeError, ValueError) as exc:
+        raise RateError(f"Year must be an integer, got {spec.year!r}.", 2) from exc
     source_slug = slugify(spec.source_title)
-    folder = Path(spec.output_root) / f"{spec.currency_code.lower()}-{spec.year}-{source_slug}"
+    # Slug the currency code and use an int year so neither can inject a path
+    # separator or traversal sequence into the packet folder.
+    folder = Path(spec.output_root) / f"{slugify(spec.currency_code)}-{year}-{source_slug}"
     if (folder / "workpaper.json").exists():
         print(f"note: replacing existing workpaper packet at {folder}", file=sys.stderr)
     folder.mkdir(parents=True, exist_ok=True)
@@ -764,7 +815,7 @@ def build_workpaper(spec: WorkpaperSpec) -> dict[str, object]:
     workpaper: dict[str, object] = {
         "skill": spec.skill_name,
         "currency": spec.currency_code,
-        "year": spec.year,
+        "year": year,
         "rate": fmt_decimal(spec.rate),
         "rate_direction": spec.rate_direction,
         "foreign_per_usd": fmt_decimal(foreign_per_usd),
