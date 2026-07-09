@@ -190,4 +190,6 @@ Then list:
 - FX workpaper paths used for non-USD accounts.
 - Any warnings or unresolved review limits.
 
+A path (plain or as a Markdown link) is only clickable/downloadable when the chat client has direct filesystem access to this machine, true for a local desktop session but not for a hosted/remote session (for example, Claude Code on the web) where the user's browser cannot reach this container's filesystem. When running in such a session, also deliver the final JSON, CSV, and PDF, plus any per-account ledgers and FX workpapers referenced above, using the host's file-delivery capability (for example, Claude Code's `SendUserFile` tool).
+
 Do not call the result legal advice, and do not say an FBAR was filed or prepared.
