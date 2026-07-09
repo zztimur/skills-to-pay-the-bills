@@ -21,10 +21,7 @@ Ask for clarification when the currency is ambiguous, for example `peso`, `dolla
 
 ## Source Search
 
-1. Prefer the Treasury Reporting Rates of Exchange dataset on Fiscal Data for the `YYYY-12-31` record date.
-2. If Treasury/Fiscal Data has no year-end record for that currency/year, use another verifiable year-end source and retain the source note.
-3. Do not calculate averages and do not reuse yearly-average rates from `get-yearly-fx-rate`.
-4. If no verifiable year-end source is found, stop and ask the user or preparer for a custom year-end rate/source.
+Follow the source priority in `references/source-policy.md`: the Treasury Reporting Rates of Exchange dataset on Fiscal Data for the `YYYY-12-31` record date first, then another verifiable year-end government, central-bank, or bank source, then a user/preparer-supplied year-end rate. Never calculate averages and never reuse a yearly-average rate from `get-yearly-fx-rate`. If no verifiable year-end source is found, stop and ask the user or preparer for a custom year-end rate/source.
 
 Use `scripts/get_year_end_fx_rate.py` for deterministic Treasury lookup and workpaper generation.
 
@@ -107,6 +104,8 @@ Add one short caveat only when needed, such as `Treasury/Fiscal Data did not lis
 ## Runtime And Validation
 
 The script uses only Python standard-library modules. Use `python3` unless the active environment provides `python`.
+
+`scripts/get_year_end_fx_rate.py` imports `scripts/_workpaper.py`, a generated, byte-identical copy of the shared `workpaper-kit/workpaper.py` engine (the same copy `get-yearly-fx-rate` carries, so both proof packets look the same). Do not hand-edit `scripts/_workpaper.py`; edit the canonical `workpaper-kit/workpaper.py` and let the pre-commit hook or `workpaper-kit/sync.sh` regenerate it.
 
 After changing this skill, run:
 
