@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,85 @@ SPEC.loader.exec_module(privacy_gate)
 class PrivacyGateTests(unittest.TestCase):
     def scan_text(self, path: str, text: str):
         return privacy_gate.scan_bytes(path, text.encode("utf-8"))
+
+    def test_path_scan_scans_dist_and_build(self):
+        # Shipped-artifact dirs must be scanned, not skipped.
+        aws = "AKIA" + ("Q" * 16)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for sub in ("dist", "build"):
+                (root / sub).mkdir()
+                (root / sub / "bundle.js").write_text("var k = '" + aws + "';\n", encoding="utf-8")
+            result = privacy_gate.scan_path(root)
+        blocked = {f.path for f in result.findings if f.severity == "block"}
+        self.assertTrue(any(p.startswith("dist/") for p in blocked), blocked)
+        self.assertTrue(any(p.startswith("build/") for p in blocked), blocked)
+
+    def test_path_scan_reports_structural_skips(self):
+        import contextlib
+        import io
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "node_modules").mkdir()
+            (root / "node_modules" / "x.js").write_text("ok\n", encoding="utf-8")
+            (root / "keep.txt").write_text("ok\n", encoding="utf-8")
+            result = privacy_gate.scan_path(root)
+        self.assertTrue(result.skipped_dirs)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            privacy_gate.report_scan(result, json_output=False)
+        self.assertIn("dir(s) skipped structurally: node_modules", buf.getvalue())
+
+    def test_single_file_scan_honors_work_dir_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "work" / "gen.txt"
+            target.parent.mkdir()
+            target.write_text("data\n", encoding="utf-8")
+            result = privacy_gate.scan_path(target)
+        self.assertTrue(
+            any(f.code == "generated_artifact_path" and f.severity == "block" for f in result.findings),
+            [f.code for f in result.findings],
+        )
+
+    def test_single_file_scan_honors_outputs_dir_policy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "outputs" / "gen.txt"
+            target.parent.mkdir()
+            target.write_text("data\n", encoding="utf-8")
+            result = privacy_gate.scan_path(target)
+        self.assertTrue(
+            any(f.code == "generated_artifact_path" and f.severity == "block" for f in result.findings),
+            [f.code for f in result.findings],
+        )
+
+    @unittest.skipIf(os.geteuid() == 0, "root bypasses file permissions")
+    def test_unreadable_file_blocks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            locked = Path(tmpdir) / "locked.txt"
+            locked.write_text("cannot-read\n", encoding="utf-8")
+            locked.chmod(0o000)
+            try:
+                result = privacy_gate.scan_path(Path(tmpdir))
+            finally:
+                locked.chmod(0o600)
+        self.assertTrue(any(f.code == "file_read_failed" and f.severity == "block" for f in result.findings))
+        self.assertEqual(privacy_gate.exit_code_for(result, False), 1)
+
+    def test_path_scan_without_git_binary(self):
+        # A --path scan must not require the git binary (policy_display_for_file
+        # swallows a missing git via _safe_git_root).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "f.txt"
+            target.write_text("hello\n", encoding="utf-8")
+            saved = os.environ.get("PATH", "")
+            try:
+                os.environ["PATH"] = ""
+                result = privacy_gate.scan_path(target)
+            finally:
+                os.environ["PATH"] = saved
+        self.assertEqual([f.code for f in result.findings], [])
+        self.assertEqual(result.scanned_files, 1)
 
     def test_clean_file_passes(self):
         findings = self.scan_text("README.md", "Use placeholders in docs.\n")
@@ -234,6 +314,48 @@ class PrivacyGateTests(unittest.TestCase):
             self.assertEqual(again.returncode, 0, again.stderr)
             self.assertEqual(hook.read_text(encoding="utf-8"), fresh)  # refreshed to current
 
+    def test_install_hook_refuses_default_location_hook(self):
+        # M3: an existing $GIT_DIR/hooks/pre-commit must not be silently disabled.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            default_hook = root / ".git" / "hooks" / "pre-commit"
+            default_hook.parent.mkdir(parents=True, exist_ok=True)
+            default_hook.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+            result = self._install_hook(root)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertEqual(self._hooks_path(root), "")  # still unset
+            self.assertFalse((root / ".githooks" / "pre-commit").exists())
+
+    def test_install_hook_force_takes_over_default_hook(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            default_hook = root / ".git" / "hooks" / "pre-commit"
+            default_hook.parent.mkdir(parents=True, exist_ok=True)
+            default_hook.write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+            result = self._install_hook(root, "--force")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self._hooks_path(root), ".githooks")
+            self.assertTrue((root / ".githooks" / "pre-commit").exists())
+
+    def test_install_hook_portable_omits_absolute_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            result = self._install_hook(root, "--portable")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            body = (root / ".githooks" / "pre-commit").read_text(encoding="utf-8")
+        abs_path = str(Path(privacy_gate.__file__).resolve())
+        self.assertNotIn(abs_path, body)
+        self.assertIn("PRIVACY_GATE_SCRIPT", body)
+        self.assertIn("privacy-gate/scripts/privacy_gate.py", body)
+
+    def test_hook_body_default_includes_absolute_path(self):
+        abs_path = str(Path(privacy_gate.__file__).resolve())
+        self.assertIn(abs_path, privacy_gate.hook_body())
+        self.assertNotIn(abs_path, privacy_gate.hook_body(portable=True))
+
     def _sanitize(self, *args):
         return subprocess.run(
             [sys.executable, str(SCRIPT_PATH), "sanitize", *args],
@@ -339,13 +461,36 @@ class PrivacyGateTests(unittest.TestCase):
             self.assertLess(time.time() - start, 2.0, "assignment scan is not linear")
 
     def test_inline_allow_suppresses_line(self):
-        # Chunk 6: an explicit per-line marker suppresses content findings on
-        # that line only; the same content without the marker still blocks.
+        # An explicit per-line marker suppresses content findings on that line
+        # only; the same content without the marker still blocks. Suppressing a
+        # secret requires the louder allow-secret marker (see Chunk 2 split).
         secret = "sk-" + ("A" * 32)
-        allowed = self.scan_text("c.txt", "OPENAI_API_KEY=" + secret + "  # privacy-gate: allow\n")
+        allowed = self.scan_text("c.txt", "OPENAI_API_KEY=" + secret + "  # privacy-gate: allow-secret\n")
         self.assertEqual(allowed, [])
         blocked = self.scan_text("c.txt", "OPENAI_API_KEY=" + secret + "\n")
         self.assertTrue(any(item.severity == "block" for item in blocked))
+
+    def test_inline_allow_still_blocks_secret(self):
+        # Chunk 2: the softer `allow` marker no longer waves through a secret.
+        secret = "sk-" + ("A" * 32)
+        findings = self.scan_text("c.txt", "OPENAI_API_KEY=" + secret + "  # privacy-gate: allow\n")
+        self.assertTrue(any(item.severity == "block" for item in findings), [f.code for f in findings])
+
+    def test_inline_allow_suppresses_pii_warning(self):
+        email = "jane" + "@" + "private.test"
+        findings = self.scan_text("c.txt", "contact " + email + "  # privacy-gate: allow\n")
+        self.assertFalse(any(item.code == "private_email" for item in findings), [f.code for f in findings])
+
+    def test_inline_allow_secret_suppresses_secret(self):
+        secret = "sk-" + ("A" * 32)
+        findings = self.scan_text("c.txt", "OPENAI_API_KEY=" + secret + "  # privacy-gate: allow-secret\n")
+        self.assertEqual(findings, [])
+
+    def test_inline_allow_secret_also_suppresses_pii(self):
+        secret = "sk-" + ("A" * 32)
+        email = "jane" + "@" + "private.test"
+        findings = self.scan_text("c.txt", "OPENAI_API_KEY=" + secret + " " + email + "  # privacy-gate: allow-secret\n")
+        self.assertEqual(findings, [])
 
     def test_inline_allow_does_not_bypass_file_block(self):
         # A marker in content must not bypass a file-level block (.env).
@@ -447,6 +592,31 @@ class PrivacyGateTests(unittest.TestCase):
         self.assertEqual(payload["warning_count"], 0)
         self.assertFalse(any(f["code"] == "staged_blob_read_failed" for f in payload["findings"]))
         self.assertGreaterEqual(payload["skipped_files"], 1)
+
+    def test_staged_scan_reports_missing_git(self):
+        # L4: a missing git binary must yield a clean exit 2, not a traceback.
+        import contextlib
+        import io
+
+        def boom(*_args, **_kwargs):
+            raise FileNotFoundError("git")
+
+        saved = privacy_gate.subprocess.run
+        stderr = io.StringIO()
+        try:
+            privacy_gate.subprocess.run = boom
+            with contextlib.redirect_stderr(stderr):
+                rc = privacy_gate.main(["scan", "--staged"])
+        finally:
+            privacy_gate.subprocess.run = saved
+        self.assertEqual(rc, 2)
+        err = stderr.getvalue().lower()
+        self.assertIn("git", err)
+        self.assertIn("not found", err)
+        self.assertNotIn("traceback", err)
+
+    def test_text_suffixes_removed(self):
+        self.assertFalse(hasattr(privacy_gate, "TEXT_SUFFIXES"))
 
 
 if __name__ == "__main__":
