@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -416,6 +417,36 @@ class PrivacyGateTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("secret_openai_api_key", result.stdout)
         self.assertNotIn(secret, result.stdout)
+
+    def test_staged_scan_skips_gitlink_submodule(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            sub_repo = base / "sub"
+            sub_repo.mkdir()
+            subprocess.run(["git", "init"], cwd=sub_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(["git", "config", "user.email", "a@b.c"], cwd=sub_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(["git", "config", "user.name", "t"], cwd=sub_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            (sub_repo / "f.txt").write_text("hello\n", encoding="utf-8")
+            subprocess.run(["git", "add", "f.txt"], cwd=sub_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=sub_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            root = base / "outer"
+            root.mkdir()
+            subprocess.run(["git", "init"], cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(
+                ["git", "-c", "protocol.file.allow=always", "submodule", "add", str(sub_repo), "sub"],
+                cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "scan", "--staged", "--json"],
+                cwd=root, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["block_count"], 0)
+        self.assertEqual(payload["warning_count"], 0)
+        self.assertFalse(any(f["code"] == "staged_blob_read_failed" for f in payload["findings"]))
+        self.assertGreaterEqual(payload["skipped_files"], 1)
 
 
 if __name__ == "__main__":
