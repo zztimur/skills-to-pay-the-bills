@@ -182,24 +182,59 @@ SECRET_CONTENT_PATTERNS = [
     ),
 ]
 
-# Match a credential keyword even when it is the trailing component of a longer
-# snake_case/kebab identifier (DJANGO_SECRET_KEY, AWS_SECRET_ACCESS_KEY). A bare
-# \b boundary fails there because "_" is a word character; the optional prefix
-# below is what closes that false-negative. Longest keyword forms come first so
-# the alternation prefers the most specific match.
-_CRED_KEYWORD = (
-    r"(?:secret[_-]?access[_-]?key|api[_-]?key|secret[_-]?key|access[_-]?key"
-    r"|access[_-]?token|client[_-]?secret|refresh[_-]?token|auth[_-]?token)"
+# Assignments are found by scanning for the separator and reading the name
+# backwards in Python (see iter_assignments). Any greedy "identifier then
+# separator" regex backtracks O(n^2) on long identifier-like input with no
+# reachable separator, which is a denial-of-service risk for a commit/CI gate.
+_ASSIGNMENT_SEPARATOR = re.compile(r"[:=]")
+_ASSIGNMENT_VALUE = re.compile(r"['\"]?([^'\"\s#]+)")
+
+# A credential keyword that is the whole name or its trailing component
+# (DJANGO_SECRET_KEY, AWS_SECRET_ACCESS_KEY). Longest forms first.
+CRED_NAME_SUFFIX = re.compile(
+    r"(?:^|[_-])(?:secret[_-]?access[_-]?key|api[_-]?key|secret[_-]?key|access[_-]?key"
+    r"|access[_-]?token|client[_-]?secret|refresh[_-]?token|auth[_-]?token)$",
+    re.IGNORECASE,
 )
-ASSIGNMENT_PATTERN = re.compile(
-    r"(?i)(?<![A-Za-z0-9])"
-    r"(?:[A-Za-z0-9]+[_-])*" + _CRED_KEYWORD + r"(?![A-Za-z0-9])"
-    r"\s*[:=]\s*['\"]?([^'\"\s#]+)"
-)
-PASSWORD_ASSIGNMENT_PATTERN = re.compile(
-    r"(?i)(?<![A-Za-z0-9])(?:[A-Za-z0-9]+[_-])*(?:password|passwd)(?![A-Za-z0-9])"
-    r"\s*[:=]\s*['\"]?([^'\"\s#]+)"
-)
+PASSWORD_NAME_SUFFIX = re.compile(r"(?:^|[_-])(?:password|passwd)$", re.IGNORECASE)
+
+# A dotted attribute chain such as settings.SECRET_KEY or os.environ.get.
+_DOTTED_REFERENCE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
+
+
+def looks_like_code_reference(value: str) -> bool:
+    """True when an assignment value reads a secret rather than hardcoding one.
+
+    Real secret literals do not contain call/subscript/interpolation syntax, and
+    a bare dotted attribute chain (settings.SECRET_KEY) is a reference. JWT-style
+    dotted tokens are still caught by the dedicated JWT content pattern, so this
+    filter does not open a hole for them.
+    """
+    stripped = value.strip().strip("'\"")
+    if any(character in stripped for character in "()[]{}$"):
+        return True
+    return _DOTTED_REFERENCE.fullmatch(stripped) is not None
+
+
+def iter_assignments(line: str) -> Iterable[Tuple[str, str]]:
+    """Yield (name, value) for each `name = value` / `name: value` on the line.
+
+    Linear time: find each separator, then read the trailing identifier to its
+    left and the value to its right. No greedy identifier-then-separator regex,
+    so long identifier-like input cannot trigger catastrophic backtracking.
+    """
+    for separator in _ASSIGNMENT_SEPARATOR.finditer(line):
+        left = line[: separator.start()].rstrip()
+        end = len(left)
+        start = end
+        while start > 0 and (left[start - 1].isalnum() or left[start - 1] in "_-"):
+            start -= 1
+        name = left[start:end]
+        if not name:
+            continue
+        value_match = _ASSIGNMENT_VALUE.match(line[separator.end():].lstrip())
+        if value_match:
+            yield name, value_match.group(1)
 
 EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@([A-Z0-9.-]+\.[A-Z]{2,})\b", re.IGNORECASE)
 PHONE_PATTERN = re.compile(
@@ -476,9 +511,13 @@ def scan_text_content(display_path: str, text: str) -> List[Finding]:
                     remediation,
                 )
 
-        for match in ASSIGNMENT_PATTERN.finditer(line):
-            value = match.group(1)
-            if len(value) >= 12 and not is_placeholder_value(value):
+        cred_flagged = password_flagged = False
+        for name, value in iter_assignments(line):
+            # A value that reads a secret (os.environ.get(...), settings.SECRET_KEY)
+            # or is a placeholder is not a hardcoded credential.
+            if is_placeholder_value(value) or looks_like_code_reference(value):
+                continue
+            if not cred_flagged and len(value) >= 12 and CRED_NAME_SUFFIX.search(name):
                 add_line_finding(
                     findings,
                     "block",
@@ -488,11 +527,8 @@ def scan_text_content(display_path: str, text: str) -> List[Finding]:
                     "possible API key, token, or client secret assignment found",
                     "Remove the credential and rotate it if it was real.",
                 )
-                break
-
-        for match in PASSWORD_ASSIGNMENT_PATTERN.finditer(line):
-            value = match.group(1)
-            if len(value) >= 8 and not is_placeholder_value(value):
+                cred_flagged = True
+            elif not password_flagged and len(value) >= 8 and PASSWORD_NAME_SUFFIX.search(name):
                 add_line_finding(
                     findings,
                     "block",
@@ -502,7 +538,7 @@ def scan_text_content(display_path: str, text: str) -> List[Finding]:
                     "possible password assignment found",
                     "Remove the password and rotate it if it was real.",
                 )
-                break
+                password_flagged = True
 
         for match in EMAIL_PATTERN.finditer(line):
             if not is_example_email(match):

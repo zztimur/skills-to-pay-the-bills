@@ -308,6 +308,35 @@ class PrivacyGateTests(unittest.TestCase):
         self.assertIn("scan --staged\n", privacy_gate.hook_body())
         self.assertNotIn("--strict", privacy_gate.hook_body())
 
+    def test_code_reference_values_not_flagged(self):
+        # A value that reads a secret (env var, settings, subscript) is not a
+        # hardcoded credential and must not be flagged. Names and values are
+        # kept in separate literals so this test file has no "name = value"
+        # line for either scanner (privacy-gate or the skill-forge inspector).
+        eq = " = "
+        references = [
+            ("api_key", "os.environ.get('API_KEY')"),
+            ("secret_key", "settings.SECRET_KEY"),
+            ("db_password", "config['DB_PASSWORD']"),
+            ("auth_token", "get_token()"),
+        ]
+        for name, value in references:
+            text = name + eq + value + "\n"
+            self.assertEqual(self.scan_text("app.py", text), [], text)
+        # A real hardcoded value on the same identifier shape still blocks.
+        real = "DJANGO_SECRET_KEY" + eq + "x7Kj9mPqR2wN8vB4tY6uI1oL3eF5gH0z"
+        self.assertTrue(any(f.severity == "block" for f in self.scan_text("app.py", real)))
+
+    def test_assignment_scan_is_linear(self):
+        # A long identifier-like line with no reachable separator must not cause
+        # catastrophic backtracking (regression: it once took ~1 minute).
+        import time
+
+        for payload in ("A_" * 200000 + "api_key", "A_" * 200000 + " see http://host/path"):
+            start = time.time()
+            privacy_gate.scan_text_content("x", payload)
+            self.assertLess(time.time() - start, 2.0, "assignment scan is not linear")
+
     def test_inline_allow_suppresses_line(self):
         # Chunk 6: an explicit per-line marker suppresses content findings on
         # that line only; the same content without the marker still blocks.
