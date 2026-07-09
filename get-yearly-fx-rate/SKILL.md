@@ -1,6 +1,6 @@
 ---
 name: get-yearly-fx-rate
-description: Find and cite a published yearly average FX rate for one currency/year, with proof workpaper. Use for annual USD exchange rates, tax support, and rate-source proof.
+description: Find and cite a published yearly average FX rate for one currency/year, with proof workpaper. Use for IRS yearly average table lookups, annual USD exchange rates, tax support, and rate-source proof.
 ---
 
 # Get Yearly FX Rate
@@ -36,6 +36,8 @@ python3 "<package-root>/scripts/get_yearly_fx_rate.py" lookup \
   --year 2024 \
   --output-root work/fx-rate-proof
 ```
+
+If the script cannot reach the IRS page (exit code 5, common in sandboxed or proxied environments), fetch the IRS yearly-average page with your web tool, save the raw HTML locally, and rerun `lookup` with `--html-file <saved.html>`. The workpaper records whether the snapshot was fetched live or supplied from a file.
 
 Manual published-source workpaper after the agent has found a non-IRS annual source:
 
@@ -111,9 +113,10 @@ After changing this skill, run:
 ```bash
 python3 "<package-root>/scripts/get_yearly_fx_rate.py" self-test
 python3 "<package-root>/scripts/get_yearly_fx_rate.py" map-check
-python3 /Users/timur/.codex/skills/.system/skill-creator/scripts/quick_validate.py "<package-root>"
 python3 -S skill-forge/scripts/inspect_skill_package.py "<package-root>" --json --strict
 ```
+
+If the Anthropic skill-creator `quick_validate.py` is installed, also run it against `<package-root>`; otherwise the strict inspector above and `claude plugin validate` below are the release gate.
 
 If Claude tooling is available, also run:
 
