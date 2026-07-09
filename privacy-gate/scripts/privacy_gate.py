@@ -11,7 +11,7 @@ import re
 import stat
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -21,27 +21,32 @@ MAX_TEXT_BYTES = 1_000_000
 # in-repo audit trail (the marker sits on the suppressed line; the ignore file
 # is committed and its skip count is reported), so nothing is hidden silently.
 IGNORE_FILE_NAME = ".privacygateignore"
-# A per-line escape hatch for reviewed false positives (a documented example
-# key, a fixture). Suppresses only content findings on the annotated line.
+# Per-line escape hatches for reviewed false positives, both leaving a visible
+# in-diff audit trail. `allow` suppresses WARN-level content findings (PII) only.
+# `allow-secret` also suppresses BLOCK-level content findings (secrets) - a
+# louder, deliberately distinct marker so a real secret is never waved through
+# by the softer PII marker. Neither affects file-level blocks (binary, .env).
 INLINE_ALLOW_PATTERN = re.compile(r"privacy-gate:\s*allow\b", re.IGNORECASE)
+INLINE_ALLOW_SECRET_PATTERN = re.compile(r"privacy-gate:\s*allow-secret\b", re.IGNORECASE)
 
+# Directories never worth scanning: VCS metadata, tool caches, vendored deps,
+# and virtualenvs. NOT build/ or dist/ - those ship in packages, so they are
+# scanned. Skips are counted and reported (see ScanResult.skipped_dirs).
 SKIP_DIR_NAMES = {
     ".git",
     ".git-rewrite",
     ".hg",
+    ".svn",
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
-    ".svn",
-    ".venv",
     "__pycache__",
-    "build",
-    "coverage",
-    "dist",
-    "env",
-    "htmlcov",
-    "node_modules",
+    ".venv",
     "venv",
+    "env",
+    "node_modules",
+    "coverage",
+    "htmlcov",
 }
 
 GENERATED_DIR_NAMES = {"work", "outputs"}
@@ -51,26 +56,6 @@ ALLOWED_ENV_EXAMPLES = {
     ".env.sample",
     ".env.template",
     ".env.defaults",
-}
-
-TEXT_SUFFIXES = {
-    "",
-    ".cfg",
-    ".css",
-    ".csv",
-    ".html",
-    ".ini",
-    ".js",
-    ".json",
-    ".md",
-    ".py",
-    ".sh",
-    ".toml",
-    ".ts",
-    ".txt",
-    ".xml",
-    ".yaml",
-    ".yml",
 }
 
 BLOCK_BINARY_SUFFIXES = {
@@ -286,6 +271,7 @@ class ScanResult:
     scanned_files: int
     findings: List[Finding]
     skipped_files: int = 0
+    skipped_dirs: List[str] = field(default_factory=list)  # structural skips (display paths)
 
 
 def load_ignore_patterns(base: Path) -> List[str]:
@@ -494,144 +480,146 @@ def scan_text_content(display_path: str, text: str) -> List[Finding]:
     findings: List[Finding] = []
 
     for line_number, line in enumerate(text.splitlines(), start=1):
-        if INLINE_ALLOW_PATTERN.search(line):
-            # Reviewed false positive: the marker on this line is the audit
-            # trail, visible in the diff. Skip content detection for this line
-            # only (path/file-level blocks like binary or .env are unaffected).
-            continue
-        for code, label, pattern, remediation in SECRET_CONTENT_PATTERNS:
-            if pattern.search(line):
-                add_line_finding(
-                    findings,
-                    "block",
-                    code,
-                    display_path,
-                    line_number,
-                    f"possible {label} found",
-                    remediation,
-                )
+        allow_secret = bool(INLINE_ALLOW_SECRET_PATTERN.search(line))
+        # `allow-secret` implies `allow`; `\ballow\b` also matches inside
+        # "allow-secret", so allow_any is true for either marker.
+        allow_any = allow_secret or bool(INLINE_ALLOW_PATTERN.search(line))
 
-        cred_flagged = password_flagged = False
-        for name, value in iter_assignments(line):
-            # A value that reads a secret (os.environ.get(...), settings.SECRET_KEY)
-            # or is a placeholder is not a hardcoded credential.
-            if is_placeholder_value(value) or looks_like_code_reference(value):
-                continue
-            if not cred_flagged and len(value) >= 12 and CRED_NAME_SUFFIX.search(name):
-                add_line_finding(
-                    findings,
-                    "block",
-                    "secret_assignment",
-                    display_path,
-                    line_number,
-                    "possible API key, token, or client secret assignment found",
-                    "Remove the credential and rotate it if it was real.",
-                )
-                cred_flagged = True
-            elif not password_flagged and len(value) >= 8 and PASSWORD_NAME_SUFFIX.search(name):
-                add_line_finding(
-                    findings,
-                    "block",
-                    "secret_password_assignment",
-                    display_path,
-                    line_number,
-                    "possible password assignment found",
-                    "Remove the password and rotate it if it was real.",
-                )
-                password_flagged = True
+        if not allow_secret:
+            for code, label, pattern, remediation in SECRET_CONTENT_PATTERNS:
+                if pattern.search(line):
+                    add_line_finding(
+                        findings,
+                        "block",
+                        code,
+                        display_path,
+                        line_number,
+                        f"possible {label} found",
+                        remediation,
+                    )
 
-        for match in EMAIL_PATTERN.finditer(line):
-            if not is_example_email(match):
-                add_line_finding(
-                    findings,
-                    "warning",
-                    "private_email",
-                    display_path,
-                    line_number,
-                    "possible private email address found",
-                    "Redact or replace with a placeholder if this is not public documentation.",
-                )
-                break
+            cred_flagged = password_flagged = False
+            for name, value in iter_assignments(line):
+                # A value that reads a secret (os.environ.get(...), settings.SECRET_KEY)
+                # or is a placeholder is not a hardcoded credential.
+                if is_placeholder_value(value) or looks_like_code_reference(value):
+                    continue
+                if not cred_flagged and len(value) >= 12 and CRED_NAME_SUFFIX.search(name):
+                    add_line_finding(
+                        findings,
+                        "block",
+                        "secret_assignment",
+                        display_path,
+                        line_number,
+                        "possible API key, token, or client secret assignment found",
+                        "Remove the credential and rotate it if it was real.",
+                    )
+                    cred_flagged = True
+                elif not password_flagged and len(value) >= 8 and PASSWORD_NAME_SUFFIX.search(name):
+                    add_line_finding(
+                        findings,
+                        "block",
+                        "secret_password_assignment",
+                        display_path,
+                        line_number,
+                        "possible password assignment found",
+                        "Remove the password and rotate it if it was real.",
+                    )
+                    password_flagged = True
 
-        if PHONE_PATTERN.search(line):
-            add_line_finding(
-                findings,
-                "warning",
-                "private_phone",
-                display_path,
-                line_number,
-                "possible phone number found",
-                "Redact or replace with a placeholder if this is private.",
-            )
+        if not allow_any:
+            for match in EMAIL_PATTERN.finditer(line):
+                if not is_example_email(match):
+                    add_line_finding(
+                        findings,
+                        "warning",
+                        "private_email",
+                        display_path,
+                        line_number,
+                        "possible private email address found",
+                        "Redact or replace with a placeholder if this is not public documentation.",
+                    )
+                    break
 
-        if SSN_ITIN_PATTERN.search(line):
-            add_line_finding(
-                findings,
-                "warning",
-                "private_tax_id",
-                display_path,
-                line_number,
-                "possible SSN or ITIN found",
-                "Redact tax identifiers before committing.",
-            )
-
-        if EIN_PATTERN.search(line):
-            add_line_finding(
-                findings,
-                "warning",
-                "private_ein",
-                display_path,
-                line_number,
-                "possible EIN found",
-                "Confirm this tax identifier is public or redact it.",
-            )
-
-        if IBAN_PATTERN.search(line):
-            add_line_finding(
-                findings,
-                "warning",
-                "private_iban",
-                display_path,
-                line_number,
-                "possible IBAN found",
-                "Redact bank identifiers before committing.",
-            )
-
-        for candidate in CARD_CANDIDATE_PATTERN.finditer(line):
-            digits = re.sub(r"\D", "", candidate.group(0))
-            if 13 <= len(digits) <= 19 and luhn_valid(digits):
+            if PHONE_PATTERN.search(line):
                 add_line_finding(
                     findings,
                     "warning",
-                    "private_card_number",
+                    "private_phone",
                     display_path,
                     line_number,
-                    "possible payment card number found",
-                    "Redact card numbers before committing.",
+                    "possible phone number found",
+                    "Redact or replace with a placeholder if this is private.",
                 )
-                break
 
-        if ACCOUNT_CONTEXT_PATTERN.search(line) and re.search(r"\d{4,}", line):
-            add_line_finding(
-                findings,
-                "warning",
-                "private_account_context",
-                display_path,
-                line_number,
-                "possible bank account or routing context found",
-                "Redact account and routing details before committing.",
-            )
+            if SSN_ITIN_PATTERN.search(line):
+                add_line_finding(
+                    findings,
+                    "warning",
+                    "private_tax_id",
+                    display_path,
+                    line_number,
+                    "possible SSN or ITIN found",
+                    "Redact tax identifiers before committing.",
+                )
 
-        if ADDRESS_PATTERN.search(line):
-            add_line_finding(
-                findings,
-                "warning",
-                "private_address",
-                display_path,
-                line_number,
-                "possible street address found",
-                "Redact addresses before committing unless intentionally public.",
-            )
+            if EIN_PATTERN.search(line):
+                add_line_finding(
+                    findings,
+                    "warning",
+                    "private_ein",
+                    display_path,
+                    line_number,
+                    "possible EIN found",
+                    "Confirm this tax identifier is public or redact it.",
+                )
+
+            if IBAN_PATTERN.search(line):
+                add_line_finding(
+                    findings,
+                    "warning",
+                    "private_iban",
+                    display_path,
+                    line_number,
+                    "possible IBAN found",
+                    "Redact bank identifiers before committing.",
+                )
+
+            for candidate in CARD_CANDIDATE_PATTERN.finditer(line):
+                digits = re.sub(r"\D", "", candidate.group(0))
+                if 13 <= len(digits) <= 19 and luhn_valid(digits):
+                    add_line_finding(
+                        findings,
+                        "warning",
+                        "private_card_number",
+                        display_path,
+                        line_number,
+                        "possible payment card number found",
+                        "Redact card numbers before committing.",
+                    )
+                    break
+
+            if ACCOUNT_CONTEXT_PATTERN.search(line) and re.search(r"\d{4,}", line):
+                add_line_finding(
+                    findings,
+                    "warning",
+                    "private_account_context",
+                    display_path,
+                    line_number,
+                    "possible bank account or routing context found",
+                    "Redact account and routing details before committing.",
+                )
+
+            if ADDRESS_PATTERN.search(line):
+                add_line_finding(
+                    findings,
+                    "warning",
+                    "private_address",
+                    display_path,
+                    line_number,
+                    "possible street address found",
+                    "Redact addresses before committing unless intentionally public.",
+                )
 
     return findings
 
@@ -691,6 +679,33 @@ def read_limited_bytes(file_path: Path) -> bytes:
         return handle.read(MAX_TEXT_BYTES + 1)
 
 
+def _safe_git_root(start: Path) -> Optional[Path]:
+    """Git toplevel for `start`, or None if not a repo / git is unavailable.
+
+    Swallows a missing git binary so --path scans never require git."""
+    try:
+        result = run_git(["rev-parse", "--show-toplevel"], cwd=start, check=False)
+    except (FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return Path(result.stdout.decode("utf-8", errors="replace").strip())
+
+
+def policy_display_for_file(path: Path) -> str:
+    """Display path for an explicitly named file, preserving ancestor dirs
+    (work/, outputs/) so path policy applies. Relative to the git root if the
+    file is inside a repo, else CWD, else the path as given."""
+    resolved = path.resolve()
+    for base in (_safe_git_root(resolved.parent), Path.cwd()):
+        if base is not None:
+            try:
+                return normalize_display_path(str(resolved.relative_to(base)))
+            except ValueError:
+                continue
+    return normalize_display_path(str(path))
+
+
 def scan_path(path: Path) -> ScanResult:
     findings: List[Finding] = []
     scanned = 0
@@ -715,8 +730,11 @@ def scan_path(path: Path) -> ScanResult:
     # file is always scanned so the user is never surprised by a silent skip.
     ignore_patterns = load_ignore_patterns(base) if path.is_dir() else []
     skipped = 0
+    skipped_dirs: List[str] = []
+    single_file_display: Optional[str] = None
     if path.is_file():
         candidate_files = [path]
+        single_file_display = policy_display_for_file(path)
     else:
         candidate_files = []
         for current_root, dirnames, filenames in os.walk(path):
@@ -726,6 +744,7 @@ def scan_path(path: Path) -> ScanResult:
                 dir_path = current / dirname
                 display = relative_display_path(dir_path, base)
                 if dirname in SKIP_DIR_NAMES:
+                    skipped_dirs.append(display)
                     continue
                 if dir_path.is_symlink():
                     findings.append(symlink_finding(display))
@@ -737,7 +756,7 @@ def scan_path(path: Path) -> ScanResult:
                 candidate_files.append(current / filename)
 
     for file_path in candidate_files:
-        display = relative_display_path(file_path, base)
+        display = single_file_display if single_file_display is not None else relative_display_path(file_path, base)
         if is_ignored(display, ignore_patterns):
             skipped += 1
             continue
@@ -749,17 +768,17 @@ def scan_path(path: Path) -> ScanResult:
         except OSError as exc:
             findings.append(
                 Finding(
-                    "warning",
+                    "block",
                     "file_read_failed",
                     display,
-                    f"could not read file: {exc}",
-                    remediation="Inspect this file manually.",
+                    f"could not read file, so it cannot be inspected: {exc}",
+                    remediation="Fix permissions and rescan, or remove the file; unreadable files are blocked fail-closed.",
                 )
             )
             continue
         scanned += 1
         findings.extend(scan_bytes(display, data))
-    return ScanResult(scanned, findings, skipped)
+    return ScanResult(scanned, findings, skipped, skipped_dirs)
 
 
 def run_git(args: Sequence[str], cwd: Optional[Path] = None, check: bool = True) -> subprocess.CompletedProcess[bytes]:
@@ -832,11 +851,11 @@ def scan_staged() -> ScanResult:
         except RuntimeError as exc:
             findings.append(
                 Finding(
-                    "warning",
+                    "block",
                     "staged_blob_read_failed",
                     path,
-                    f"could not read staged blob: {exc}",
-                    remediation="Inspect the staged file manually.",
+                    f"could not read staged blob, so it cannot be inspected: {exc}",
+                    remediation="Resolve the staged blob and rescan; uninspectable staged content is blocked fail-closed.",
                 )
             )
             continue
@@ -919,7 +938,7 @@ def sanitize_path(path: Path, write: bool) -> int:
             return 2
         print(f"Privacy Gate: wrote sanitized {path}")
     else:
-        print(f"Privacy Gate: rerun with --write to apply.")
+        print("Privacy Gate: rerun with --write to apply.")
     return 0
 
 
@@ -929,41 +948,59 @@ HOOKS_DIR_NAME = ".githooks"
 HOOK_MARKER = "Installed by Privacy Gate"
 
 
-def hook_body() -> str:
-    # The scanner is resolved at hook run time so the hook works whether or not
-    # this repo vendors privacy-gate/ at its root: an explicit override wins,
-    # then a repo-vendored copy (portable for teams), then the absolute path of
-    # the script that installed the hook. If none resolve, the hook fails closed
-    # with a clear message instead of a confusing "file not found".
-    script_path = Path(__file__).resolve()
-    return (
-        "#!/usr/bin/env sh\n"
-        "set -eu\n\n"
-        f"# {HOOK_MARKER}. Do not hardcode a single path here; the block below\n"
-        "# resolves the scanner across vendored and installed layouts.\n"
-        'repo_root="$(git rev-parse --show-toplevel)"\n'
-        'cd "$repo_root"\n\n'
-        'if [ -n "${PRIVACY_GATE_SCRIPT:-}" ] && [ -f "${PRIVACY_GATE_SCRIPT}" ]; then\n'
-        '  script="${PRIVACY_GATE_SCRIPT}"\n'
-        'elif [ -f "privacy-gate/scripts/privacy_gate.py" ]; then\n'
-        '  script="privacy-gate/scripts/privacy_gate.py"\n'
-        f'elif [ -f "{script_path}" ]; then\n'
-        f'  script="{script_path}"\n'
-        "else\n"
-        '  echo "Privacy Gate: scanner not found; set PRIVACY_GATE_SCRIPT or vendor privacy-gate/." >&2\n'
-        "  exit 1\n"
-        "fi\n\n"
+def hook_body(portable: bool = False) -> str:
+    """Render the managed pre-commit hook.
+
+    Scanner resolution at run time: a PRIVACY_GATE_SCRIPT override, then a
+    repo-vendored privacy-gate/ copy, then (unless portable) the absolute path of
+    the installing script. Portable mode omits the absolute path so the committed
+    hook carries no machine-specific home directory - use it for shared repos,
+    paired with vendoring or PRIVACY_GATE_SCRIPT.
+    """
+    lines = [
+        "#!/usr/bin/env sh",
+        "set -eu",
+        "",
+        f"# {HOOK_MARKER}. The block below resolves the scanner across layouts;",
+        "# do not hardcode a single path here.",
+        'repo_root="$(git rev-parse --show-toplevel)"',
+        'cd "$repo_root"',
+        "",
+        'if [ -n "${PRIVACY_GATE_SCRIPT:-}" ] && [ -f "${PRIVACY_GATE_SCRIPT}" ]; then',
+        '  script="${PRIVACY_GATE_SCRIPT}"',
+        'elif [ -f "privacy-gate/scripts/privacy_gate.py" ]; then',
+        '  script="privacy-gate/scripts/privacy_gate.py"',
+    ]
+    if not portable:
+        script_path = Path(__file__).resolve()
+        lines += [f'elif [ -f "{script_path}" ]; then', f'  script="{script_path}"']
+    lines += [
+        "else",
+        '  echo "Privacy Gate: scanner not found; set PRIVACY_GATE_SCRIPT or vendor privacy-gate/." >&2',
+        "  exit 1",
+        "fi",
+        "",
         # Default gate: block the commit on high-confidence secrets, print PII
         # warnings without blocking. Add --strict here to also fail on warnings.
-        'python3 "$script" scan --staged\n'
-    )
+        'python3 "$script" scan --staged',
+        "",
+    ]
+    return "\n".join(lines)
 
 
-def write_managed_hook(hook_path: Path) -> None:
+def write_managed_hook(hook_path: Path, portable: bool = False) -> None:
     hook_path.parent.mkdir(parents=True, exist_ok=True)
-    hook_path.write_text(hook_body(), encoding="utf-8")
+    hook_path.write_text(hook_body(portable), encoding="utf-8")
     current_mode = hook_path.stat().st_mode
     hook_path.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def default_pre_commit_hook(root: Path) -> Path:
+    """Path to the default-location pre-commit hook ($GIT_DIR/hooks/pre-commit)."""
+    result = run_git(["rev-parse", "--git-path", "hooks/pre-commit"], cwd=root)
+    raw = result.stdout.decode("utf-8", errors="replace").strip()
+    candidate = Path(raw)
+    return candidate if candidate.is_absolute() else (root / candidate)
 
 
 def current_hooks_path(root: Path) -> str:
@@ -971,7 +1008,7 @@ def current_hooks_path(root: Path) -> str:
     return result.stdout.decode("utf-8", errors="replace").strip()
 
 
-def install_hook(force: bool = False) -> int:
+def install_hook(force: bool = False, portable: bool = False) -> int:
     root = git_root()
     hook_path = root / HOOKS_DIR_NAME / "pre-commit"
 
@@ -999,7 +1036,21 @@ def install_hook(force: bool = False) -> int:
         )
         return 2
 
-    write_managed_hook(hook_path)
+    # core.hooksPath is unset but a default-location hook already runs. Pointing
+    # core.hooksPath at .githooks would silently disable it - refuse unless forced.
+    if not existing_hooks_path and not force:
+        default_hook = default_pre_commit_hook(root)
+        if default_hook.is_file():
+            print(
+                f"Privacy Gate: a pre-commit hook already exists at {default_hook}. "
+                f"Setting core.hooksPath to '{HOOKS_DIR_NAME}' would silently disable it. "
+                "Re-run with --force to take over, or add 'privacy_gate.py scan --staged' "
+                "to that hook instead.",
+                file=sys.stderr,
+            )
+            return 2
+
+    write_managed_hook(hook_path, portable)
     run_git(["config", "core.hooksPath", HOOKS_DIR_NAME], cwd=root)
     print(f"Privacy Gate: installed Git hook at {hook_path}")
     print(f"Privacy Gate: core.hooksPath is now {HOOKS_DIR_NAME}")
@@ -1031,6 +1082,7 @@ def report_scan(result: ScanResult, json_output: bool) -> None:
         payload = {
             "scanned_files": result.scanned_files,
             "skipped_files": result.skipped_files,
+            "skipped_dirs": result.skipped_dirs,
             "block_count": block_count,
             "warning_count": warning_count,
             "findings": [asdict(item) for item in sorted(result.findings, key=finding_sort_key)],
@@ -1039,7 +1091,13 @@ def report_scan(result: ScanResult, json_output: bool) -> None:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return
 
-    skipped_note = f" ({result.skipped_files} skipped via {IGNORE_FILE_NAME})" if result.skipped_files else ""
+    notes = []
+    if result.skipped_files:
+        notes.append(f"{result.skipped_files} skipped via {IGNORE_FILE_NAME}")
+    if result.skipped_dirs:
+        names = sorted({PurePosixPath(d).name for d in result.skipped_dirs})
+        notes.append(f"{len(result.skipped_dirs)} dir(s) skipped structurally: {', '.join(names)}")
+    skipped_note = f" ({'; '.join(notes)})" if notes else ""
     if not result.findings:
         print(f"Privacy Gate: pass. Scanned {result.scanned_files} file(s){skipped_note}; no findings.")
         return
@@ -1096,7 +1154,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replace a foreign pre-commit hook or reassign an existing core.hooksPath",
     )
-    hook.set_defaults(func=lambda args: install_hook(args.force))
+    hook.add_argument(
+        "--portable",
+        action="store_true",
+        help="omit the installer's absolute path; rely on a vendored copy or PRIVACY_GATE_SCRIPT (use for shared repos)",
+    )
+    hook.set_defaults(func=lambda args: install_hook(args.force, args.portable))
 
     return parser
 
@@ -1106,6 +1169,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
+    except FileNotFoundError:
+        print(
+            "Privacy Gate: 'git' was not found on PATH. Install Git, or use "
+            "'scan --path <path>', which does not require Git.",
+            file=sys.stderr,
+        )
+        return 2
     except RuntimeError as exc:
         print(f"Privacy Gate: {exc}", file=sys.stderr)
         return 2
