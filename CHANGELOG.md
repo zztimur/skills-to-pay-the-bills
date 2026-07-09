@@ -11,9 +11,12 @@ repo-wide or spans more than one package.
 The current repo version lives in [`VERSION`](VERSION) and is tagged
 `repo-vX.Y.Z`.
 
-## [1.0.0] - 2026-07-09
+## [1.3.1] - 2026-07-09
 
-Initial global version marker. Snapshot of the repo as of this point, following:
+Initial global version marker, set to 1.3.1 rather than a fresh 1.0.0 to reflect
+the repo's existing maturity (matching the highest current per-skill version,
+`fbar-threshold-check` at 1.3.1) instead of implying this collection is brand
+new. Snapshot of the repo as of this point, following:
 
 - Extraction of `workpaper-kit`, the shared workpaper/proof-packet engine behind
   `get-yearly-fx-rate` and `get-year-end-fx-rate` (vendored, auto-synced
