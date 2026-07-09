@@ -130,14 +130,21 @@ def wrap_text(value: object, width: int = 92) -> list[str]:
 
 PDF_PAGE_WIDTH = 612
 PDF_PAGE_HEIGHT = 792
-PDF_MARGIN_X = 54
+PDF_MARGIN_X = 56
 PDF_INNER_WIDTH = PDF_PAGE_WIDTH - (PDF_MARGIN_X * 2)
-PDF_BOTTOM_MARGIN = 54
-PDF_COLOR_INK = (0.105, 0.145, 0.215)
-PDF_COLOR_MUTED = (0.365, 0.415, 0.485)
-PDF_COLOR_RULE = (0.815, 0.840, 0.880)
-PDF_COLOR_PANEL = (0.965, 0.978, 0.992)
-PDF_COLOR_ACCENT = (0.075, 0.265, 0.455)
+PDF_BOTTOM_MARGIN = 58
+# Refined palette: a deep brand navy and a single teal accent over warm
+# neutrals. Ink/muted/faint give a three-step text hierarchy; rule/wash are the
+# quiet structure; brand/accent carry the color.
+PDF_COLOR_INK = (0.129, 0.149, 0.196)
+PDF_COLOR_MUTED = (0.435, 0.475, 0.541)
+PDF_COLOR_FAINT = (0.569, 0.600, 0.655)
+PDF_COLOR_RULE = (0.886, 0.906, 0.933)
+PDF_COLOR_WASH = (0.965, 0.973, 0.984)
+PDF_COLOR_BRAND = (0.086, 0.204, 0.373)
+PDF_COLOR_BRAND_DEEP = (0.055, 0.149, 0.278)
+PDF_COLOR_ACCENT = (0.106, 0.482, 0.549)
+PDF_COLOR_ON_BRAND = (0.812, 0.859, 0.925)
 PDF_COLOR_WHITE = (1.000, 1.000, 1.000)
 
 
@@ -206,6 +213,7 @@ def pdf_text(
     font: str = "F1",
     size: float = 10,
     color: tuple[float, float, float] = PDF_COLOR_INK,
+    tracking: float = 0,
 ) -> str:
     if text is None:
         text = ""
@@ -213,6 +221,7 @@ def pdf_text(
         [
             "BT",
             pdf_color(color, "rg"),
+            f"{pdf_num(tracking)} Tc",
             f"/{font} {pdf_num(size)} Tf",
             f"1 0 0 1 {pdf_num(x)} {pdf_num(y)} Tm",
             f"({escape_pdf_text(str(text))}) Tj",
@@ -309,10 +318,10 @@ class WorkpaperPdfRenderer:
         self.pages.append(self.commands)
         if first:
             self.draw_cover_header()
-            self.y = 646
+            self.y = 620
         else:
             self.draw_continuation_header()
-            self.y = 724
+            self.y = 720
 
     def ensure_space(self, needed: float) -> None:
         if self.y - needed < PDF_BOTTOM_MARGIN:
@@ -321,115 +330,120 @@ class WorkpaperPdfRenderer:
     def draw_cover_header(self) -> None:
         currency = self.workpaper["currency"]
         year = self.workpaper["year"]
-        self.add(pdf_rect(0, 676, PDF_PAGE_WIDTH, 116, fill=PDF_COLOR_PANEL))
-        self.add(pdf_rect(0, 784, PDF_PAGE_WIDTH, 8, fill=PDF_COLOR_ACCENT))
-        self.add(pdf_text(self.document_title, PDF_MARGIN_X, 742, font="F2", size=22))
-        self.add(
-            pdf_text(
-                self.document_subtitle,
-                PDF_MARGIN_X,
-                720,
-                size=10,
-                color=PDF_COLOR_MUTED,
-            )
-        )
-        self.add(pdf_text(f"{currency} | {year}", PDF_MARGIN_X, 696, font="F2", size=11, color=PDF_COLOR_ACCENT))
-        self.add(pdf_rect(375, 734, 183, 24, fill=PDF_COLOR_ACCENT))
-        self.add(pdf_text("RETAINED SUPPORT WORKPAPER", 389, 742, font="F2", size=8, color=PDF_COLOR_WHITE))
+        # Full-bleed brand band with the title reversed out in white and a
+        # teal keyline along its lower edge.
+        band_bottom = 658
+        self.add(pdf_rect(0, band_bottom, PDF_PAGE_WIDTH, PDF_PAGE_HEIGHT - band_bottom, fill=PDF_COLOR_BRAND))
+        self.add(pdf_rect(0, band_bottom, PDF_PAGE_WIDTH, 3, fill=PDF_COLOR_ACCENT))
+        # status pill, upper right
+        pill_w = 192
+        pill_x = PDF_PAGE_WIDTH - PDF_MARGIN_X - pill_w
+        self.add(pdf_rect(pill_x, 752, pill_w, 17, fill=PDF_COLOR_ACCENT))
+        self.add(pdf_text("RETAINED SUPPORT WORKPAPER", pill_x + 13, 757, font="F2", size=7.5, color=PDF_COLOR_WHITE, tracking=1.1))
+        # title block
+        self.add(pdf_text(self.document_title, PDF_MARGIN_X, 720, font="F2", size=23, color=PDF_COLOR_WHITE))
+        self.add(pdf_text(self.document_subtitle, PDF_MARGIN_X, 701, size=10, color=PDF_COLOR_ON_BRAND))
+        self.add(pdf_text(f"{currency}   |   {year}", PDF_MARGIN_X, 679, font="F2", size=10.5, color=PDF_COLOR_WHITE, tracking=0.6))
 
     def draw_continuation_header(self) -> None:
-        self.add(pdf_rect(0, 762, PDF_PAGE_WIDTH, 30, fill=PDF_COLOR_PANEL))
-        self.add(pdf_rect(0, 788, PDF_PAGE_WIDTH, 4, fill=PDF_COLOR_ACCENT))
+        # slim brand ribbon carrying the document identity
+        self.add(pdf_rect(0, 756, PDF_PAGE_WIDTH, PDF_PAGE_HEIGHT - 756, fill=PDF_COLOR_BRAND))
+        self.add(pdf_rect(0, 756, PDF_PAGE_WIDTH, 2.5, fill=PDF_COLOR_ACCENT))
         self.add(
             pdf_text(
                 f"{self.workpaper['currency']} {self.workpaper['year']} {self.document_title}",
                 PDF_MARGIN_X,
-                773,
+                768,
                 font="F2",
-                size=10,
-                color=PDF_COLOR_ACCENT,
+                size=9.5,
+                color=PDF_COLOR_WHITE,
+                tracking=0.3,
             )
         )
+        self.add(pdf_text("PROOF PACKET", PDF_PAGE_WIDTH - PDF_MARGIN_X - 66, 768, font="F2", size=7.5, color=PDF_COLOR_ON_BRAND, tracking=1.4))
 
     def draw_rate_card(self) -> None:
-        height = 104
-        self.ensure_space(height + 20)
+        height = 96
+        self.ensure_space(height + 22)
         top = self.y
         bottom = top - height
+        pad = 24
         self.add(pdf_rect(PDF_MARGIN_X, bottom, PDF_INNER_WIDTH, height, fill=PDF_COLOR_WHITE, stroke=PDF_COLOR_RULE))
-        self.add(pdf_rect(PDF_MARGIN_X, top - 6, PDF_INNER_WIDTH, 6, fill=PDF_COLOR_ACCENT))
-        self.add(pdf_text("RATE", PDF_MARGIN_X + 20, top - 27, font="F2", size=8, color=PDF_COLOR_MUTED))
+        self.add(pdf_rect(PDF_MARGIN_X, bottom, 4, height, fill=PDF_COLOR_ACCENT))
+        self.add(pdf_text("EXCHANGE RATE", PDF_MARGIN_X + pad, top - 22, font="F2", size=7.5, color=PDF_COLOR_FAINT, tracking=1.6))
         self.add(
             pdf_text(
                 f"1 USD = {self.workpaper['foreign_per_usd']} {self.workpaper['currency']}",
-                PDF_MARGIN_X + 20,
-                top - 58,
+                PDF_MARGIN_X + pad,
+                top - 52,
                 font="F2",
-                size=23,
+                size=25,
             )
         )
-        self.add(pdf_text(self.rate_phrase, PDF_MARGIN_X + 20, top - 80, size=10, color=PDF_COLOR_MUTED))
+        self.add(pdf_text(self.rate_phrase, PDF_MARGIN_X + pad, top - 74, size=10, color=PDF_COLOR_MUTED))
         self.add(
             pdf_text(
                 f"Reciprocal: 1 {self.workpaper['currency']} = {self.workpaper['usd_per_foreign']} USD",
-                PDF_MARGIN_X + 235,
-                top - 80,
+                PDF_MARGIN_X + pad + 246,
+                top - 74,
                 font="F2",
-                size=10,
+                size=9.5,
                 color=PDF_COLOR_ACCENT,
             )
         )
-        self.y = bottom - 24
+        self.y = bottom - 28
 
     def draw_section_title(self, title: str) -> None:
-        self.ensure_space(34)
-        self.add(pdf_text(title.upper(), PDF_MARGIN_X, self.y, font="F2", size=10.5, color=PDF_COLOR_ACCENT))
+        self.ensure_space(32)
+        self.add(pdf_rect(PDF_MARGIN_X, self.y - 1.5, 2.5, 9, fill=PDF_COLOR_ACCENT))
+        self.add(pdf_text(title.upper(), PDF_MARGIN_X + 11, self.y, font="F2", size=9, color=PDF_COLOR_BRAND, tracking=1.3))
         self.add(pdf_line(PDF_MARGIN_X, self.y - 9, PDF_MARGIN_X + PDF_INNER_WIDTH, self.y - 9))
         self.y -= 26
 
     def draw_key_value_rows(self, rows: list[tuple[str, object]], *, continuation_title: str | None = None) -> None:
         label_x = PDF_MARGIN_X
-        value_x = PDF_MARGIN_X + 126
-        value_width = PDF_INNER_WIDTH - 126
+        value_x = PDF_MARGIN_X + 132
+        value_width = PDF_INNER_WIDTH - 132
         for label, value in rows:
-            value_lines = wrap_for_pdf(value, value_width, 9)
-            row_height = max(23, (len(value_lines) * 11) + 10)
+            value_lines = wrap_for_pdf(value, value_width, 9.5)
+            row_height = max(22, (len(value_lines) * 12) + 10)
             if self.y - (row_height + 4) < PDF_BOTTOM_MARGIN:
                 self.new_page()
                 if continuation_title:
                     self.draw_section_title(f"{continuation_title} continued")
             top = self.y
-            baseline = top - 15
-            self.add(pdf_text(label, label_x, baseline, font="F2", size=8, color=PDF_COLOR_MUTED))
+            baseline = top - 14
+            self.add(pdf_text(label, label_x, baseline, font="F2", size=7.5, color=PDF_COLOR_FAINT, tracking=0.3))
             for index, line in enumerate(value_lines):
-                self.add(pdf_text(line, value_x, baseline - (index * 11), size=9, color=PDF_COLOR_INK))
-            self.add(pdf_line(label_x, top - row_height, label_x + PDF_INNER_WIDTH, top - row_height, line_width=0.45))
+                self.add(pdf_text(line, value_x, baseline - (index * 12), size=9.5, color=PDF_COLOR_INK))
+            self.add(pdf_line(label_x, top - row_height, label_x + PDF_INNER_WIDTH, top - row_height, line_width=0.4))
             self.y = top - row_height
-        self.y -= 12
+        self.y -= 18
 
     def draw_bullets(self, items: Iterable[object]) -> None:
         for item in items:
-            lines = wrap_for_pdf(item, PDF_INNER_WIDTH - 18, 9)
-            block_height = max(16, len(lines) * 11)
-            self.ensure_space(block_height + 4)
-            baseline = self.y - 10
-            self.add(pdf_text("-", PDF_MARGIN_X, baseline, font="F2", size=9, color=PDF_COLOR_ACCENT))
+            lines = wrap_for_pdf(item, PDF_INNER_WIDTH - 20, 9.5)
+            block_height = max(15, len(lines) * 12)
+            self.ensure_space(block_height + 5)
+            baseline = self.y - 9
+            self.add(pdf_rect(PDF_MARGIN_X + 1, baseline - 1, 3.5, 3.5, fill=PDF_COLOR_ACCENT))
             for index, line in enumerate(lines):
-                self.add(pdf_text(line, PDF_MARGIN_X + 16, baseline - (index * 11), size=9))
-            self.y -= block_height + 5
-        self.y -= 8
+                self.add(pdf_text(line, PDF_MARGIN_X + 15, baseline - (index * 12), size=9.5, color=PDF_COLOR_MUTED))
+            self.y -= block_height + 6
+        self.y -= 6
 
     def draw_footer(self) -> None:
         total = len(self.pages)
         for index, commands in enumerate(self.pages, start=1):
-            commands.append(pdf_line(PDF_MARGIN_X, 36, PDF_MARGIN_X + PDF_INNER_WIDTH, 36, line_width=0.45))
+            commands.append(pdf_line(PDF_MARGIN_X, 44, PDF_MARGIN_X + PDF_INNER_WIDTH, 44, line_width=0.5))
             commands.append(
                 pdf_text(
                     f"{self.skill_name} support workpaper | Page {index} of {total}",
                     PDF_MARGIN_X,
-                    22,
-                    size=8,
-                    color=PDF_COLOR_MUTED,
+                    31,
+                    size=7.5,
+                    color=PDF_COLOR_FAINT,
+                    tracking=0.2,
                 )
             )
 
