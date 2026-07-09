@@ -80,6 +80,8 @@ python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py lookup \
   --output-root work/fx-rate-proof
 ```
 
+If the script cannot reach the IRS page (exit code 5, common in sandboxed or proxied environments), fetch the page yourself, save the HTML, and rerun `lookup` with `--html-file <saved.html>`. The workpaper records whether the snapshot was fetched live or supplied from a file.
+
 Manual workpaper for a non-IRS published annual source:
 
 ```bash
@@ -100,6 +102,8 @@ python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py manual \
 
 For non-IRS manual sources, the proof file is required. Save the source page as PDF/HTML, take a screenshot, or download the source data first. The script copies that proof into the workpaper folder and hashes it.
 
+Pass `--rate` as a plain number with no thousands separators (`4200` or `4200.00`, never `4,200`); an ambiguous value is rejected rather than silently rescaled into a workpaper. For a real ISO 4217 code the skill does not already know (outside the IRS table and its aliases), add `--allow-unknown-code` to confirm it is not a typo.
+
 ## Refresh The IRS Map
 
 The script keeps an IRS row-to-ISO map because the IRS table uses labels like `Canada Dollar` and `Mexico Peso`, not ISO codes. Check the map after IRS table changes:
@@ -115,10 +119,12 @@ If it reports unmapped rows, update `IRS_ROWS_BY_CODE` and aliases in the script
 The skill should stop instead of getting cute when:
 
 - The currency is ambiguous, like `peso`, `dollar`, or `pound`.
-- The requested year is not published yet.
+- The requested year is not published yet, or falls outside 1970-2100.
 - The source gives daily/monthly/quarterly data but no annual average.
 - There is no local proof file for a non-IRS annual source.
 - Rate direction is unclear.
+- The `--rate` value carries thousands separators or an otherwise ambiguous number format.
+- The currency code is unknown to the skill and `--allow-unknown-code` was not passed.
 - The source is a search snippet instead of a real published page or file.
 
 This is the useful kind of friction. A missing rate is better than a confident made-up one.
@@ -137,9 +143,8 @@ If the PDF layout changes, render a sample PDF and actually look at the pages. A
 Before shipping:
 
 ```bash
-python3 /Users/timur/.codex/skills/.system/skill-creator/scripts/quick_validate.py get-yearly-fx-rate
 python3 -S skill-forge/scripts/inspect_skill_package.py get-yearly-fx-rate --json --strict
 claude plugin validate --strict get-yearly-fx-rate
 ```
 
-`skill-forge` is the gatekeeper for this repo. If it complains, fix the package before pushing.
+If the Anthropic skill-creator `quick_validate.py` is installed, run it against `get-yearly-fx-rate` too; otherwise the strict inspector and `claude plugin validate` are the gate. `skill-forge` is the gatekeeper for this repo. If it complains, fix the package before pushing.
