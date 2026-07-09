@@ -99,6 +99,8 @@ Artifacts: [workpaper.pdf](<absolute path to workpaper.pdf>), [workpaper.md](<ab
 
 Use Markdown links for every retained local artifact so the chat UI can expose them as clickable/downloadable files. Wrap link targets in angle brackets because workspace paths may contain spaces. Do not wrap proof paths in backticks.
 
+A Markdown link to a local absolute path is only clickable/downloadable when the chat client has direct filesystem access to this machine, true for a local desktop session but not for a hosted/remote session (for example, Claude Code on the web) where the user's browser cannot reach this container's filesystem. When running in such a session, also deliver each retained artifact using the host's file-delivery capability (for example, Claude Code's `SendUserFile` tool) in addition to the links above.
+
 Add one short caveat only when needed, such as `Treasury/Fiscal Data did not list this currency/year, so this uses a manual year-end source.` Do not call the rate official tax advice.
 
 ## Runtime And Validation

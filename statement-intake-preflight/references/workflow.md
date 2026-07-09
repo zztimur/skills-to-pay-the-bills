@@ -91,6 +91,8 @@ After preflight, return:
 - Review gates and warnings.
 - Suggested downstream command, if the user is continuing to FBAR or interest extraction.
 
+A path (plain or as a Markdown link) is only clickable/downloadable when the chat client has direct filesystem access to this machine, true for a local desktop session but not for a hosted/remote session (for example, Claude Code on the web) where the user's browser cannot reach this container's filesystem. When running in such a session and the user needs to review the JSON/CSV directly, also deliver them using the host's file-delivery capability (for example, Claude Code's `SendUserFile` tool).
+
 Do not say any FBAR or tax-support packet is complete after preflight alone.
 
 ## 7. Maintainer Smoke Test
