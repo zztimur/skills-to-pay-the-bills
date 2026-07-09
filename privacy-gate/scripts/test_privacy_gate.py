@@ -143,6 +143,33 @@ class PrivacyGateTests(unittest.TestCase):
         self.assertIn("<REDACTED_PHONE>", redacted)
         self.assertNotIn(phone, redacted)
 
+    def test_installed_hook_blocks_without_vendored_copy(self):
+        # PG1: the generated pre-commit hook must work in a repo that does NOT
+        # vendor privacy-gate/ at its root, by falling back to the absolute
+        # script path recorded at install time.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            quiet = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
+            subprocess.run(["git", "init"], cwd=root, check=True, **quiet)
+            subprocess.run(["git", "config", "user.email", "a@b.c"], cwd=root, check=True, **quiet)
+            subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True, **quiet)
+            install = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "install-hook"],
+                cwd=root, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            self.assertEqual(install.returncode, 0, install.stderr)
+            hook_text = (root / ".githooks" / "pre-commit").read_text(encoding="utf-8")
+            self.assertIn(str(SCRIPT_PATH.resolve()), hook_text)
+            secret = "sk-" + ("C" * 32)
+            (root / "leak.txt").write_text("OPENAI_API_KEY=" + secret + "\n", encoding="utf-8")
+            subprocess.run(["git", "add", "leak.txt"], cwd=root, check=True, **quiet)
+            commit = subprocess.run(
+                ["git", "commit", "-m", "x"],
+                cwd=root, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+        self.assertNotEqual(commit.returncode, 0, "hook must block a staged secret cross-repo")
+        self.assertNotIn(secret, commit.stdout + commit.stderr)
+
     def test_staged_scan_reads_index_blob(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

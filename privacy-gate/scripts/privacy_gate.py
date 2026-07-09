@@ -779,18 +779,39 @@ def sanitize_path(path: Path, write: bool) -> int:
     return 0
 
 
+def hook_body() -> str:
+    # The scanner is resolved at hook run time so the hook works whether or not
+    # this repo vendors privacy-gate/ at its root: an explicit override wins,
+    # then a repo-vendored copy (portable for teams), then the absolute path of
+    # the script that installed the hook. If none resolve, the hook fails closed
+    # with a clear message instead of a confusing "file not found".
+    script_path = Path(__file__).resolve()
+    return (
+        "#!/usr/bin/env sh\n"
+        "set -eu\n\n"
+        "# Installed by Privacy Gate. Do not hardcode a single path here; the\n"
+        "# block below resolves the scanner across vendored and installed layouts.\n"
+        'repo_root="$(git rev-parse --show-toplevel)"\n'
+        'cd "$repo_root"\n\n'
+        'if [ -n "${PRIVACY_GATE_SCRIPT:-}" ] && [ -f "${PRIVACY_GATE_SCRIPT}" ]; then\n'
+        '  script="${PRIVACY_GATE_SCRIPT}"\n'
+        'elif [ -f "privacy-gate/scripts/privacy_gate.py" ]; then\n'
+        '  script="privacy-gate/scripts/privacy_gate.py"\n'
+        f'elif [ -f "{script_path}" ]; then\n'
+        f'  script="{script_path}"\n'
+        "else\n"
+        '  echo "Privacy Gate: scanner not found; set PRIVACY_GATE_SCRIPT or vendor privacy-gate/." >&2\n'
+        "  exit 1\n"
+        "fi\n\n"
+        'python3 "$script" scan --staged --strict\n'
+    )
+
+
 def ensure_hook_file(root: Path) -> Path:
     hook_path = root / ".githooks" / "pre-commit"
     hook_path.parent.mkdir(parents=True, exist_ok=True)
     if not hook_path.exists():
-        hook_path.write_text(
-            "#!/usr/bin/env sh\n"
-            "set -eu\n\n"
-            'repo_root="$(git rev-parse --show-toplevel)"\n'
-            'cd "$repo_root"\n\n'
-            "python3 privacy-gate/scripts/privacy_gate.py scan --staged --strict\n",
-            encoding="utf-8",
-        )
+        hook_path.write_text(hook_body(), encoding="utf-8")
     current_mode = hook_path.stat().st_mode
     hook_path.chmod(current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return hook_path
