@@ -69,9 +69,12 @@ skills and lives in the kit.
   the consumer-facing schema. `final_text` reads `rate_phrase` from there.
 - `workpaper.json` is written with `json.dumps(..., indent=2, sort_keys=True)`,
   so key order never matters and `extra_json` stays byte-compatible.
-- The PDF is yearly's engine, generalized. Driven by yearly's adapter it
-  reproduces yearly's output **byte-for-byte** (md + json + pdf); year-end
-  adopts this look, so only its `workpaper_pdf_sha256` changes.
+- The PDF engine is shared, so both skills render an identical-looking packet.
+  The extraction was proven byte-identical to yearly's pre-extraction output
+  (md + json + pdf); the PDF design has since evolved on purpose. `workpaper.md`
+  never depends on the PDF, so a design change moves only `workpaper_pdf_sha256`
+  in `workpaper.json` — when you touch the renderer, re-render a sample, look at
+  the pages, and update the golden test's structural terms.
 
 ## Vendoring & sync
 
