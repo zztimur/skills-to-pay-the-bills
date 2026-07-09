@@ -139,6 +139,8 @@ AMBIGUOUS_TERMS = {
     "krona": "Use a country or ISO code, for example SEK or ISK.",
 }
 
+KNOWN_CURRENCY_CODES = set(IRS_ROWS_BY_CODE) | set(ALIASES.values())
+
 
 class RateError(Exception):
     """User-correctable error."""
@@ -204,9 +206,6 @@ def normalize_currency(raw: str) -> str:
     text = text.replace(".", "")
     upper = text.upper()
 
-    if len(upper) == 3 and upper.isalpha():
-        return upper
-
     if text in AMBIGUOUS_TERMS:
         raise RateError(
             f"Ambiguous currency '{raw}'. {AMBIGUOUS_TERMS[text]}",
@@ -215,6 +214,9 @@ def normalize_currency(raw: str) -> str:
 
     if text in ALIASES:
         return ALIASES[text]
+
+    if len(upper) == 3 and upper.isalpha():
+        return upper
 
     for alias, code in ALIASES.items():
         if text == alias or text.endswith(" " + alias):
@@ -235,6 +237,28 @@ def parse_decimal(raw: str) -> Decimal:
     try:
         return Decimal(value)
     except InvalidOperation as exc:
+        raise RateError(f"Could not parse rate value '{raw}'.", 3) from exc
+
+
+def parse_user_rate(raw: str) -> Decimal:
+    """Strict parser for user-supplied --rate.
+
+    parse_decimal() stays lenient for trusted IRS table cells (it reads
+    European comma decimals like 0,924). User input is untrusted and
+    audit-critical, so reject any ambiguous thousands/decimal formatting
+    rather than silently rescaling. A leading '-' is allowed through so the
+    existing > 0 guard in build_rate_values owns the value check.
+    """
+    text = clean_text(raw)
+    if not re.fullmatch(r"-?\d+(\.\d+)?", text):
+        raise RateError(
+            f"Rate '{raw}' is not an unambiguous number. Use digits with an optional "
+            f"period decimal and no thousands separators, e.g. 4200, 4200.00, or 0.924.",
+            3,
+        )
+    try:
+        return Decimal(text)
+    except InvalidOperation as exc:  # pragma: no cover - regex already guards this
         raise RateError(f"Could not parse rate value '{raw}'.", 3) from exc
 
 
@@ -826,6 +850,8 @@ def create_workpaper(
     foreign_per_usd, usd_per_foreign = build_rate_values(rate, rate_direction)
     source_slug = slugify(source_title)
     folder = Path(output_root) / f"{currency_code.lower()}-{year}-{source_slug}"
+    if (folder / "workpaper.json").exists():
+        print(f"note: replacing existing workpaper packet at {folder}", file=sys.stderr)
     folder.mkdir(parents=True, exist_ok=True)
 
     proof_entries = []
@@ -1009,9 +1035,11 @@ def command_lookup(args: argparse.Namespace) -> int:
     html_bytes = html.encode("utf-8")
     html_path.write_bytes(html_bytes)
 
+    fetch_mode = "supplied local HTML file" if args.html_file else "live fetch from source URL"
     note = (
         f"IRS yearly average table row: {rate.country} {rate.currency}; "
-        f"source URL {rate.source_url}; retained HTML snapshot sha256 {sha256_bytes(html_bytes)}."
+        f"source URL {rate.source_url}; snapshot origin: {fetch_mode}; "
+        f"retained HTML snapshot sha256 {sha256_bytes(html_bytes)}."
     )
     workpaper = create_workpaper(
         output_root=args.output_root,
@@ -1033,9 +1061,15 @@ def command_lookup(args: argparse.Namespace) -> int:
 
 def command_manual(args: argparse.Namespace) -> int:
     code = normalize_currency(args.currency)
+    if code not in KNOWN_CURRENCY_CODES and not args.allow_unknown_code:
+        raise RateError(
+            f"Currency code {code} is not in this skill's known IRS/alias set. If it is a "
+            f"real ISO 4217 code, re-run with --allow-unknown-code; otherwise fix the currency.",
+            2,
+        )
     if not args.annual_average_confirmed:
         raise RateError("Pass --annual-average-confirmed after verifying the source labels the value as yearly/annual average.", 2)
-    rate = parse_decimal(args.rate)
+    rate = parse_user_rate(args.rate)
     proof_path = Path(args.proof_file)
     if not proof_path.exists():
         raise RateError(f"Proof file does not exist: {proof_path}", 2)
@@ -1116,6 +1150,22 @@ def command_self_test(_args: argparse.Namespace) -> int:
     assert find_irs_rate("CAD", 2024, sample_html, IRS_YEARLY_URL).rate == Decimal("1.370")
     assert find_irs_rate("euro", 2024, sample_html, IRS_YEARLY_URL).rate == Decimal("0.924")
 
+    assert normalize_currency("yen") == "JPY"
+    assert normalize_currency("YEN") == "JPY"
+    assert normalize_currency("CAD") == "CAD"
+    assert normalize_currency("eur") == "EUR"
+
+    assert parse_user_rate("4200") == Decimal("4200")
+    assert parse_user_rate("4200.00") == Decimal("4200.00")
+    assert parse_user_rate("0.924") == Decimal("0.924")
+    for bad in ("4,200", "0,924", "4.200,00", "4 200", "1e3", "abc", "4.", ""):
+        try:
+            parse_user_rate(bad)
+        except RateError as exc:
+            assert exc.code == 3, bad
+        else:
+            raise AssertionError(f"parse_user_rate should reject {bad!r}")
+
     try:
         normalize_currency("peso")
     except RateError as exc:
@@ -1181,6 +1231,12 @@ def command_self_test(_args: argparse.Namespace) -> int:
         assert data["proof"]["workpaper_pdf_sha256"] == sha256_file(lookup_pdf)
         assert data["proof"]["saved_files"][0]["filename"] == "irs-yearly-average-source.html"
         assert data["proof"]["saved_files"][0]["packet_relative_path"] == "irs-yearly-average-source.html"
+        assert "supplied local HTML file" in workpaper.read_text(encoding="utf-8")
+
+        rerun_err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(rerun_err):
+            command_lookup(lookup_args)
+        assert "replacing existing workpaper packet" in rerun_err.getvalue()
 
         proof_file = Path(tmp) / "proof-source.html"
         proof_file.write_text("<p>published annual average</p>", encoding="utf-8")
@@ -1194,6 +1250,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             source_category="central bank published annual average",
             source_note="Source labels this as annual average.",
             annual_average_confirmed=True,
+            allow_unknown_code=False,
             retrieved="2026-07-03",
             proof_file=str(proof_file),
             output_root=str(Path(tmp) / "manual-proof"),
@@ -1244,6 +1301,45 @@ def command_self_test(_args: argparse.Namespace) -> int:
         )
         assert manual_data["proof"]["workpaper_pdf_sha256"] == sha256_file(manual_pdf)
 
+        assert _year_arg("2024") == 2024
+        for bad in ("24", "1969", "2101", "abc"):
+            try:
+                _year_arg(bad)
+            except argparse.ArgumentTypeError:
+                pass
+            else:
+                raise AssertionError(f"_year_arg should reject {bad!r}")
+        assert _iso_date_arg("2026-07-09") == "2026-07-09"
+        for bad in ("banana", "2026-13-01", "07/09/2026"):
+            try:
+                _iso_date_arg(bad)
+            except argparse.ArgumentTypeError:
+                pass
+            else:
+                raise AssertionError(f"_iso_date_arg should reject {bad!r}")
+
+        unknown_args = argparse.Namespace(
+            currency="XQZ",
+            year=2024,
+            rate="1",
+            rate_direction="foreign-per-usd",
+            source_title="T",
+            source_url="https://x",
+            source_category="c",
+            source_note="n",
+            annual_average_confirmed=True,
+            allow_unknown_code=False,
+            retrieved="2026-07-03",
+            proof_file=str(proof_file),
+            output_root=str(Path(tmp) / "unknown-proof"),
+        )
+        try:
+            command_manual(unknown_args)
+        except RateError as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError("unknown currency code should require --allow-unknown-code")
+
         map_check_args = argparse.Namespace(
             source_url=IRS_YEARLY_URL,
             html_file=str(html_path),
@@ -1255,11 +1351,29 @@ def command_self_test(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _year_arg(raw: str) -> int:
+    try:
+        year = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"year must be an integer, got {raw!r}")
+    if not (1970 <= year <= 2100):
+        raise argparse.ArgumentTypeError(f"year {year} is outside the supported range 1970-2100")
+    return year
+
+
+def _iso_date_arg(raw: str) -> str:
+    try:
+        _dt.date.fromisoformat(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"retrieved date must be YYYY-MM-DD, got {raw!r}")
+    return raw
+
+
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--currency", required=True, help="Currency code or unambiguous currency name.")
-    parser.add_argument("--year", required=True, type=int, help="Calendar/tax year.")
+    parser.add_argument("--year", required=True, type=_year_arg, help="Calendar/tax year (1970-2100).")
     parser.add_argument("--output-root", default="work/fx-rate-proof", help="Proof output root.")
-    parser.add_argument("--retrieved", help="Retrieval date YYYY-MM-DD; defaults to today.")
+    parser.add_argument("--retrieved", type=_iso_date_arg, help="Retrieval date YYYY-MM-DD; defaults to today.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1290,6 +1404,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     manual.add_argument("--source-note", required=True, help="Note confirming the source labels the value as yearly/annual average.")
     manual.add_argument("--annual-average-confirmed", action="store_true", help="Required confirmation that the source labels the value as a yearly/annual average.")
+    manual.add_argument("--allow-unknown-code", action="store_true", help="Confirm a real ISO 4217 code that is not in the skill's known IRS/alias set.")
     manual.add_argument("--proof-file", required=True, help="Local screenshot/PDF/HTML/source proof file to copy, hash, and reference.")
     manual.set_defaults(func=command_manual)
 
