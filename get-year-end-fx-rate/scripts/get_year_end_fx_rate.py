@@ -6,11 +6,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as _dt
-import hashlib
 import io
 import json
 import re
-import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -20,6 +18,16 @@ from typing import Iterable
 from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+from _workpaper import (
+    RateError,
+    WorkpaperSpec,
+    as_abs,
+    build_workpaper,
+    final_text,
+    fmt_decimal,
+    slugify,
+)
 
 getcontext().prec = 28
 
@@ -120,14 +128,6 @@ AVERAGE_LANGUAGE = (
 )
 
 
-class RateError(Exception):
-    """User-correctable error."""
-
-    def __init__(self, message: str, code: int = 1):
-        super().__init__(message)
-        self.code = code
-
-
 @dataclass(frozen=True)
 class TreasuryRate:
     code: str
@@ -190,45 +190,8 @@ def parse_decimal(raw: object) -> Decimal:
         raise RateError(f"Could not parse rate value '{raw}'.", 3) from exc
 
 
-def fmt_decimal(value: Decimal, max_places: int = 12) -> str:
-    text = format(value, "f")
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
-    if "." in text and len(text.split(".", 1)[1]) > max_places:
-        quant = Decimal("1").scaleb(-max_places)
-        text = format(value.quantize(quant), "f").rstrip("0").rstrip(".")
-    return text
-
-
-def build_rate_values(rate: Decimal, direction: str) -> tuple[Decimal, Decimal]:
-    if rate <= 0:
-        raise RateError("Rate must be greater than zero.", 2)
-    if direction == "foreign-per-usd":
-        return rate, Decimal(1) / rate
-    if direction == "usd-per-foreign":
-        return Decimal(1) / rate, rate
-    raise RateError(f"Unsupported rate direction: {direction}", 2)
-
-
 def today_iso() -> str:
     return _dt.date.today().isoformat()
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def as_abs(path: Path) -> str:
-    return str(path.resolve())
-
-
-def slugify(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return slug or "source"
 
 
 def treasury_query_url(code: str, year: int, api_url: str) -> str:
@@ -391,447 +354,8 @@ def find_treasury_rate(currency_raw: str, year: int, json_text: str, query_url: 
     )
 
 
-def escape_pdf_text(value: object) -> str:
-    normalized = clean_text(value)
-    return normalized.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-
-
-def wrap_text(value: object, width: int = 88) -> list[str]:
-    words = clean_text(value).split()
-    if not words:
-        return [""]
-    lines: list[str] = []
-    current = ""
-    for word in words:
-        chunks = [word[index : index + width] for index in range(0, len(word), width)] or [word]
-        for chunk in chunks:
-            if not current:
-                current = chunk
-            elif len(current) + 1 + len(chunk) <= width:
-                current += " " + chunk
-            else:
-                lines.append(current)
-                current = chunk
-    if current:
-        lines.append(current)
-    return lines
-
-
-PDF_PAGE_WIDTH = 612
-PDF_PAGE_HEIGHT = 792
-PDF_MARGIN_X = 42
-PDF_BOTTOM_MARGIN = 62
-PDF_CONTENT_WIDTH = PDF_PAGE_WIDTH - (PDF_MARGIN_X * 2)
-
-PDF_INK = (0.10, 0.13, 0.18)
-PDF_MUTED = (0.39, 0.45, 0.55)
-PDF_BORDER = (0.82, 0.86, 0.91)
-PDF_SURFACE = (1.00, 1.00, 1.00)
-PDF_BACKGROUND = (0.97, 0.98, 0.99)
-PDF_NAVY = (0.09, 0.13, 0.20)
-PDF_TEAL = (0.03, 0.45, 0.53)
-
-
-def pdf_num(value: float | int) -> str:
-    return f"{float(value):.3f}".rstrip("0").rstrip(".")
-
-
-def pdf_color(color: tuple[float, float, float]) -> str:
-    return " ".join(pdf_num(component) for component in color)
-
-
-def pdf_rect(
-    x: float,
-    y: float,
-    width: float,
-    height: float,
-    *,
-    fill: tuple[float, float, float] | None = None,
-    stroke: tuple[float, float, float] | None = None,
-    line_width: float = 1,
-) -> str:
-    commands = ["q"]
-    if fill:
-        commands.append(f"{pdf_color(fill)} rg")
-    if stroke:
-        commands.append(f"{pdf_color(stroke)} RG")
-        commands.append(f"{pdf_num(line_width)} w")
-    commands.append(f"{pdf_num(x)} {pdf_num(y)} {pdf_num(width)} {pdf_num(height)} re")
-    if fill and stroke:
-        commands.append("B")
-    elif fill:
-        commands.append("f")
-    else:
-        commands.append("S")
-    commands.append("Q")
-    return "\n".join(commands)
-
-
-def pdf_line(
-    x1: float,
-    y1: float,
-    x2: float,
-    y2: float,
-    *,
-    color: tuple[float, float, float] = PDF_BORDER,
-    line_width: float = 1,
-) -> str:
-    return "\n".join(
-        [
-            "q",
-            f"{pdf_color(color)} RG",
-            f"{pdf_num(line_width)} w",
-            f"{pdf_num(x1)} {pdf_num(y1)} m",
-            f"{pdf_num(x2)} {pdf_num(y2)} l",
-            "S",
-            "Q",
-        ]
-    )
-
-
-def pdf_text(
-    text: object,
-    x: int | float,
-    y: int | float,
-    *,
-    size: int = 10,
-    font: str = "F1",
-    color: tuple[float, float, float] = PDF_INK,
-) -> str:
-    return "\n".join(
-        [
-            "BT",
-            f"{pdf_color(color)} rg",
-            f"/{font} {size} Tf",
-            f"1 0 0 1 {pdf_num(x)} {pdf_num(y)} Tm",
-            f"({escape_pdf_text(text)}) Tj",
-            "ET",
-        ]
-    )
-
-
-def pdf_chars_for_width(width: float, size: int) -> int:
-    return max(18, int(width / (size * 0.48)))
-
-
-def pdf_draw_wrapped_text(
-    commands: list[str],
-    text: object,
-    x: float,
-    y: float,
-    width: float,
-    *,
-    size: int = 9,
-    font: str = "F1",
-    color: tuple[float, float, float] = PDF_INK,
-    line_height: float | None = None,
-) -> float:
-    line_height = line_height if line_height is not None else size + 4
-    for line in wrap_text(text, pdf_chars_for_width(width, size)):
-        commands.append(pdf_text(line, x, y, size=size, font=font, color=color))
-        y -= line_height
-    return y
-
-
-def pdf_wrapped_height(text: object, width: float, *, size: int = 9, line_height: float | None = None) -> float:
-    line_height = line_height if line_height is not None else size + 4
-    return max(1, len(wrap_text(text, pdf_chars_for_width(width, size)))) * line_height
-
-
-def pdf_document_bytes_from_pages(pages: list[list[str]], *, title: str) -> bytes:
-    if not pages:
-        pages = [[pdf_text(title, PDF_MARGIN_X, PDF_PAGE_HEIGHT - 72, size=15, font="F2")]]
-
-    objects: list[bytes] = []
-    page_object_ids: list[int] = []
-    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
-    objects.append(b"")
-    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>")
-    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>")
-
-    for page_commands in pages:
-        content = "\n".join(page_commands).encode("latin-1", errors="replace")
-        content_id = len(objects) + 1
-        objects.append(
-            b"<< /Length " + str(len(content)).encode("ascii") + b" >>\nstream\n" + content + b"\nendstream"
-        )
-        page_id = len(objects) + 1
-        page_object_ids.append(page_id)
-        objects.append(
-            (
-                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PDF_PAGE_WIDTH} {PDF_PAGE_HEIGHT}] "
-                f"/Resources << /ProcSet [/PDF /Text] /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> "
-                f"/Contents {content_id} 0 R >>"
-            ).encode("ascii")
-        )
-
-    kids = " ".join(f"{page_id} 0 R" for page_id in page_object_ids)
-    objects[1] = f"<< /Type /Pages /Kids [{kids}] /Count {len(page_object_ids)} >>".encode("ascii")
-    info_id = len(objects) + 1
-    objects.append(
-        (
-            f"<< /Title ({escape_pdf_text(title)}) /Creator (get-year-end-fx-rate) "
-            f"/Producer (get-year-end-fx-rate standard-library PDF renderer) >>"
-        ).encode("latin-1", errors="replace")
-    )
-
-    output = io.BytesIO()
-    output.write(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
-    offsets = [0]
-    for object_id, payload in enumerate(objects, start=1):
-        offsets.append(output.tell())
-        output.write(f"{object_id} 0 obj\n".encode("ascii"))
-        output.write(payload)
-        output.write(b"\nendobj\n")
-
-    xref_start = output.tell()
-    output.write(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
-    output.write(b"0000000000 65535 f \n")
-    for offset in offsets[1:]:
-        output.write(f"{offset:010d} 00000 n \n".encode("ascii"))
-    output.write(
-        (
-            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R /Info {info_id} 0 R >>\n"
-            f"startxref\n{xref_start}\n%%EOF\n"
-        ).encode("ascii")
-    )
-    return output.getvalue()
-
-
-def pdf_document_bytes(lines: list[str], *, title: str) -> bytes:
-    pages: list[list[str]] = []
-    y = 664
-    commands = pdf_page_frame(title=title, badge="", page_number=1)
-
-    for raw_line in lines:
-        if y < PDF_BOTTOM_MARGIN + 28:
-            pages.append(commands)
-            commands = pdf_page_frame(title=title, badge="", page_number=len(pages) + 1)
-            y = 664
-        if raw_line == "":
-            y -= 12
-            continue
-        font = "F2" if raw_line.endswith(":") else "F1"
-        color = PDF_NAVY if raw_line.endswith(":") else PDF_INK
-        y = pdf_draw_wrapped_text(commands, raw_line, PDF_MARGIN_X, y, PDF_CONTENT_WIDTH, size=9, font=font, color=color)
-    pages.append(commands)
-    return pdf_document_bytes_from_pages(pages, title=title)
-
-
-def pdf_page_frame(*, title: str, badge: str, page_number: int) -> list[str]:
-    commands = [
-        pdf_rect(0, 0, PDF_PAGE_WIDTH, PDF_PAGE_HEIGHT, fill=PDF_BACKGROUND),
-        pdf_rect(0, 688, PDF_PAGE_WIDTH, 104, fill=PDF_NAVY),
-        pdf_rect(0, 688, PDF_PAGE_WIDTH, 4, fill=PDF_TEAL),
-        pdf_text("FBAR-STYLE SUPPORT WORKPAPER", PDF_MARGIN_X, 752, size=7, font="F2", color=(0.71, 0.94, 0.96)),
-        pdf_text(title, PDF_MARGIN_X, 726, size=20, font="F2", color=(1, 1, 1)),
-        pdf_text("Year-end exchange-rate proof packet", PDF_MARGIN_X, 706, size=9, color=(0.82, 0.87, 0.92)),
-        pdf_line(PDF_MARGIN_X, 44, PDF_PAGE_WIDTH - PDF_MARGIN_X, 44, color=(0.86, 0.89, 0.93), line_width=0.75),
-        pdf_text("Generated by get-year-end-fx-rate", PDF_MARGIN_X, 28, size=7, color=PDF_MUTED),
-        pdf_text(f"Page {page_number}", PDF_PAGE_WIDTH - 78, 28, size=7, color=PDF_MUTED),
-    ]
-    if badge:
-        badge_width = max(72, min(138, 8 * len(badge) + 28))
-        badge_x = PDF_PAGE_WIDTH - PDF_MARGIN_X - badge_width
-        commands.extend(
-            [
-                pdf_rect(badge_x, 728, badge_width, 30, fill=(0.15, 0.22, 0.32), stroke=(0.27, 0.39, 0.50)),
-                pdf_text(badge, badge_x + 14, 739, size=10, font="F2", color=(1, 1, 1)),
-            ]
-        )
-    return commands
-
-
-def pdf_section_heading(commands: list[str], title: str, y: float) -> float:
-    commands.append(pdf_text(title, PDF_MARGIN_X, y, size=11, font="F2", color=PDF_NAVY))
-    commands.append(pdf_line(PDF_MARGIN_X, y - 6, PDF_PAGE_WIDTH - PDF_MARGIN_X, y - 6, color=PDF_BORDER))
-    return y - 22
-
-
-def pdf_add_key_value(
-    commands: list[str],
-    label: str,
-    value: object,
-    y: float,
-    *,
-    x: float = PDF_MARGIN_X,
-    width: float = PDF_CONTENT_WIDTH,
-) -> float:
-    commands.append(pdf_text(label.upper(), x, y, size=7, font="F2", color=PDF_MUTED))
-    return pdf_draw_wrapped_text(commands, value, x, y - 14, width, size=9, color=PDF_INK) - 4
-
-
-def pdf_add_fact_cell(
-    commands: list[str],
-    label: str,
-    value: object,
-    x: float,
-    y: float,
-    width: float,
-    height: float,
-) -> None:
-    commands.append(pdf_rect(x, y - height, width, height, fill=PDF_SURFACE, stroke=PDF_BORDER))
-    commands.append(pdf_text(label.upper(), x + 12, y - 17, size=6, font="F2", color=PDF_MUTED))
-    pdf_draw_wrapped_text(commands, value, x + 12, y - 33, width - 24, size=9, font="F2", color=PDF_INK, line_height=11)
-
-
-def pdf_workpaper_document_bytes(workpaper: dict[str, object]) -> bytes:
-    source = workpaper["source"]
-    proof = workpaper["proof"]
-    assert isinstance(source, dict)
-    assert isinstance(proof, dict)
-    saved_files = proof.get("saved_files", [])
-    limitations = proof.get("limitations", [])
-
-    title = "Year-End FX Rate Workpaper"
-    badge = f"{workpaper['currency']} {workpaper['year']}"
-    pages: list[list[str]] = []
-    commands = pdf_page_frame(title=title, badge=badge, page_number=1)
-    y = 650
-
-    def ensure_space(needed: float) -> None:
-        nonlocal commands, y
-        if y - needed >= PDF_BOTTOM_MARGIN:
-            return
-        pages.append(commands)
-        commands = pdf_page_frame(title=title, badge=badge, page_number=len(pages) + 1)
-        y = 650
-
-    rate_line = f"1 USD = {workpaper['foreign_per_usd']} {workpaper['currency']} year-end"
-    reciprocal_line = f"1 {workpaper['currency']} = {workpaper['usd_per_foreign']} USD"
-    rate_height = pdf_wrapped_height(rate_line, PDF_CONTENT_WIDTH - 40, size=17, line_height=20)
-    card_height = 82 + max(0, rate_height - 20)
-    card_y = y - card_height
-    commands.extend(
-        [
-            pdf_rect(PDF_MARGIN_X, card_y, PDF_CONTENT_WIDTH, card_height, fill=PDF_SURFACE, stroke=PDF_BORDER),
-            pdf_rect(PDF_MARGIN_X, card_y, 5, card_height, fill=PDF_TEAL),
-            pdf_text("YEAR-END RATE", PDF_MARGIN_X + 20, card_y + card_height - 24, size=7, font="F2", color=PDF_MUTED),
-        ]
-    )
-    next_y = pdf_draw_wrapped_text(
-        commands,
-        rate_line,
-        PDF_MARGIN_X + 20,
-        card_y + card_height - 48,
-        PDF_CONTENT_WIDTH - 40,
-        size=17,
-        font="F2",
-        color=PDF_NAVY,
-        line_height=20,
-    )
-    commands.append(pdf_text(f"Year-end date: {workpaper['year_end_date']}", PDF_MARGIN_X + 20, next_y - 3, size=8, color=PDF_MUTED))
-    commands.append(pdf_text(f"Reciprocal: {reciprocal_line}", PDF_MARGIN_X + 260, next_y - 3, size=8, color=PDF_MUTED))
-    y = card_y - 28
-
-    ensure_space(132)
-    y = pdf_section_heading(commands, "Workpaper Summary", y)
-    cell_gap = 10
-    cell_width = (PDF_CONTENT_WIDTH - cell_gap) / 2
-    cell_height = 44
-    facts = [
-        ("Currency", workpaper["currency"]),
-        ("Year", workpaper["year"]),
-        ("Rate direction", workpaper["rate_direction"]),
-        ("Retrieved", source.get("retrieved")),
-    ]
-    for index, (label, value) in enumerate(facts):
-        row = index // 2
-        col = index % 2
-        x = PDF_MARGIN_X + col * (cell_width + cell_gap)
-        top_y = y - row * (cell_height + 8)
-        pdf_add_fact_cell(commands, label, value, x, top_y, cell_width, cell_height)
-    y -= (cell_height * 2) + 22
-
-    ensure_space(148)
-    y = pdf_section_heading(commands, "Source", y)
-    y = pdf_add_key_value(commands, "Title", source.get("title"), y)
-    y = pdf_add_key_value(commands, "URL", source.get("url"), y)
-    y = pdf_add_key_value(commands, "Category", source.get("category"), y)
-    y = pdf_add_key_value(commands, "Note", source.get("note"), y)
-
-    ensure_space(92)
-    y = pdf_section_heading(commands, "Source Proof", y)
-    if saved_files:
-        for index, item in enumerate(saved_files, start=1):
-            assert isinstance(item, dict)
-            entry_height = 64 + pdf_wrapped_height(item.get("sha256"), PDF_CONTENT_WIDTH - 44, size=7, line_height=9)
-            ensure_space(entry_height + 10)
-            commands.append(pdf_rect(PDF_MARGIN_X, y - entry_height, PDF_CONTENT_WIDTH, entry_height, fill=PDF_SURFACE, stroke=PDF_BORDER))
-            commands.append(pdf_text(f"Saved source {index}", PDF_MARGIN_X + 16, y - 20, size=8, font="F2", color=PDF_TEAL))
-            commands.append(
-                pdf_text(
-                    f"{item.get('filename')} (retained in this proof packet)",
-                    PDF_MARGIN_X + 16,
-                    y - 38,
-                    size=9,
-                    font="F2",
-                    color=PDF_INK,
-                )
-            )
-            commands.append(pdf_text(f"Packet path: {item.get('packet_relative_path')}", PDF_MARGIN_X + 16, y - 54, size=8, color=PDF_MUTED))
-            pdf_draw_wrapped_text(
-                commands,
-                f"SHA-256: {item.get('sha256')}",
-                PDF_MARGIN_X + 16,
-                y - 70,
-                PDF_CONTENT_WIDTH - 32,
-                size=7,
-                font="F3",
-                color=PDF_MUTED,
-                line_height=9,
-            )
-            y -= entry_height + 12
-    else:
-        y = pdf_draw_wrapped_text(
-            commands,
-            "No saved source proof file was supplied; see proof limitations.",
-            PDF_MARGIN_X,
-            y,
-            PDF_CONTENT_WIDTH,
-            size=9,
-            color=PDF_INK,
-        )
-
-    if limitations:
-        ensure_space(52 + (len(limitations) * 18))
-        y = pdf_section_heading(commands, "Proof Limitations", y)
-        for item in limitations:
-            y = pdf_draw_wrapped_text(commands, f"- {item}", PDF_MARGIN_X, y, PDF_CONTENT_WIDTH, size=9, color=PDF_INK) - 3
-
-    ensure_space(76)
-    y = pdf_section_heading(commands, "Caveats", y)
-    for item in workpaper.get("caveats", []):
-        y = pdf_draw_wrapped_text(commands, f"- {item}", PDF_MARGIN_X, y, PDF_CONTENT_WIDTH, size=8, color=PDF_MUTED) - 2
-
-    pages.append(commands)
-    return pdf_document_bytes_from_pages(pages, title=title)
-
-
 def workpaper_folder(output_root: str, currency_code: str, year: int, source_title: str) -> Path:
     return Path(output_root) / f"{currency_code.lower()}-{year}-{slugify(source_title)}"
-
-
-def copy_saved_proofs(folder: Path, saved_proofs: Iterable[Path]) -> list[dict[str, object]]:
-    entries: list[dict[str, object]] = []
-    for index, original_path in enumerate(saved_proofs, start=1):
-        if not original_path.exists():
-            raise RateError(f"Proof file does not exist: {original_path}", 2)
-        proof_path = original_path
-        if proof_path.parent.resolve() != folder.resolve():
-            copied_name = f"source-proof-{index}{proof_path.suffix}"
-            proof_path = folder / copied_name
-            shutil.copy2(original_path, proof_path)
-        entries.append(
-            {
-                "filename": proof_path.name,
-                "packet_relative_path": proof_path.name,
-                "path": as_abs(proof_path),
-                "sha256": sha256_file(proof_path),
-            }
-        )
-    return entries
 
 
 def create_workpaper(
@@ -851,158 +375,47 @@ def create_workpaper(
     proof_limitations: list[str],
     treasury_record: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    """Thin adapter over workpaper-kit's build_workpaper.
+
+    Keeps the year-end domain rule in the skill (reject average language before
+    building) and maps this skill's create_workpaper signature onto a
+    WorkpaperSpec. proof_required=True preserves the strict "raise on a missing
+    proof file" policy; the year-end-only fields (year_end_date, treasury_record,
+    purpose, source.year_end_confirmed) ride extra_json so workpaper.json keeps
+    its exact top-level shape. The PDF now uses the kit's (yearly's) engine.
+    """
     reject_average_language(source_title, source_note, source_category)
-    foreign_per_usd, usd_per_foreign = build_rate_values(rate, rate_direction)
-    folder = workpaper_folder(output_root, currency_code, year, source_title)
-    folder.mkdir(parents=True, exist_ok=True)
-
-    proof_entries = copy_saved_proofs(folder, saved_proofs)
-    if not proof_entries:
-        proof_limitations = proof_limitations + ["No saved source proof file was supplied for this manual workpaper."]
-
-    workpaper = {
-        "skill": "get-year-end-fx-rate",
-        "purpose": "FBAR-style year-end USD exchange-rate support",
-        "currency": currency_code,
-        "year": year,
-        "year_end_date": year_end_date,
-        "rate": fmt_decimal(rate),
-        "rate_direction": rate_direction,
-        "foreign_per_usd": fmt_decimal(foreign_per_usd),
-        "usd_per_foreign": fmt_decimal(usd_per_foreign),
-        "source": {
-            "title": source_title,
-            "url": source_url,
-            "category": source_category,
-            "retrieved": retrieval_date,
-            "note": source_note,
-            "year_end_confirmed": True,
-        },
-        "treasury_record": treasury_record,
-        "proof": {
-            "workpaper_md": as_abs(folder / "workpaper.md"),
-            "workpaper_json": as_abs(folder / "workpaper.json"),
-            "workpaper_pdf": as_abs(folder / "workpaper.pdf"),
-            "saved_files": proof_entries,
-            "limitations": proof_limitations,
-        },
-        "caveats": [
+    spec = WorkpaperSpec(
+        output_root=output_root,
+        skill_name="get-year-end-fx-rate",
+        currency_code=currency_code,
+        year=year,
+        rate=rate,
+        rate_direction=rate_direction,
+        source_title=source_title,
+        source_url=source_url,
+        source_category=source_category,
+        retrieval_date=retrieval_date,
+        source_note=source_note,
+        document_title="Year-End FX Rate Workpaper",
+        document_subtitle="Year-end exchange-rate proof packet",
+        rate_phrase=f"year-end ({year_end_date})",
+        caveats=[
             "This is a retained support workpaper, not legal or tax advice.",
             "Use this for year-end support only; do not reuse it as an income-tax average rate.",
         ],
-    }
-
-    (folder / "workpaper.md").write_text(render_workpaper_md(workpaper), encoding="utf-8")
-    pdf_path = folder / "workpaper.pdf"
-    pdf_path.write_bytes(render_workpaper_pdf_bytes(workpaper))
-    workpaper["proof"]["workpaper_pdf_sha256"] = sha256_file(pdf_path)  # type: ignore[index]
-    (folder / "workpaper.json").write_text(json.dumps(workpaper, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return workpaper
-
-
-def render_workpaper_md(workpaper: dict[str, object]) -> str:
-    source = workpaper["source"]
-    proof = workpaper["proof"]
-    assert isinstance(source, dict)
-    assert isinstance(proof, dict)
-    saved_files = proof.get("saved_files", [])
-    limitations = proof.get("limitations", [])
-
-    lines = [
-        "# Year-End FX Rate Workpaper",
-        "",
-        f"Currency: {workpaper['currency']}",
-        f"Year: {workpaper['year']}",
-        f"Year-end date: {workpaper['year_end_date']}",
-        f"Rate: 1 USD = {workpaper['foreign_per_usd']} {workpaper['currency']} year-end",
-        f"Reciprocal: 1 {workpaper['currency']} = {workpaper['usd_per_foreign']} USD",
-        f"Source: {source.get('title')}",
-        f"Source URL: {source.get('url')}",
-        f"Source category: {source.get('category')}",
-        f"Retrieved: {source.get('retrieved')}",
-        f"Source note: {source.get('note')}",
-        "",
-        "## Proof Files",
-        f"- Workpaper PDF: {proof.get('workpaper_pdf')}",
-    ]
-    if saved_files:
-        for item in saved_files:
-            assert isinstance(item, dict)
-            lines.append(f"- {item.get('path')} (sha256: {item.get('sha256')})")
-    else:
-        lines.append("- No saved source proof file was supplied; see proof limitations.")
-
-    if limitations:
-        lines.extend(["", "## Proof Limitations"])
-        for item in limitations:
-            lines.append(f"- {item}")
-
-    lines.extend(
-        [
-            "",
-            "## Caveats",
-            "- This is a retained support workpaper, not legal or tax advice.",
-            "- Use this for year-end support only; do not reuse it as an income-tax average rate.",
-            "",
-        ]
+        extra_rows=[("Year-end date", year_end_date)],
+        extra_json={
+            "purpose": "FBAR-style year-end USD exchange-rate support",
+            "year_end_date": year_end_date,
+            "treasury_record": treasury_record,
+            "source": {"year_end_confirmed": True},
+        },
+        saved_proofs=list(saved_proofs),
+        proof_required=True,
+        proof_limitations=proof_limitations,
     )
-    return "\n".join(lines)
-
-
-def render_workpaper_pdf_bytes(workpaper: dict[str, object]) -> bytes:
-    return pdf_workpaper_document_bytes(workpaper)
-
-
-def markdown_file_link(label: str, path: object) -> str:
-    target = clean_text(path)
-    safe_label = clean_text(label).replace("[", "\\[").replace("]", "\\]")
-    safe_target = target.replace(">", "%3E")
-    return f"[{safe_label}](<{safe_target}>)"
-
-
-def artifact_links(workpaper: dict[str, object]) -> str:
-    proof = workpaper["proof"]
-    assert isinstance(proof, dict)
-    links: list[str] = []
-    seen: set[str] = set()
-    for key, label in (
-        ("workpaper_pdf", "workpaper.pdf"),
-        ("workpaper_md", "workpaper.md"),
-        ("workpaper_json", "workpaper.json"),
-    ):
-        path = proof.get(key)
-        if path and str(path) not in seen:
-            links.append(markdown_file_link(label, path))
-            seen.add(str(path))
-
-    saved_files = proof.get("saved_files", [])
-    if isinstance(saved_files, list):
-        for item in saved_files:
-            if not isinstance(item, dict):
-                continue
-            path = item.get("path")
-            if path and str(path) not in seen:
-                links.append(markdown_file_link(Path(str(path)).name, path))
-                seen.add(str(path))
-    return ", ".join(links)
-
-
-def final_text(workpaper: dict[str, object]) -> str:
-    source = workpaper["source"]
-    proof = workpaper["proof"]
-    assert isinstance(source, dict)
-    assert isinstance(proof, dict)
-    pdf_path = proof.get("workpaper_pdf")
-    proof_link = markdown_file_link("workpaper.pdf", pdf_path) if pdf_path else ""
-    return "\n".join(
-        [
-            f"Rate: 1 USD = {workpaper['foreign_per_usd']} {workpaper['currency']} year-end ({workpaper['year_end_date']})",
-            f"Reciprocal: 1 {workpaper['currency']} = {workpaper['usd_per_foreign']} USD",
-            f"Source: {source.get('title')}, {source.get('url')}, retrieved {source.get('retrieved')}",
-            f"Proof: {proof_link}",
-            f"Artifacts: {artifact_links(workpaper)}",
-        ]
-    )
+    return build_workpaper(spec)
 
 
 def command_lookup(args: argparse.Namespace) -> int:
@@ -1161,10 +574,6 @@ def command_self_test(_args: argparse.Namespace) -> int:
     assert aed_rate.rate == Decimal("3.672")
     assert normalize_currency("uae dirham") == "AED"
 
-    foreign_per_usd, usd_per_foreign = build_rate_values(Decimal("0.25"), "usd-per-foreign")
-    assert foreign_per_usd == Decimal("4")
-    assert usd_per_foreign == Decimal("0.25")
-
     try:
         normalize_currency("peso")
     except RateError as exc:
@@ -1199,20 +608,27 @@ def command_self_test(_args: argparse.Namespace) -> int:
         assert "[treasury-fiscal-data-response.json](<" in lookup_text
         workpaper_json = next((Path(tmp) / "fbar-proof").glob("cop-2025-*/workpaper.json"))
         data = json.loads(workpaper_json.read_text(encoding="utf-8"))
+        assert data["skill"] == "get-year-end-fx-rate"
         assert data["foreign_per_usd"] == "3900.25"
         assert data["usd_per_foreign"] == "0.000256393821"
         assert data["year_end_date"] == "2025-12-31"
         assert data["source"]["year_end_confirmed"] is True
         assert data["proof"]["saved_files"][0]["filename"] == "treasury-fiscal-data-response.json"
         assert "average" not in json.dumps(data["source"]).lower()
+        # PDF now uses the kit (yearly) engine; assert the generalized layout and
+        # that year-end never renders average language.
         assert_pdf(
             Path(data["proof"]["workpaper_pdf"]),
             [
                 "Year-End FX Rate Workpaper",
-                "1 USD = 3900.25 COP year-end",
+                "RETAINED SUPPORT WORKPAPER",
+                "1 USD = 3900.25 COP",
+                "2025-12-31",
+                "Year-end date",
                 "Treasury Reporting Rates of Exchange",
-                "Source Proof",
+                "SOURCE PROOF",
                 "treasury-fiscal-data-response.json",
+                "get-year-end-fx-rate support workpaper",
             ],
             ["yearly average", "annual average"],
         )
@@ -1294,9 +710,12 @@ def command_self_test(_args: argparse.Namespace) -> int:
             Path(manual_data["proof"]["workpaper_pdf"]),
             [
                 "Year-End FX Rate Workpaper",
-                "1 USD = 4000 COP year-end",
+                "1 USD = 4000 COP",
+                "2025-12-31",
+                "Year-end date",
                 "Example Central Bank Year-End Rate",
                 "source-proof-1.html",
+                "SOURCE PROOF",
             ],
             ["yearly average", "annual average"],
         )
