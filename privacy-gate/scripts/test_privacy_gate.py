@@ -170,6 +170,69 @@ class PrivacyGateTests(unittest.TestCase):
         self.assertNotEqual(commit.returncode, 0, "hook must block a staged secret cross-repo")
         self.assertNotIn(secret, commit.stdout + commit.stderr)
 
+    def _init_repo(self, root: Path):
+        q = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
+        subprocess.run(["git", "init"], cwd=root, check=True, **q)
+        subprocess.run(["git", "config", "user.email", "a@b.c"], cwd=root, check=True, **q)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True, **q)
+
+    def _install_hook(self, root: Path, *extra):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "install-hook", *extra],
+            cwd=root, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+
+    def _hooks_path(self, root: Path) -> str:
+        return subprocess.run(
+            ["git", "config", "--get", "core.hooksPath"],
+            cwd=root, check=False, stdout=subprocess.PIPE, text=True,
+        ).stdout.strip()
+
+    def test_install_hook_refuses_foreign_hooks_path(self):
+        # PG4: do not silently disable an existing hook manager (e.g. husky).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            husky = root / ".husky"
+            husky.mkdir()
+            (husky / "pre-commit").write_text("#!/bin/sh\necho husky\n", encoding="utf-8")
+            subprocess.run(["git", "config", "core.hooksPath", ".husky"], cwd=root, check=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            refused = self._install_hook(root)
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+            self.assertEqual(self._hooks_path(root), ".husky")  # unchanged
+            forced = self._install_hook(root, "--force")
+            self.assertEqual(forced.returncode, 0, forced.stderr)
+            self.assertEqual(self._hooks_path(root), ".githooks")
+
+    def test_install_hook_refuses_foreign_precommit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            hook = root / ".githooks" / "pre-commit"
+            hook.parent.mkdir()
+            hook.write_text("#!/bin/sh\necho custom\n", encoding="utf-8")
+            refused = self._install_hook(root)
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+            self.assertIn("echo custom", hook.read_text(encoding="utf-8"))  # unchanged
+            forced = self._install_hook(root, "--force")
+            self.assertEqual(forced.returncode, 0, forced.stderr)
+            self.assertIn(privacy_gate.HOOK_MARKER, hook.read_text(encoding="utf-8"))
+
+    def test_install_hook_idempotent_refresh(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            self.assertEqual(self._install_hook(root).returncode, 0)
+            hook = root / ".githooks" / "pre-commit"
+            fresh = hook.read_text(encoding="utf-8")
+            # Simulate a stale managed hook (our marker, outdated body).
+            hook.write_text(f"#!/bin/sh\n# {privacy_gate.HOOK_MARKER}\npython3 /old/path.py scan\n",
+                            encoding="utf-8")
+            again = self._install_hook(root)  # no --force: our marker allows refresh
+            self.assertEqual(again.returncode, 0, again.stderr)
+            self.assertEqual(hook.read_text(encoding="utf-8"), fresh)  # refreshed to current
+
     def test_staged_scan_reads_index_blob(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
