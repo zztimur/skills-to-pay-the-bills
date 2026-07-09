@@ -34,6 +34,10 @@ The pattern is boring on purpose: one clear `SKILL.md`, thin platform adapters, 
 | [`fbar-threshold-check/`](fbar-threshold-check/) | You need to check whether foreign accounts crossed the FBAR threshold for a calendar year. | Account ledgers, daily aggregate threshold view, FinCEN maximum-value view, CSV, JSON, and PDF summary. |
 | [`statements-to-interest/`](statements-to-interest/) | You need to extract interest income from one institution's text PDF statements for one tax year. | IRS-oriented interest support packet with JSON/CSV review artifacts and FX confirmation gates. |
 
+### Shared Internals
+
+The two FX skills share their workpaper/proof-packet engine — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — through [`workpaper-kit/`](workpaper-kit/). It is internal plumbing, not a skill: no `SKILL.md`, no command, nothing an agent invokes. You edit one canonical file, `workpaper-kit/workpaper.py`; each skill carries a vendored, auto-synced copy (`scripts/_workpaper.py`) so it still installs standalone. Details in [`workpaper-kit/README.md`](workpaper-kit/README.md).
+
 ## Which Skill Do I Need?
 
 | If you are asking... | Start with |

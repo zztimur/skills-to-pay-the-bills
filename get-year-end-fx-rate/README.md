@@ -120,14 +120,15 @@ python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py map-check --year 20
 
 The script keeps a Treasury row-to-ISO map because Fiscal Data uses labels like `United Arab Emirates-Dirham`, not ISO codes like `AED`. Use targeted `map-check --currency <ISO>` when adding a currency. Use untargeted `map-check --year <year>` when you want to see the broader backlog of Treasury rows this helper does not map yet. If `map-check` reports unmapped rows that users actually need, update `TREASURY_ROWS_BY_CODE`, add only unambiguous aliases, and put that currency into `self-test`.
 
+The workpaper machinery — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — lives in [`workpaper-kit`](../workpaper-kit/), vendored here as `scripts/_workpaper.py` and shared with `get-yearly-fx-rate` so both proof packets look the same. Edit the canonical `workpaper-kit/workpaper.py`, never the generated copy; the pre-commit hook re-syncs it (or run `workpaper-kit/sync.sh`). The Treasury lookup, the `reject_average_language` rule, and currency handling stay here in the skill.
+
 If the PDF layout changes, render a sample PDF and actually look at it. A byte-valid PDF is nice. A readable workpaper is the point.
 
 Before shipping:
 
 ```bash
-python3 /Users/timur/.codex/skills/.system/skill-creator/scripts/quick_validate.py get-year-end-fx-rate
 python3 -S skill-forge/scripts/inspect_skill_package.py get-year-end-fx-rate --json --strict
 claude plugin validate --strict get-year-end-fx-rate
 ```
 
-`skill-forge` is the gatekeeper for this repo. If it complains, fix the package before pushing.
+If the Anthropic skill-creator `quick_validate.py` is installed, run it against `get-year-end-fx-rate` too; otherwise the strict inspector and `claude plugin validate` are the gate. `skill-forge` is the gatekeeper for this repo. If it complains, fix the package before pushing.
