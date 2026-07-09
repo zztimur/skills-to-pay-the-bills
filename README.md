@@ -126,6 +126,10 @@ scripts/release-diff.sh <skill-folder>
 
 This prints the commit log and diff scoped to that skill's directory since its latest `<skill-folder>-v*` tag (or the full history if there is no prior tag), plus the `plugin.json` version change. Pass `--from <ref>` to compare against something other than the latest tag, or `--out <path>` to write the diff to a file instead of stdout. Run `scripts/release-diff.sh --help` for the full option list.
 
+## Repository Version
+
+Per-skill versioning above is unchanged: each skill's `.claude-plugin/plugin.json` and `<skill-folder>-vX.Y.Z` tag is still the release record for that package. Separately, the repo also tracks a **global** version in [`VERSION`](VERSION) and [`CHANGELOG.md`](CHANGELOG.md) — a snapshot of the collection as a whole, bumped only for cross-cutting changes (a new or removed skill, shared infrastructure such as `workpaper-kit`, `privacy-gate`, or CI, or a repo-wide convention change), not for every individual skill release. Tagged `repo-vX.Y.Z`. See `CHANGELOG.md` for the exact bump policy.
+
 ## CI
 
 The root GitHub Actions workflow runs the checks that are stable on a clean runner:
