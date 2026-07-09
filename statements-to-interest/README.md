@@ -81,5 +81,5 @@ python statements-to-interest/scripts/statements_to_interest.py self-test
 After reinstalling, verify source/installed parity:
 
 ```bash
-diff -qr statements-to-interest /Users/timur/.codex/skills/statements-to-interest
+diff -qr statements-to-interest ~/.codex/skills/statements-to-interest
 ```
