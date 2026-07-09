@@ -84,6 +84,8 @@ Run `privacy-gate` before committing or publishing anything from this repo:
 python3 privacy-gate/scripts/privacy_gate.py scan --staged --strict
 ```
 
+To install it as a Git pre-commit hook, run `privacy_gate.py install-hook`. The default hook embeds the installing script's absolute path for solo convenience; committing that to a shared repo discloses a local path and won't resolve on teammates' machines, so use `install-hook --portable` there and pair it with a vendored `privacy-gate/` or the `PRIVACY_GATE_SCRIPT` override.
+
 Use `skill-forge` before shipping any skill change. Validate the changed package, not the repository root:
 
 ```bash

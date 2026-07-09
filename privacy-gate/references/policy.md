@@ -4,6 +4,10 @@
 
 The dependency-free CLI at `scripts/privacy_gate.py` is the source of truth. Client integrations, skills, hooks, and future CI jobs should call the CLI instead of copying detection rules.
 
+## Scan Coverage
+
+A directory scan walks the whole tree except a fixed set of high-noise, low-risk directories: VCS metadata (`.git`, `.hg`, `.svn`), tool caches (`__pycache__`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`, `coverage`, `htmlcov`), virtualenvs (`.venv`, `venv`, `env`), and `node_modules`. Build outputs (`build/`, `dist/`) are **not** skipped - they ship in packages, so they are scanned. Every structurally skipped directory is counted and named in the scan output, and `.privacygateignore` skips are reported separately, so coverage is never silently reduced.
+
 ## Blocking Findings
 
 Block commits and releases for high-confidence sensitive content:
@@ -44,7 +48,7 @@ Do not follow symlinks during direct folder scans. Scan the real target path exp
 
 Adopt the gate without disabling it, using in-repo, reviewable escape hatches:
 
-- Inline: put `privacy-gate: allow` in a comment on a line to suppress content findings on that line only. The marker travels with the code and is visible in review. It does not affect file-level blocks such as binary exports or environment files.
+- Inline: two markers, both traveling with the code and visible in review. `privacy-gate: allow` in a comment suppresses PII warnings on that line only; a high-confidence secret on the same line still blocks. `privacy-gate: allow-secret` also suppresses a secret on that line - a deliberately louder marker so a real credential is never waved through by the softer PII marker, and it relies entirely on diff review. Neither affects file-level blocks such as binary exports or environment files.
 - Path: list glob patterns in a committed `.privacygateignore` at the scan root to skip matching files or directories. The scan reports how many paths were skipped, and a symlinked ignore file is not honored.
 
 Neither mechanism hides anything silently: an inline marker lives on the suppressed line, and skipped paths are counted in the scan output. Suppression is a deliberate, reviewable act, not a way to turn the gate off.
