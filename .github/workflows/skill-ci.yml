@@ -30,12 +30,16 @@ jobs:
           python3 -S skill-forge/scripts/inspect_skill_package.py fbar-threshold-check --json --strict
           python3 -S skill-forge/scripts/inspect_skill_package.py statements-to-interest --json --strict
 
+      - name: Verify vendored workpaper-kit copies are in sync
+        run: bash workpaper-kit/sync.sh --check
+
       - name: Scan repo for secrets and private data
         run: python3 privacy-gate/scripts/privacy_gate.py scan --path . --strict
 
       - name: Run deterministic self-tests
         run: |
           python3 -S skill-forge/scripts/run_self_tests.py
+          python3 workpaper-kit/test_workpaper.py
           python3 privacy-gate/scripts/test_privacy_gate.py
           python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py self-test
           python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py self-test
