@@ -58,6 +58,14 @@ This collection links `skill-forge` as a git submodule. After cloning, initializ
 git submodule update --init --recursive
 ```
 
+Then enable the repo's tracked Git hooks once per clone (Git will not run a tracked hook otherwise):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The pre-commit hook runs the `privacy-gate` scan and auto-syncs the vendored `workpaper-kit` copies (`scripts/_workpaper.py` in each FX skill) from the canonical `workpaper-kit/workpaper.py`, staging them so they ride the same commit. Edit only the canonical source; CI runs `workpaper-kit/sync.sh --check` as a backstop. See [`workpaper-kit/README.md`](workpaper-kit/README.md) for the kit interface and sync model.
+
 ## Using A Skill
 
 Each top-level folder is its own skill package. Install or copy the package you need into your agent's skill location, then invoke it by name.
@@ -120,7 +128,8 @@ The root GitHub Actions workflow runs the checks that are stable on a clean runn
 
 - strict `skill-forge` inspection for every skill package;
 - a strict `privacy-gate` scan of the repo tree, so a stray secret or private file fails the build the same way the pre-commit hook fails a commit;
-- deterministic self-tests for the scripts that carry behavior;
+- a `workpaper-kit/sync.sh --check` backstop, so a vendored `_workpaper.py` copy that drifted from the canonical source fails the build;
+- deterministic self-tests for the scripts that carry behavior, including the `workpaper-kit` golden test;
 - no live IRS/Treasury lookups and no local-only Claude validator assumptions.
 
 Live source checks still belong in release review when the task needs them. A green badge should mean "the package still holds together," not "the internet behaved today."
