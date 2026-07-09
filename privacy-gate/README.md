@@ -33,11 +33,13 @@ python3 privacy-gate/scripts/privacy_gate.py install-hook
 
 The hook runs the staged scan. That matters because the thing in your working tree and the thing Git is about to commit are not always the same thing.
 
+The default hook embeds the installing script's absolute path, which is convenient solo but discloses a local path and won't resolve on a teammate's machine. For a shared repo use `install-hook --portable` and pair it with a vendored `privacy-gate/` or the `PRIVACY_GATE_SCRIPT` override. Pass `install-hook --force` to take over a foreign pre-commit hook or an existing `core.hooksPath`.
+
 ## What Stops The Commit
 
 `privacy-gate` blocks the stuff that should not be waved through:
 
-- Real-looking API keys, access tokens, private keys, service-account JSON, JWT-like tokens, and password assignments.
+- Real-looking API keys, access tokens, private keys, service-account JSON, JWT-like tokens, and password assignments — including secrets written as quoted JSON/dict keys (`"api_key": "..."`) and credentials embedded in connection strings (`postgres://user:<secret>@host`).
 - `.env` and local environment files, except placeholder examples like `.env.example`.
 - Generated `work/` and `outputs/` artifacts.
 - PDFs, images, spreadsheets, and office documents that the text scanner cannot safely inspect.
@@ -52,11 +54,20 @@ Some things are private only in context. Those get warnings instead of automatic
 - Emails, phone numbers, SSN/ITIN/EIN-like values, IBAN-like values, card-number-like values, account/routing-number contexts, and street-address-like lines.
 - Credential-looking filenames when the content does not prove there is a real secret inside.
 
-Warnings do not fail the normal hook. Use `--fail-on-warn` when you want a stricter review gate:
+Warnings do not fail the normal hook. Use `--fail-on-warn` (aliased `--strict`) when you want a stricter review gate:
 
 ```bash
 python3 privacy-gate/scripts/privacy_gate.py scan --path . --fail-on-warn
 ```
+
+## Allowlisting False Positives
+
+A reviewed false positive does not have to mean disabling the gate. Two inline markers leave a visible audit trail in the diff:
+
+- `privacy-gate: allow` in a comment suppresses PII **warnings** on that line. A high-confidence secret on the same line still blocks.
+- `privacy-gate: allow-secret` is required to suppress a **secret** block on that line, and relies entirely on diff review.
+
+Or list glob patterns in a committed `.privacygateignore` to skip whole paths. Neither route affects file-level blocks like binaries or `.env` files. Prefer removing and rotating a real credential over allowlisting it.
 
 ## Sanitizing Text
 
