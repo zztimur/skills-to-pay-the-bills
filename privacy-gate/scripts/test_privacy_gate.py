@@ -618,6 +618,76 @@ class PrivacyGateTests(unittest.TestCase):
     def test_text_suffixes_removed(self):
         self.assertFalse(hasattr(privacy_gate, "TEXT_SUFFIXES"))
 
+    def test_quoted_key_password_blocks(self):
+        # H1: a password in JSON/dict quoted-key form must block, not slip past
+        # the assignment reader because the name is wrapped in quotes.
+        findings = self.scan_text("config.json", '{"password": "hunter2SuperSecret99"}\n')  # privacy-gate: allow-secret
+        self.assertTrue(
+            any(f.code == "secret_password_assignment" and f.severity == "block" for f in findings),
+            [f.code for f in findings],
+        )
+
+    def test_quoted_key_credential_blocks(self):
+        # H1: quoted-key form also covers the api_key/client_secret keyword set.
+        findings = self.scan_text("settings.py", "config = {'client_secret': 'abcd1234EFGH5678ijkl9012'}\n")  # privacy-gate: allow-secret
+        self.assertTrue(
+            any(f.code == "secret_assignment" and f.severity == "block" for f in findings),
+            [f.code for f in findings],
+        )
+
+    def test_connection_string_password_blocks(self):
+        # H2: an inline credential in scheme://user:password@host must block.
+        findings = self.scan_text("db.py", 'DATABASE_URL = "postgres://admin:S3cr3tP4ssw0rd@db.example.com:5432/prod"\n')  # privacy-gate: allow-secret
+        self.assertTrue(
+            any(f.code == "secret_connection_string" and f.severity == "block" for f in findings),
+            [f.code for f in findings],
+        )
+
+    def test_connection_string_no_user_password_blocks(self):
+        # H2: userinfo without a username (redis://:pass@host) still blocks.
+        findings = self.scan_text("cache.py", 'REDIS = "redis://:AuthPassw0rd123@10.0.0.1:6379/0"\n')  # privacy-gate: allow-secret
+        self.assertTrue(
+            any(f.code == "secret_connection_string" and f.severity == "block" for f in findings),
+            [f.code for f in findings],
+        )
+
+    def test_connection_string_placeholder_allowed(self):
+        # H2: the textbook doc placeholder must not fire a false positive.
+        findings = self.scan_text("README.md", 'Example: postgres://user:password@localhost:5432/mydb\n')
+        self.assertFalse(
+            any(f.code == "secret_connection_string" for f in findings),
+            [f.code for f in findings],
+        )
+
+    def test_connection_string_interpolation_allowed(self):
+        # H2: an interpolated password is a reference, not a literal credential.
+        findings = self.scan_text("db.py", 'url = f"postgres://{user}:{pw}@host/db"\n')
+        self.assertFalse(
+            any(f.code == "secret_connection_string" for f in findings),
+            [f.code for f in findings],
+        )
+
+    def test_staged_symlink_blocks(self):
+        # M1: a staged symlink must block (matching path-scan policy) instead of
+        # being read as a tiny text blob that only trips the filename heuristic.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "real_target.txt"
+            target.write_text("aws_secret_access_key = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYz'\n", encoding="utf-8")  # privacy-gate: allow-secret
+            link = root / "link_to_config"
+            try:
+                link.symlink_to(target)
+            except OSError as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+            subprocess.run(["git", "init"], cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(["git", "add", "link_to_config"], cwd=root, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "scan", "--staged"],
+                cwd=root, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("symlink_found", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

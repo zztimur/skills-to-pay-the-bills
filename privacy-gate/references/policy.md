@@ -16,7 +16,8 @@ Block commits and releases for high-confidence sensitive content:
 - Private key files or private key blocks.
 - Service-account JSON.
 - Provider tokens that match a known shape: OpenAI, Anthropic, GitHub (classic and fine-grained), Slack, AWS access key IDs, Stripe live keys, Google API keys, GitLab tokens, npm tokens, and JWT-like tokens.
-- API key, access token, refresh token, client secret, and password assignments that look real, including when the keyword is the trailing part of a longer identifier (`DJANGO_SECRET_KEY`, `AWS_SECRET_ACCESS_KEY`, `DB_PASSWORD`).
+- API key, access token, refresh token, client secret, and password assignments that look real, including when the keyword is the trailing part of a longer identifier (`DJANGO_SECRET_KEY`, `AWS_SECRET_ACCESS_KEY`, `DB_PASSWORD`) and when the key is written in quoted JSON/dict form (`"api_key": "..."`, `'password': '...'`).
+- Credentials embedded in a connection-string / URL userinfo (`postgres://user:<secret>@host`, `redis://:<secret>@host`), unless the password is a documentation placeholder (`user:password@`) or an interpolation (`${PW}`, `{pw}`).
 - Files under generated `work/` or `outputs/` directories.
 - PDFs, images, scans, spreadsheets, and office documents, because they often carry statements, account data, or private exports that text sanitizers cannot safely inspect.
 - Binary or non-UTF-8 files (including UTF-16/UTF-32 text): the scanner cannot safely inspect them and blocks them fail-closed rather than passing them unread.
