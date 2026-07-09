@@ -34,6 +34,10 @@ The pattern is boring on purpose: one clear `SKILL.md`, thin platform adapters, 
 | [`fbar-threshold-check/`](fbar-threshold-check/) | You need to check whether foreign accounts crossed the FBAR threshold for a calendar year. | Account ledgers, daily aggregate threshold view, FinCEN maximum-value view, CSV, JSON, and PDF summary. |
 | [`statements-to-interest/`](statements-to-interest/) | You need to extract interest income from one institution's text PDF statements for one tax year. | IRS-oriented interest support packet with JSON/CSV review artifacts and FX confirmation gates. |
 
+### Shared Internals
+
+The two FX skills share their workpaper/proof-packet engine — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — through [`workpaper-kit/`](workpaper-kit/). It is internal plumbing, not a skill: no `SKILL.md`, no command, nothing an agent invokes. You edit one canonical file, `workpaper-kit/workpaper.py`; each skill carries a vendored, auto-synced copy (`scripts/_workpaper.py`) so it still installs standalone. Details in [`workpaper-kit/README.md`](workpaper-kit/README.md).
+
 ## Which Skill Do I Need?
 
 | If you are asking... | Start with |
@@ -57,6 +61,14 @@ This collection links `skill-forge` as a git submodule. After cloning, initializ
 ```bash
 git submodule update --init --recursive
 ```
+
+Then enable the repo's tracked Git hooks once per clone (Git will not run a tracked hook otherwise):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The pre-commit hook runs the `privacy-gate` scan and auto-syncs the vendored `workpaper-kit` copies (`scripts/_workpaper.py` in each FX skill) from the canonical `workpaper-kit/workpaper.py`, staging them so they ride the same commit. Edit only the canonical source; CI runs `workpaper-kit/sync.sh --check` as a backstop. See [`workpaper-kit/README.md`](workpaper-kit/README.md) for the kit interface and sync model.
 
 ## Using A Skill
 
@@ -120,7 +132,8 @@ The root GitHub Actions workflow runs the checks that are stable on a clean runn
 
 - strict `skill-forge` inspection for every skill package;
 - a strict `privacy-gate` scan of the repo tree, so a stray secret or private file fails the build the same way the pre-commit hook fails a commit;
-- deterministic self-tests for the scripts that carry behavior;
+- a `workpaper-kit/sync.sh --check` backstop, so a vendored `_workpaper.py` copy that drifted from the canonical source fails the build;
+- deterministic self-tests for the scripts that carry behavior, including the `workpaper-kit` golden test;
 - no live IRS/Treasury lookups and no local-only Claude validator assumptions.
 
 Live source checks still belong in release review when the task needs them. A green badge should mean "the package still holds together," not "the internet behaved today."

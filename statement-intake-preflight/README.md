@@ -138,7 +138,7 @@ claude plugin validate --strict statement-intake-preflight
 After reinstalling, verify source/installed parity:
 
 ```bash
-diff -qr statement-intake-preflight /Users/timur/.codex/skills/statement-intake-preflight
+diff -qr statement-intake-preflight ~/.codex/skills/statement-intake-preflight
 ```
 
 `privacy-gate` and `skill-forge` are the repo gatekeepers. If either complains, fix the package before shipping.

@@ -1,7 +1,7 @@
 {
   "name": "get-yearly-fx-rate",
   "description": "Agent-agnostic workflow for finding a cited yearly average FX rate with retained proof.",
-  "version": "1.1.1",
+  "version": "1.3.0",
   "author": {
     "name": "Timur"
   }
