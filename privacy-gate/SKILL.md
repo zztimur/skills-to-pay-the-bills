@@ -26,6 +26,8 @@ The `install-hook` command writes a `.githooks/pre-commit` that resolves the sca
 - `--fail-on-warn` (or its alias `--strict`) also fails on `WARN` findings; use it for stricter CI gates and release checks.
 - `--json` emits a structured report instead of text.
 
+Allowlist reviewed false positives without disabling the gate: put `privacy-gate: allow` in a comment on a line to suppress that line, or list glob patterns in a committed `.privacygateignore` to skip paths. Both leave a visible audit trail; see `references/policy.md`.
+
 ## Workflow
 
 1. Run `scan --staged` before committing staged changes; add `--strict` in CI to also fail on PII warnings.

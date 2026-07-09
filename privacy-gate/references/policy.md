@@ -39,3 +39,12 @@ Do not auto-sanitize credentials. Remove them, rotate them, and rerun the scan.
 Do not sanitize PDFs, images, scans, spreadsheets, or binary statement exports in place. Regenerate a sanitized source artifact instead.
 
 Do not follow symlinks during direct folder scans. Scan the real target path explicitly only after confirming it is inside the intended review boundary.
+
+## Allowlisting
+
+Adopt the gate without disabling it, using in-repo, reviewable escape hatches:
+
+- Inline: put `privacy-gate: allow` in a comment on a line to suppress content findings on that line only. The marker travels with the code and is visible in review. It does not affect file-level blocks such as binary exports or environment files.
+- Path: list glob patterns in a committed `.privacygateignore` at the scan root to skip matching files or directories. The scan reports how many paths were skipped, and a symlinked ignore file is not honored.
+
+Neither mechanism hides anything silently: an inline marker lives on the suppressed line, and skipped paths are counted in the scan output. Suppression is a deliberate, reviewable act, not a way to turn the gate off.
