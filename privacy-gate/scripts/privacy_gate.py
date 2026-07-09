@@ -754,13 +754,22 @@ def redact_text(text: str) -> str:
 
 
 def sanitize_path(path: Path, write: bool) -> int:
-    data = path.read_bytes()
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        # Missing file, a directory argument, or a permission error must exit
+        # cleanly, not raise an uncaught traceback (main only catches RuntimeError).
+        print(f"Privacy Gate: cannot read {path}: {exc}", file=sys.stderr)
+        return 2
     text = decode_text(data)
     if text is None:
         print(f"Privacy Gate: cannot sanitize binary file: {path}", file=sys.stderr)
         return 2
 
-    block_findings = [item for item in scan_bytes(str(path), data) if item.severity == "block"]
+    # Evaluate block policy on the basename only. The sanitizer acts on one
+    # explicitly chosen file, so an ancestor directory named work/ or outputs/
+    # must not falsely refuse it; credential content is still refused.
+    block_findings = [item for item in scan_bytes(path.name, data) if item.severity == "block"]
     if block_findings:
         print("Privacy Gate: refusing to sanitize credential-like or blocked content.", file=sys.stderr)
         print_findings(block_findings, json_output=False)
@@ -771,11 +780,27 @@ def sanitize_path(path: Path, write: bool) -> int:
         print(f"Privacy Gate: no sanitizer changes needed for {path}")
         return 0
 
+    # Preview the change as redacted (post-substitution) lines with line numbers.
+    # This shows exactly what will be written without echoing the raw PII values.
+    changes = [
+        (index + 1, new_line)
+        for index, (old_line, new_line) in enumerate(zip(text.splitlines(), redacted.splitlines()))
+        if old_line != new_line
+    ]
+    verb = "Redacted" if write else "Would redact"
+    print(f"Privacy Gate: {verb} {len(changes)} line(s) in {path}:")
+    for line_number, new_line in changes:
+        print(f"  {line_number}: {new_line}")
+
     if write:
-        path.write_text(redacted, encoding="utf-8")
-        print(f"Privacy Gate: sanitized {path}")
+        try:
+            path.write_text(redacted, encoding="utf-8")
+        except OSError as exc:
+            print(f"Privacy Gate: cannot write {path}: {exc}", file=sys.stderr)
+            return 2
+        print(f"Privacy Gate: wrote sanitized {path}")
     else:
-        print(f"Privacy Gate: sanitizer would modify {path}; rerun with --write to apply.")
+        print(f"Privacy Gate: rerun with --write to apply.")
     return 0
 
 

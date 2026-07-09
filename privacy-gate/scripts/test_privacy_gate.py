@@ -233,6 +233,57 @@ class PrivacyGateTests(unittest.TestCase):
             self.assertEqual(again.returncode, 0, again.stderr)
             self.assertEqual(hook.read_text(encoding="utf-8"), fresh)  # refreshed to current
 
+    def _sanitize(self, *args):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "sanitize", *args],
+            check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+
+    def test_sanitize_under_work_ancestor_not_refused(self):
+        # PG3: an ancestor directory named work/ must not falsely block an
+        # explicitly chosen sanitize target.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            work = Path(tmpdir) / "work"
+            work.mkdir()
+            target = work / "notes.txt"
+            email = "jane" + "@" + "private.test"
+            target.write_text("contact " + email + "\n", encoding="utf-8")
+            result = self._sanitize("--path", str(target), "--write")
+            content = target.read_text(encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("<REDACTED_EMAIL>", content)
+        self.assertNotIn(email, content)
+
+    def test_sanitize_preview_shows_redacted_lines_not_raw_pii(self):
+        # PG5: dry-run previews the change as redacted lines, never echoing the
+        # raw value, and does not modify the file.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "notes.txt"
+            email = "jane" + "@" + "private.test"
+            original = "email " + email + "\n"
+            target.write_text(original, encoding="utf-8")
+            result = self._sanitize("--path", str(target))
+            after = target.read_text(encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Would redact", result.stdout)
+        self.assertIn("<REDACTED_EMAIL>", result.stdout)
+        self.assertNotIn(email, result.stdout)
+        self.assertEqual(after, original)  # dry-run leaves the file untouched
+
+    def test_sanitize_missing_file_clean_error(self):
+        # PG7: missing path exits 2 cleanly, no traceback.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = self._sanitize("--path", str(Path(tmpdir) / "nope.txt"))
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("cannot read", result.stderr)
+
+    def test_sanitize_directory_clean_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = self._sanitize("--path", tmpdir)
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_staged_scan_reads_index_blob(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
