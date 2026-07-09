@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -15,6 +16,14 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable, List, Optional, Sequence, Tuple
 
 MAX_TEXT_BYTES = 1_000_000
+
+# Adoptability without disabling the gate. Both mechanisms leave a visible,
+# in-repo audit trail (the marker sits on the suppressed line; the ignore file
+# is committed and its skip count is reported), so nothing is hidden silently.
+IGNORE_FILE_NAME = ".privacygateignore"
+# A per-line escape hatch for reviewed false positives (a documented example
+# key, a fixture). Suppresses only content findings on the annotated line.
+INLINE_ALLOW_PATTERN = re.compile(r"privacy-gate:\s*allow\b", re.IGNORECASE)
 
 SKIP_DIR_NAMES = {
     ".git",
@@ -241,6 +250,38 @@ class Finding:
 class ScanResult:
     scanned_files: int
     findings: List[Finding]
+    skipped_files: int = 0
+
+
+def load_ignore_patterns(base: Path) -> List[str]:
+    """Read committed .privacygateignore glob patterns from the scan base.
+
+    The file is regular-only (a symlinked ignore file is refused, matching the
+    scanner's no-follow policy) and comment/blank lines are dropped.
+    """
+    ignore_file = base / IGNORE_FILE_NAME
+    if ignore_file.is_symlink() or not ignore_file.is_file():
+        return []
+    patterns: List[str] = []
+    for line in ignore_file.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            patterns.append(stripped.rstrip("/"))
+    return patterns
+
+
+def is_ignored(display_path: str, patterns: Sequence[str]) -> bool:
+    """True if the path or any ancestor directory matches an ignore glob."""
+    if not patterns:
+        return False
+    posix = normalize_display_path(display_path)
+    parts = posix.split("/")
+    prefixes = ["/".join(parts[: index + 1]) for index in range(len(parts))]
+    for pattern in patterns:
+        for candidate in prefixes:
+            if fnmatch.fnmatch(candidate, pattern):
+                return True
+    return False
 
 
 def normalize_display_path(path: str) -> str:
@@ -418,6 +459,11 @@ def scan_text_content(display_path: str, text: str) -> List[Finding]:
     findings: List[Finding] = []
 
     for line_number, line in enumerate(text.splitlines(), start=1):
+        if INLINE_ALLOW_PATTERN.search(line):
+            # Reviewed false positive: the marker on this line is the audit
+            # trail, visible in the diff. Skip content detection for this line
+            # only (path/file-level blocks like binary or .env are unaffected).
+            continue
         for code, label, pattern, remediation in SECRET_CONTENT_PATTERNS:
             if pattern.search(line):
                 add_line_finding(
@@ -629,6 +675,10 @@ def scan_path(path: Path) -> ScanResult:
         )
 
     base = path if path.is_dir() else path.parent
+    # Ignore patterns apply to directory scans only; an explicitly named single
+    # file is always scanned so the user is never surprised by a silent skip.
+    ignore_patterns = load_ignore_patterns(base) if path.is_dir() else []
+    skipped = 0
     if path.is_file():
         candidate_files = [path]
     else:
@@ -652,6 +702,9 @@ def scan_path(path: Path) -> ScanResult:
 
     for file_path in candidate_files:
         display = relative_display_path(file_path, base)
+        if is_ignored(display, ignore_patterns):
+            skipped += 1
+            continue
         if file_path.is_symlink():
             findings.append(symlink_finding(display))
             continue
@@ -670,7 +723,7 @@ def scan_path(path: Path) -> ScanResult:
             continue
         scanned += 1
         findings.extend(scan_bytes(display, data))
-    return ScanResult(scanned, findings)
+    return ScanResult(scanned, findings, skipped)
 
 
 def run_git(args: Sequence[str], cwd: Optional[Path] = None, check: bool = True) -> subprocess.CompletedProcess[bytes]:
@@ -705,9 +758,14 @@ def staged_blob(root: Path, path: str) -> bytes:
 
 def scan_staged() -> ScanResult:
     root = git_root()
+    ignore_patterns = load_ignore_patterns(root)
     findings: List[Finding] = []
     scanned = 0
+    skipped = 0
     for path in staged_paths(root):
+        if is_ignored(path, ignore_patterns):
+            skipped += 1
+            continue
         try:
             data = staged_blob(root, path)
         except RuntimeError as exc:
@@ -723,7 +781,7 @@ def scan_staged() -> ScanResult:
             continue
         scanned += 1
         findings.extend(scan_bytes(path, data))
-    return ScanResult(scanned, findings)
+    return ScanResult(scanned, findings, skipped)
 
 
 def redact_text(text: str) -> str:
@@ -911,6 +969,7 @@ def report_scan(result: ScanResult, json_output: bool) -> None:
     if json_output:
         payload = {
             "scanned_files": result.scanned_files,
+            "skipped_files": result.skipped_files,
             "block_count": block_count,
             "warning_count": warning_count,
             "findings": [asdict(item) for item in sorted(result.findings, key=finding_sort_key)],
@@ -919,12 +978,13 @@ def report_scan(result: ScanResult, json_output: bool) -> None:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return
 
+    skipped_note = f" ({result.skipped_files} skipped via {IGNORE_FILE_NAME})" if result.skipped_files else ""
     if not result.findings:
-        print(f"Privacy Gate: pass. Scanned {result.scanned_files} file(s); no findings.")
+        print(f"Privacy Gate: pass. Scanned {result.scanned_files} file(s){skipped_note}; no findings.")
         return
 
     print(
-        f"Privacy Gate: scanned {result.scanned_files} file(s); "
+        f"Privacy Gate: scanned {result.scanned_files} file(s){skipped_note}; "
         f"{block_count} block finding(s), {warning_count} warning(s)."
     )
     print_findings(result.findings, json_output=False)

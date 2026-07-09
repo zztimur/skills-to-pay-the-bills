@@ -308,6 +308,67 @@ class PrivacyGateTests(unittest.TestCase):
         self.assertIn("scan --staged\n", privacy_gate.hook_body())
         self.assertNotIn("--strict", privacy_gate.hook_body())
 
+    def test_inline_allow_suppresses_line(self):
+        # Chunk 6: an explicit per-line marker suppresses content findings on
+        # that line only; the same content without the marker still blocks.
+        secret = "sk-" + ("A" * 32)
+        allowed = self.scan_text("c.txt", "OPENAI_API_KEY=" + secret + "  # privacy-gate: allow\n")
+        self.assertEqual(allowed, [])
+        blocked = self.scan_text("c.txt", "OPENAI_API_KEY=" + secret + "\n")
+        self.assertTrue(any(item.severity == "block" for item in blocked))
+
+    def test_inline_allow_does_not_bypass_file_block(self):
+        # A marker in content must not bypass a file-level block (.env).
+        findings = self.scan_text(".env", "API=1  # privacy-gate: allow\n")
+        self.assertTrue(any(item.code == "secret_env_file" for item in findings))
+
+    def test_ignore_file_skips_and_counts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / ".privacygateignore").write_text("fixtures\n", encoding="utf-8")
+            (root / "fixtures").mkdir()
+            secret = "sk-" + ("A" * 32)
+            (root / "fixtures" / "sample.txt").write_text("OPENAI_API_KEY=" + secret + "\n", encoding="utf-8")
+            (root / "real.txt").write_text("OPENAI_API_KEY=" + secret + "\n", encoding="utf-8")
+            result = privacy_gate.scan_path(root)
+        self.assertTrue(any(f.path == "real.txt" and f.severity == "block" for f in result.findings))
+        self.assertFalse(any(f.path.startswith("fixtures/") for f in result.findings))
+        self.assertGreaterEqual(result.skipped_files, 1)
+
+    def test_ignore_file_symlink_not_followed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "outside_patterns").write_text("*\n", encoding="utf-8")
+            link = root / ".privacygateignore"
+            try:
+                link.symlink_to(root / "outside_patterns")
+            except OSError as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+            secret = "sk-" + ("A" * 32)
+            (root / "leak.txt").write_text("OPENAI_API_KEY=" + secret + "\n", encoding="utf-8")
+            result = privacy_gate.scan_path(root)
+        # A symlinked ignore file is not honored, so nothing is skipped by it.
+        self.assertTrue(any(f.severity == "block" and f.path == "leak.txt" for f in result.findings))
+        self.assertEqual(result.skipped_files, 0)
+
+    def test_report_never_prints_secret_value(self):
+        secret = "sk-ant-" + ("A" * 28)
+        findings = self.scan_text("c.txt", "ANTHROPIC_API_KEY=" + secret + "\n")
+        self.assertTrue(findings)
+        for item in findings:
+            self.assertNotIn(secret, item.message)
+            self.assertNotIn(secret, item.remediation)
+            self.assertNotIn(secret, item.path)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "c.txt"
+            target.write_text("ANTHROPIC_API_KEY=" + secret + "\n", encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT_PATH), "scan", "--path", str(target), "--json"],
+                check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(secret, result.stdout)
+
     def test_staged_scan_reads_index_blob(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
