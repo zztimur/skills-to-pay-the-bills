@@ -112,9 +112,10 @@ After changing this skill, run:
 
 ```bash
 python3 "<package-root>/scripts/get_year_end_fx_rate.py" self-test
-python3 /Users/timur/.codex/skills/.system/skill-creator/scripts/quick_validate.py "<package-root>"
 python3 -S skill-forge/scripts/inspect_skill_package.py "<package-root>" --json --strict
 ```
+
+If the Anthropic skill-creator `quick_validate.py` is installed, run it against `<package-root>` too.
 
 If Claude tooling is available, also run:
 
