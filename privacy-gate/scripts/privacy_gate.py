@@ -135,13 +135,62 @@ SECRET_CONTENT_PATTERNS = [
         re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
         "Remove the token and rotate it if it was real.",
     ),
+    (
+        "secret_github_fine_grained_pat",
+        "GitHub fine-grained token",
+        re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,}\b"),
+        "Remove the GitHub token and rotate it.",
+    ),
+    (
+        "secret_aws_access_key_id",
+        "AWS access key ID",
+        re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+        "Remove the AWS key, rotate it, and delete the key pair in IAM.",
+    ),
+    (
+        "secret_stripe_key",
+        "Stripe live secret key",
+        re.compile(r"\b[sr]k_live_[0-9A-Za-z]{16,}\b"),
+        "Remove the Stripe key and roll it in the Stripe dashboard.",
+    ),
+    (
+        "secret_google_api_key",
+        "Google API key",
+        re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+        "Remove the Google API key and regenerate it.",
+    ),
+    (
+        "secret_gitlab_pat",
+        "GitLab personal access token",
+        re.compile(r"\bglpat-[0-9A-Za-z_-]{20,}\b"),
+        "Remove the GitLab token and revoke it.",
+    ),
+    (
+        "secret_npm_token",
+        "npm access token",
+        re.compile(r"\bnpm_[A-Za-z0-9]{36}\b"),
+        "Remove the npm token and revoke it.",
+    ),
 ]
 
+# Match a credential keyword even when it is the trailing component of a longer
+# snake_case/kebab identifier (DJANGO_SECRET_KEY, AWS_SECRET_ACCESS_KEY). A bare
+# \b boundary fails there because "_" is a word character; the optional prefix
+# below is what closes that false-negative. Longest keyword forms come first so
+# the alternation prefers the most specific match.
+_CRED_KEYWORD = (
+    r"(?:secret[_-]?access[_-]?key|api[_-]?key|secret[_-]?key|access[_-]?key"
+    r"|access[_-]?token|client[_-]?secret|refresh[_-]?token|auth[_-]?token)"
+)
 ASSIGNMENT_PATTERN = re.compile(
-    r"(?i)\b(api[_-]?key|access[_-]?token|secret[_-]?key|client[_-]?secret|refresh[_-]?token)\b"
+    r"(?i)(?<![A-Za-z0-9])"
+    r"(?:[A-Za-z0-9]+[_-])*" + _CRED_KEYWORD + r"(?![A-Za-z0-9])"
     r"\s*[:=]\s*['\"]?([^'\"\s#]+)"
 )
-PASSWORD_ASSIGNMENT_PATTERN = re.compile(r"(?i)\bpassword\b\s*[:=]\s*['\"]?([^'\"\s#]+)")
+PASSWORD_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:[A-Za-z0-9]+[_-])*(?:password|passwd)(?![A-Za-z0-9])"
+    r"\s*[:=]\s*['\"]?([^'\"\s#]+)"
+)
 
 EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@([A-Z0-9.-]+\.[A-Z]{2,})\b", re.IGNORECASE)
 PHONE_PATTERN = re.compile(
@@ -206,6 +255,25 @@ def is_allowed_env_example(name: str) -> bool:
     return name.lower() in ALLOWED_ENV_EXAMPLES
 
 
+def is_env_secret_file(name: str) -> bool:
+    """Return True for environment files that likely hold local credentials.
+
+    Covers the dotfile forms (`.env`, `.env.production`) and suffix forms
+    (`prod.env`, `staging.env`). Known example/template names are allowed, and a
+    placeholder-word stem such as `example.env` or `sample.env` is treated as a
+    template rather than a real secrets file.
+    """
+    lower = name.lower()
+    if is_allowed_env_example(lower):
+        return False
+    if lower == ".env" or lower.startswith(".env."):
+        return True
+    if lower.endswith(".env"):
+        stem = lower[: -len(".env")].strip(".")
+        return stem not in PLACEHOLDER_WORDS
+    return False
+
+
 def is_placeholder_value(value: str) -> bool:
     stripped = value.strip().strip("'\"")
     lowered = stripped.lower()
@@ -256,7 +324,7 @@ def path_policy_findings(display_path: str) -> List[Finding]:
             )
         )
 
-    if lower_basename == ".env" or (lower_basename.startswith(".env.") and not is_allowed_env_example(lower_basename)):
+    if is_env_secret_file(lower_basename):
         findings.append(
             Finding(
                 "block",
@@ -363,7 +431,7 @@ def scan_text_content(display_path: str, text: str) -> List[Finding]:
                 )
 
         for match in ASSIGNMENT_PATTERN.finditer(line):
-            value = match.group(2)
+            value = match.group(1)
             if len(value) >= 12 and not is_placeholder_value(value):
                 add_line_finding(
                     findings,
