@@ -8,12 +8,14 @@ The dependency-free CLI at `scripts/privacy_gate.py` is the source of truth. Cli
 
 Block commits and releases for high-confidence sensitive content:
 
-- `.env`, `.env.local`, `.env.production`, and similar local environment files.
+- Environment files in dotfile form (`.env`, `.env.local`, `.env.production`) and suffix form (`prod.env`, `staging.env`); `example.env`/`sample.env` and the `.env.example` family are treated as templates.
 - Private key files or private key blocks.
 - Service-account JSON.
-- OpenAI, Anthropic, GitHub, Slack, JWT-like, API key, access token, refresh token, client secret, and password assignments that look real.
+- Provider tokens that match a known shape: OpenAI, Anthropic, GitHub (classic and fine-grained), Slack, AWS access key IDs, Stripe live keys, Google API keys, GitLab tokens, npm tokens, and JWT-like tokens.
+- API key, access token, refresh token, client secret, and password assignments that look real, including when the keyword is the trailing part of a longer identifier (`DJANGO_SECRET_KEY`, `AWS_SECRET_ACCESS_KEY`, `DB_PASSWORD`).
 - Files under generated `work/` or `outputs/` directories.
 - PDFs, images, scans, spreadsheets, and office documents, because they often carry statements, account data, or private exports that text sanitizers cannot safely inspect.
+- Binary or non-UTF-8 files (including UTF-16/UTF-32 text): the scanner cannot safely inspect them and blocks them fail-closed rather than passing them unread.
 - Missing scan paths, symlinked paths, and text files that exceed the bounded full-read limit.
 
 ## Warning Findings
@@ -37,3 +39,12 @@ Do not auto-sanitize credentials. Remove them, rotate them, and rerun the scan.
 Do not sanitize PDFs, images, scans, spreadsheets, or binary statement exports in place. Regenerate a sanitized source artifact instead.
 
 Do not follow symlinks during direct folder scans. Scan the real target path explicitly only after confirming it is inside the intended review boundary.
+
+## Allowlisting
+
+Adopt the gate without disabling it, using in-repo, reviewable escape hatches:
+
+- Inline: put `privacy-gate: allow` in a comment on a line to suppress content findings on that line only. The marker travels with the code and is visible in review. It does not affect file-level blocks such as binary exports or environment files.
+- Path: list glob patterns in a committed `.privacygateignore` at the scan root to skip matching files or directories. The scan reports how many paths were skipped, and a symlinked ignore file is not honored.
+
+Neither mechanism hides anything silently: an inline marker lives on the suppressed line, and skipped paths are counted in the scan output. Suppression is a deliberate, reviewable act, not a way to turn the gate off.
