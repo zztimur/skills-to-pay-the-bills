@@ -34,6 +34,60 @@ class PrivacyGateTests(unittest.TestCase):
         self.assertTrue(any(item.code == "secret_openai_api_key" for item in findings))
         self.assertTrue(any(item.severity == "block" for item in findings))
 
+    def test_prefixed_credential_assignments_block(self):
+        # The keyword is the trailing component of a longer identifier; a bare
+        # \b boundary missed these before. Lines are assembled from split
+        # literals so this test file stays clean under the gate's own scan.
+        eq = " = "
+        cases = {
+            "settings.py": "DJANGO_SECRET_KEY" + eq + "x7Kj9mPqR2wN8vB4tY6uI1oL3eF5gH0z",
+            "db.cfg": "DB_PASSWORD" + eq + "SuperReal" + "-Passw0rd!",
+            "aws.cfg": "AWS_SECRET_ACCESS_KEY" + eq + "wJalrXUtnFEMI" + "K7bPxRfiCYz99KEY",
+        }
+        for path, text in cases.items():
+            findings = self.scan_text(path, text + "\n")
+            self.assertTrue(
+                any(item.severity == "block" for item in findings),
+                f"{path} should block: {findings}",
+            )
+
+    def test_provider_tokens_block(self):
+        cases = {
+            "secret_aws_access_key_id": "id = AKIA" + ("Q" * 16),
+            "secret_stripe_key": "key=sk_live_" + ("a" * 24),
+            "secret_google_api_key": "GMAPS=AIza" + ("b" * 35),
+            "secret_gitlab_pat": "token: glpat-" + ("c" * 20),
+            "secret_github_fine_grained_pat": "gh=github_pat_" + ("d" * 30),
+            "secret_npm_token": "npm=npm_" + ("e" * 36),
+        }
+        for code, text in cases.items():
+            findings = self.scan_text("conf.txt", text + "\n")
+            self.assertTrue(
+                any(item.code == code and item.severity == "block" for item in findings),
+                f"{code} not detected in {text!r}: {[f.code for f in findings]}",
+            )
+
+    def test_prefixed_placeholder_still_allowed(self):
+        text = "DJANGO_SECRET_KEY = <YOUR_SECRET_KEY>\nDB_PASSWORD=changeme\n"
+        findings = self.scan_text("example.md", text)
+        self.assertEqual(findings, [])
+
+    def test_env_suffix_file_blocks(self):
+        for name in ("prod.env", "staging.env", "production.env"):
+            findings = self.scan_text(name, "API=1\n")
+            self.assertTrue(
+                any(item.code == "secret_env_file" for item in findings),
+                f"{name} should block as an env file",
+            )
+
+    def test_env_template_suffix_allowed(self):
+        for name in ("example.env", "sample.env", ".env.example"):
+            findings = self.scan_text(name, "API=1\n")
+            self.assertFalse(
+                any(item.code == "secret_env_file" for item in findings),
+                f"{name} should be treated as a template",
+            )
+
     def test_generated_artifact_path_blocks(self):
         findings = self.scan_text("work/interest-analysis.json", "{}\n")
         self.assertTrue(any(item.code == "generated_artifact_path" for item in findings))
