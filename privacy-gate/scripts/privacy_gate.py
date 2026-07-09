@@ -834,7 +834,9 @@ def hook_body() -> str:
         '  echo "Privacy Gate: scanner not found; set PRIVACY_GATE_SCRIPT or vendor privacy-gate/." >&2\n'
         "  exit 1\n"
         "fi\n\n"
-        'python3 "$script" scan --staged --strict\n'
+        # Default gate: block the commit on high-confidence secrets, print PII
+        # warnings without blocking. Add --strict here to also fail on warnings.
+        'python3 "$script" scan --staged\n'
     )
 
 
@@ -943,7 +945,7 @@ def command_scan(args: argparse.Namespace) -> int:
     else:
         result = scan_path(Path(args.path))
     report_scan(result, args.json)
-    return exit_code_for(result, args.fail_on_warn)
+    return exit_code_for(result, args.fail_on_warn or args.strict)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -957,7 +959,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan_source = scan.add_mutually_exclusive_group()
     scan_source.add_argument("--staged", action="store_true", help="scan Git staged blobs")
     scan_source.add_argument("--path", default=".", help="file or folder to scan")
-    scan.add_argument("--strict", action="store_true", help="hook/CI-friendly alias; block findings fail")
+    scan.add_argument("--strict", action="store_true", help="strict CI gate: warnings fail too (alias for --fail-on-warn)")
     scan.add_argument("--fail-on-warn", action="store_true", help="exit nonzero for warning findings too")
     scan.add_argument("--json", action="store_true", help="emit structured JSON")
     scan.set_defaults(func=command_scan)
