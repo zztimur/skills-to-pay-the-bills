@@ -119,6 +119,7 @@ This prints the commit log and diff scoped to that skill's directory since its l
 The root GitHub Actions workflow runs the checks that are stable on a clean runner:
 
 - strict `skill-forge` inspection for every skill package;
+- a strict `privacy-gate` scan of the repo tree, so a stray secret or private file fails the build the same way the pre-commit hook fails a commit;
 - deterministic self-tests for the scripts that carry behavior;
 - no live IRS/Treasury lookups and no local-only Claude validator assumptions.
 
