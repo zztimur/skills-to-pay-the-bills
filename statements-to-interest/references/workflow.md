@@ -252,6 +252,8 @@ After generating and verifying the PDF, return a concise summary with the PDF fi
 - Warnings, excluded candidates, or confirmation decisions.
 - A reminder that this is a support worksheet, not an official IRS form or tax advice.
 
+A path (plain or as a Markdown link) is only clickable/downloadable when the chat client has direct filesystem access to this machine, true for a local desktop session but not for a hosted/remote session (for example, Claude Code on the web) where the user's browser cannot reach this container's filesystem. When running in such a session, also deliver the support PDF, analysis JSON, and any FX workpaper/source proof artifacts using the host's file-delivery capability (for example, Claude Code's `SendUserFile` tool).
+
 Example:
 
 ```text
