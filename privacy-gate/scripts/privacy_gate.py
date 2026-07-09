@@ -183,6 +183,21 @@ CRED_NAME_SUFFIX = re.compile(
 )
 PASSWORD_NAME_SUFFIX = re.compile(r"(?:^|[_-])(?:password|passwd)$", re.IGNORECASE)
 
+# A credential embedded in a connection-string / URL userinfo:
+# scheme://user:password@host (postgres, mysql, mongodb, redis, amqp, ...).
+# The user part is optional (redis://:pass@host); the password is captured so
+# placeholders and interpolations can be filtered before blocking.
+CONNECTION_STRING_PATTERN = re.compile(
+    r"\b[a-z][a-z0-9+.\-]*://[^\s:/@]*:([^\s/@]+)@",
+    re.IGNORECASE,
+)
+# Literal words that are the textbook connection-string placeholder rather than
+# a real credential (postgres://user:password@localhost). Kept separate from
+# PLACEHOLDER_WORDS so this precision only relaxes the URL-userinfo detector.
+CONNECTION_STRING_PLACEHOLDERS = frozenset(
+    {"password", "passwd", "pass", "pwd", "secret", "user", "username", "credentials", "token"}
+)
+
 # A dotted attribute chain such as settings.SECRET_KEY or os.environ.get.
 _DOTTED_REFERENCE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
 
@@ -211,6 +226,11 @@ def iter_assignments(line: str) -> Iterable[Tuple[str, str]]:
     for separator in _ASSIGNMENT_SEPARATOR.finditer(line):
         left = line[: separator.start()].rstrip()
         end = len(left)
+        # A quoted key such as "api_key": ... or 'password': ... in JSON/dict
+        # literals: step over the closing quote so the name read below sees the
+        # identifier instead of stopping dead on the quote.
+        if end > 0 and left[end - 1] in "'\"":
+            end -= 1
         start = end
         while start > 0 and (left[start - 1].isalnum() or left[start - 1] in "_-"):
             start -= 1
@@ -527,6 +547,25 @@ def scan_text_content(display_path: str, text: str) -> List[Finding]:
                     )
                     password_flagged = True
 
+            for match in CONNECTION_STRING_PATTERN.finditer(line):
+                userinfo_pw = match.group(1)
+                # Skip placeholders (postgres://user:password@host) and
+                # interpolations (${PW}, {pw}, $PW) - those are not literals.
+                if is_placeholder_value(userinfo_pw) or userinfo_pw.lower() in CONNECTION_STRING_PLACEHOLDERS:
+                    continue
+                if "{" in userinfo_pw or "}" in userinfo_pw or userinfo_pw.startswith("$"):
+                    continue
+                add_line_finding(
+                    findings,
+                    "block",
+                    "secret_connection_string",
+                    display_path,
+                    line_number,
+                    "possible password in a connection string found",
+                    "Remove the inline credential and rotate it; use an env var or secret store.",
+                )
+                break
+
         if not allow_any:
             for match in EMAIL_PATTERN.finditer(line):
                 if not is_example_email(match):
@@ -831,11 +870,33 @@ def staged_gitlinks(root: Path, paths: Sequence[str]) -> Set[str]:
     return gitlinks
 
 
+def staged_symlinks(root: Path, paths: Sequence[str]) -> Set[str]:
+    """Staged paths that are symlinks (mode 120000) rather than regular blobs.
+
+    A staged symlink's blob is just its target path string, so reading it as
+    content only ever sees that path - the real target is never inspected and a
+    secret it points to slips through. Path scans already block symlinks; block
+    them here too so `--staged` matches that policy instead of waving them by.
+    """
+    if not paths:
+        return set()
+    result = run_git(["ls-files", "-s", "-z", "--", *paths], cwd=root)
+    symlinks: Set[str] = set()
+    for entry in result.stdout.split(b"\x00"):
+        if not entry:
+            continue
+        meta, _, entry_path = entry.partition(b"\t")
+        if meta.split(b" ", 1)[0] == b"120000":
+            symlinks.add(entry_path.decode("utf-8", errors="surrogateescape"))
+    return symlinks
+
+
 def scan_staged() -> ScanResult:
     root = git_root()
     ignore_patterns = load_ignore_patterns(root)
     paths = staged_paths(root)
     gitlinks = staged_gitlinks(root, paths)
+    symlinks = staged_symlinks(root, paths)
     findings: List[Finding] = []
     scanned = 0
     skipped = 0
@@ -845,6 +906,9 @@ def scan_staged() -> ScanResult:
             continue
         if path in gitlinks:
             skipped += 1
+            continue
+        if path in symlinks:
+            findings.append(symlink_finding(path))
             continue
         try:
             data = staged_blob(root, path)
