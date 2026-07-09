@@ -419,6 +419,85 @@ def test_helpers() -> None:
         raise AssertionError("unknown direction must raise")
 
 
+def test_hardening_boundary() -> None:
+    """Adversarial inputs at the trust boundary fail cleanly — never crash,
+    escape the output root, or depend on ambient global state."""
+    from decimal import getcontext
+
+    # Non-finite rates -> clean RateError (NaN <= 0 would raise InvalidOperation;
+    # Infinity would slip a garbage rate through).
+    for bad in (Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")):
+        try:
+            wp.build_rate_values(bad, "foreign-per-usd")
+        except wp.RateError as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError(f"non-finite rate {bad} must raise")
+
+    # The reciprocal is independent of the caller's ambient decimal precision.
+    original = getcontext().prec
+    try:
+        getcontext().prec = 28
+        a = wp.fmt_decimal(wp.build_rate_values(Decimal("3900.25"), "foreign-per-usd")[1])
+        getcontext().prec = 5
+        b = wp.fmt_decimal(wp.build_rate_values(Decimal("3900.25"), "foreign-per-usd")[1])
+        assert a == b == "0.000256393821", (a, b)
+    finally:
+        getcontext().prec = original
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        root = tmp / "out"
+        proof = tmp / "p.txt"
+        proof.write_bytes(b"x\n")
+
+        def spec(**kw: object) -> wp.WorkpaperSpec:
+            base = dict(
+                output_root=str(root), skill_name="kit", currency_code="CAD", year=2024,
+                rate=Decimal("1.37"), rate_direction="foreign-per-usd", source_title="Src",
+                source_url="u", source_category="c", retrieval_date="2026-01-01", source_note="n",
+                document_title="T", document_subtitle="s", rate_phrase="p", caveats=["c"],
+            )
+            base.update(kw)
+            return wp.WorkpaperSpec(**base)  # type: ignore[arg-type]
+
+        # currency_code cannot inject path traversal (slugged into the folder name)
+        w = wp.build_workpaper(spec(currency_code="../../PWNED", saved_proofs=[proof]))
+        folder = Path(w["proof"]["workpaper_json"]).parent.resolve()  # type: ignore[index]
+        assert str(folder).startswith(str(root.resolve())), folder
+        assert folder.name == "pwned-2024-src", folder.name
+
+        # a non-int year is rejected rather than injected into the path
+        try:
+            wp.build_workpaper(spec(year="2024/../etc", saved_proofs=[proof]))
+        except wp.RateError as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError("non-int year must raise")
+
+        # a directory as a required proof -> clean RateError, not IsADirectoryError
+        adir = tmp / "adir"
+        adir.mkdir()
+        try:
+            wp.build_workpaper(spec(currency_code="AUD", saved_proofs=[adir], proof_required=True))
+        except wp.RateError as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError("directory proof must raise when required")
+        # ...and is tolerantly skipped (no crash) when not required
+        w2 = wp.build_workpaper(spec(currency_code="EUR", saved_proofs=[adir], proof_required=False))
+        assert w2["proof"]["saved_files"] == []  # type: ignore[index]
+
+        # extra_json cannot overwrite reserved keys or supply a non-dict source
+        for bad_extra in ({"skill": "hijacked"}, {"proof": {"saved_files": "no"}}, {"source": "x"}):
+            try:
+                wp.build_workpaper(spec(currency_code="GBP", saved_proofs=[proof], extra_json=bad_extra))
+            except wp.RateError as exc:
+                assert exc.code == 2
+            else:
+                raise AssertionError(f"extra_json {bad_extra} must raise")
+
+
 def main() -> int:
     tests = [
         test_yearly_golden_md_and_json,
@@ -428,6 +507,7 @@ def main() -> int:
         test_overwrite_warning,
         test_link_and_artifact_helpers,
         test_helpers,
+        test_hardening_boundary,
     ]
     for test in tests:
         test()
