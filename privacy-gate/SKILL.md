@@ -9,14 +9,16 @@ Use this skill when repository content needs a privacy and secret check before c
 
 ## Core Rule
 
-Call the bundled CLI. Do not reimplement detection logic in chat or in a client-specific adapter.
+Call the bundled CLI. Do not reimplement detection logic in chat or in a client-specific adapter. `<package-root>` below means the directory containing this SKILL.md (for example the installed skill path or a vendored `privacy-gate/`).
 
 ```bash
-python3 privacy-gate/scripts/privacy_gate.py scan --staged --strict
-python3 privacy-gate/scripts/privacy_gate.py scan --path .
-python3 privacy-gate/scripts/privacy_gate.py sanitize --path <file> --write
-python3 privacy-gate/scripts/privacy_gate.py install-hook
+python3 "<package-root>/scripts/privacy_gate.py" scan --staged --strict
+python3 "<package-root>/scripts/privacy_gate.py" scan --path .
+python3 "<package-root>/scripts/privacy_gate.py" sanitize --path FILE --write
+python3 "<package-root>/scripts/privacy_gate.py" install-hook
 ```
+
+The `install-hook` command writes a `.githooks/pre-commit` that resolves the scanner at run time (a vendored copy, an installed absolute path, or the `PRIVACY_GATE_SCRIPT` override), so it keeps working from any repository, not only one that vendors `privacy-gate/`.
 
 ## Workflow
 
