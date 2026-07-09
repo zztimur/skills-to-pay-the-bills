@@ -344,6 +344,43 @@ def load_html(source_url: str, html_file: str | None) -> tuple[str, str]:
         raise RateError(f"Could not fetch IRS yearly average page: {exc}", 5) from exc
 
 
+def _norm_tokens(label: str) -> list[str]:
+    label = re.sub(r"\(.*?\)", " ", label.lower())  # drop parentheticals like "(Fuerte)"
+    label = re.sub(r"[^a-z0-9 ]", " ", label)
+    return [tok for tok in label.split() if tok]
+
+
+def labels_match(expected: str, candidate: str) -> bool:
+    """Return True when two IRS country/currency labels refer to the same thing.
+
+    The IRS table wording drifts over time (South Korea/South Korean,
+    Krone/Kroner, New Lira/Lira, Bolivar (Fuerte)/Bolivar). Match on
+    normalized tokens with prefix tolerance so a minor relabel does not
+    silently break a lookup, while keeping distinct currencies apart
+    (Rial vs Riyal, Iceland Krona vs Sweden Krona are still disjoint by
+    their country token). Both find_irs_rate and map-check use this, so a
+    clean map-check guarantees the lookups it validates.
+    """
+    expected_tokens = _norm_tokens(expected)
+    candidate_tokens = _norm_tokens(candidate)
+    if not expected_tokens or not candidate_tokens:
+        return False
+    short, long = sorted((expected_tokens, candidate_tokens), key=len)
+    used = [False] * len(long)
+    for stok in short:
+        matched = False
+        for i, ltok in enumerate(long):
+            if used[i]:
+                continue
+            if stok == ltok or (len(stok) >= 3 and len(ltok) >= 3 and (stok.startswith(ltok) or ltok.startswith(stok))):
+                used[i] = True
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
+
+
 def find_irs_rate(currency_raw: str, year: int, html: str, source_url: str) -> IrsRate:
     code = normalize_currency(currency_raw)
     if code not in IRS_ROWS_BY_CODE:
@@ -359,9 +396,7 @@ def find_irs_rate(currency_raw: str, year: int, html: str, source_url: str) -> I
 
     row = None
     for candidate in table:
-        candidate_country = str(candidate["country"]).lower()
-        candidate_currency = str(candidate["currency"]).lower()
-        if country.lower() in candidate_country and currency.lower() in candidate_currency:
+        if labels_match(country, str(candidate["country"])) and labels_match(currency, str(candidate["currency"])):
             row = candidate
             break
 
@@ -1098,12 +1133,15 @@ def command_map_check(args: argparse.Namespace) -> int:
     if not table:
         raise RateError("Could not parse the IRS yearly-average table from the source page.", 3)
 
-    mapped_pairs = {(country.lower(), currency.lower()) for country, currency in IRS_ROWS_BY_CODE.values()}
     unmapped = []
     for row in table:
-        pair = (str(row["country"]).lower(), str(row["currency"]).lower())
-        if pair not in mapped_pairs:
-            unmapped.append(f"{row['country']} {row['currency']}")
+        row_country = str(row["country"])
+        row_currency = str(row["currency"])
+        if not any(
+            labels_match(map_country, row_country) and labels_match(map_currency, row_currency)
+            for map_country, map_currency in IRS_ROWS_BY_CODE.values()
+        ):
+            unmapped.append(f"{row_country} {row_currency}")
 
     print(f"Parsed IRS yearly-average rows: {len(table)} from {source_ref}")
     print(f"Mapped rows: {len(table) - len(unmapped)}")
@@ -1149,6 +1187,40 @@ def command_self_test(_args: argparse.Namespace) -> int:
     assert len(table) == 3, table
     assert find_irs_rate("CAD", 2024, sample_html, IRS_YEARLY_URL).rate == Decimal("1.370")
     assert find_irs_rate("euro", 2024, sample_html, IRS_YEARLY_URL).rate == Decimal("0.924")
+
+    # Patch 1: label matching tolerates IRS wording drift but keeps currencies disjoint
+    assert labels_match("South Korean", "South Korea")
+    assert labels_match("Kroner", "Krone")
+    assert labels_match("New Lira", "Lira")
+    assert labels_match("Bolivar (Fuerte)", "Bolivar")
+    assert labels_match("New Shekel", "Shekel")
+    assert not labels_match("Denmark", "Norway")
+    assert not labels_match("Rial", "Riyal")
+    assert not labels_match("Won", "Yen")
+    drift_html = (
+        "<table><tr><th>Country</th><th>Currency</th><th>2024</th></tr>"
+        "<tr><td>South Korea</td><td>Won</td><td>1360</td></tr>"
+        "<tr><td>Norway</td><td>Krone</td><td>10.5</td></tr>"
+        "<tr><td>Turkey</td><td>Lira</td><td>32.9</td></tr></table>"
+    )
+    assert find_irs_rate("KRW", 2024, drift_html, IRS_YEARLY_URL).rate == Decimal("1360")
+    assert find_irs_rate("NOK", 2024, drift_html, IRS_YEARLY_URL).rate == Decimal("10.5")
+    assert find_irs_rate("TRY", 2024, drift_html, IRS_YEARLY_URL).rate == Decimal("32.9")
+    sweden_html = (
+        "<table><tr><th>Country</th><th>Currency</th><th>2024</th></tr>"
+        "<tr><td>Sweden</td><td>Krona</td><td>10.6</td></tr></table>"
+    )
+    try:
+        find_irs_rate("ISK", 2024, sweden_html, IRS_YEARLY_URL)
+    except RateError as exc:
+        assert exc.code == 4
+    else:
+        raise AssertionError("ISK must not match a Sweden Krona row")
+
+    # Patch 3: table-less HTML resolves through the text fallback parser
+    fallback_html = "<div>Country Currency 2024 2023</div><p>Canada Dollar 1.370 1.350</p>"
+    assert any(r["country"] == "Canada" for r in parse_yearly_irs_text_fallback(fallback_html))
+    assert find_irs_rate("CAD", 2024, fallback_html, IRS_YEARLY_URL).rate == Decimal("1.370")
 
     assert normalize_currency("yen") == "JPY"
     assert normalize_currency("YEN") == "JPY"
@@ -1310,7 +1382,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             else:
                 raise AssertionError(f"_year_arg should reject {bad!r}")
         assert _iso_date_arg("2026-07-09") == "2026-07-09"
-        for bad in ("banana", "2026-13-01", "07/09/2026"):
+        for bad in ("banana", "2026-13-01", "07/09/2026", "20260709", "2026-7-9"):
             try:
                 _iso_date_arg(bad)
             except argparse.ArgumentTypeError:
@@ -1362,10 +1434,12 @@ def _year_arg(raw: str) -> int:
 
 
 def _iso_date_arg(raw: str) -> str:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        raise argparse.ArgumentTypeError(f"retrieved date must be YYYY-MM-DD, got {raw!r}")
     try:
         _dt.date.fromisoformat(raw)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"retrieved date must be YYYY-MM-DD, got {raw!r}")
+        raise argparse.ArgumentTypeError(f"retrieved date must be a real YYYY-MM-DD date, got {raw!r}")
     return raw
 
 
