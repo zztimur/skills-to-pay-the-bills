@@ -1,6 +1,6 @@
 ---
 name: privacy-gate
-description: Scan staged commits, repo trees, or files for secrets, private data, generated artifacts, and unsafe binary exports. Use before commit, release, packaging, syncing, or sharing.
+description: Scan staged commits, repo trees, or files for secrets, private data, generated artifacts, and unsafe binary exports; sanitize PII in text. Use before commit, release, packaging, syncing, or sharing.
 ---
 
 # Privacy Gate
@@ -18,7 +18,9 @@ python3 "<package-root>/scripts/privacy_gate.py" sanitize --path FILE --write
 python3 "<package-root>/scripts/privacy_gate.py" install-hook
 ```
 
-The `install-hook` command writes a `.githooks/pre-commit` that resolves the scanner at run time (a vendored copy, an installed absolute path, or the `PRIVACY_GATE_SCRIPT` override), so it keeps working from any repository, not only one that vendors `privacy-gate/`. Pass `install-hook --force` to replace a foreign pre-commit hook or reassign an existing `core.hooksPath`.
+The `install-hook` command writes a `.githooks/pre-commit` that resolves the scanner at run time (a vendored copy, an installed absolute path, or the `PRIVACY_GATE_SCRIPT` override), so it keeps working from any repository, not only one that vendors `privacy-gate/`. Pass `install-hook --force` to replace a foreign pre-commit hook or reassign an existing `core.hooksPath`. Pass `install-hook --portable` for a shared repo so the committed hook carries no machine-specific path; pair it with a vendored `privacy-gate/` or the `PRIVACY_GATE_SCRIPT` override.
+
+Bundled files: `scripts/privacy_gate.py` (scanner, source of truth), `scripts/test_privacy_gate.py` (regression tests), `references/policy.md` (policy).
 
 ## Flags And Exit Codes
 
@@ -26,7 +28,7 @@ The `install-hook` command writes a `.githooks/pre-commit` that resolves the sca
 - `--fail-on-warn` (or its alias `--strict`) also fails on `WARN` findings; use it for stricter CI gates and release checks.
 - `--json` emits a structured report instead of text.
 
-Allowlist reviewed false positives without disabling the gate: put `privacy-gate: allow` in a comment on a line to suppress that line, or list glob patterns in a committed `.privacygateignore` to skip paths. Both leave a visible audit trail; see `references/policy.md`.
+Allowlist reviewed false positives without disabling the gate. Two inline markers, both leaving a visible in-diff audit trail: `privacy-gate: allow` in a comment suppresses PII warnings on that line, but a high-confidence secret still blocks; `privacy-gate: allow-secret` is required to suppress a secret on that line and relies entirely on diff review. Or list glob patterns in a committed `.privacygateignore` to skip paths. Neither affects file-level blocks (binary, `.env`). See `references/policy.md`.
 
 ## Workflow
 
