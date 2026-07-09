@@ -13,7 +13,7 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Set, Tuple
 
 MAX_TEXT_BYTES = 1_000_000
 
@@ -792,14 +792,39 @@ def staged_blob(root: Path, path: str) -> bytes:
     return result.stdout
 
 
+def staged_gitlinks(root: Path, paths: Sequence[str]) -> Set[str]:
+    """Staged paths that are submodule gitlinks (mode 160000) rather than blobs.
+
+    `git show :<path>` fails on these (the index entry is a commit reference, not a
+    blob), which without this check surfaces as a false-positive staged_blob_read_failed
+    warning on every submodule bump.
+    """
+    if not paths:
+        return set()
+    result = run_git(["ls-files", "-s", "-z", "--", *paths], cwd=root)
+    gitlinks: Set[str] = set()
+    for entry in result.stdout.split(b"\x00"):
+        if not entry:
+            continue
+        meta, _, entry_path = entry.partition(b"\t")
+        if meta.split(b" ", 1)[0] == b"160000":
+            gitlinks.add(entry_path.decode("utf-8", errors="surrogateescape"))
+    return gitlinks
+
+
 def scan_staged() -> ScanResult:
     root = git_root()
     ignore_patterns = load_ignore_patterns(root)
+    paths = staged_paths(root)
+    gitlinks = staged_gitlinks(root, paths)
     findings: List[Finding] = []
     scanned = 0
     skipped = 0
-    for path in staged_paths(root):
+    for path in paths:
         if is_ignored(path, ignore_patterns):
+            skipped += 1
+            continue
+        if path in gitlinks:
             skipped += 1
             continue
         try:
