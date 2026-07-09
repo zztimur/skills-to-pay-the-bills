@@ -28,6 +28,7 @@ import json
 import re
 import shutil
 import sys
+import unicodedata
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
 from pathlib import Path
@@ -112,8 +113,45 @@ def build_rate_values(rate: Decimal, direction: str) -> tuple[Decimal, Decimal]:
 # --------------------------------------------------------------------------- #
 
 
+# The PDF uses the standard-14 latin-1 fonts, so text outside latin-1 cannot be
+# drawn. Rather than let it become "?", transliterate common symbols and
+# punctuation to a legible latin-1 equivalent (workpaper.md / workpaper.json keep
+# the original UTF-8). Anything left is decomposed (accents dropped) and only
+# truly unmappable code points fall back to "?".
+_PDF_TRANSLIT = {
+    "€": "EUR", "₩": "KRW", "₹": "INR", "₪": "ILS",
+    "₺": "TRY", "฿": "THB", "₽": "RUB", "₴": "UAH",
+    "₦": "NGN", "₱": "PHP", "₫": "VND", "₡": "CRC",
+    "₸": "KZT", "₾": "GEL", "₼": "AZN", "₵": "GHS",
+    "‘": "'", "’": "'", "‚": ",", "“": '"', "”": '"',
+    "„": '"', "–": "-", "—": "--", "―": "--", "…": "...",
+    "•": "-", "−": "-", "′": "'", "″": '"', " ": " ",
+    "ł": "l", "Ł": "L", "đ": "d", "Đ": "D",
+}
+
+
+def _to_latin1_safe(text: str) -> str:
+    out: list[str] = []
+    for ch in text:
+        mapped = _PDF_TRANSLIT.get(ch)
+        if mapped is not None:
+            out.append(mapped)
+            continue
+        try:
+            ch.encode("latin-1")
+        except UnicodeEncodeError:
+            stripped = "".join(
+                c for c in unicodedata.normalize("NFKD", ch) if not unicodedata.combining(c)
+            )
+            safe = stripped.encode("latin-1", errors="ignore").decode("latin-1")
+            out.append(safe if safe else "?")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def escape_pdf_text(value: object) -> str:
-    normalized = clean_text(str(value))
+    normalized = _to_latin1_safe(clean_text(str(value)))
     return normalized.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 

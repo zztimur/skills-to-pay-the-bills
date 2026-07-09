@@ -498,6 +498,40 @@ def test_hardening_boundary() -> None:
                 raise AssertionError(f"extra_json {bad_extra} must raise")
 
 
+def test_pdf_transliteration() -> None:
+    """Non-latin1 source text degrades legibly in the PDF; json/md keep UTF-8."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        proof = tmp / "p.txt"
+        proof.write_bytes(b"x\n")
+        title = "Banco Central — €/₩ al cierre “oficial”"
+        workpaper = wp.build_workpaper(
+            wp.WorkpaperSpec(
+                output_root=str(tmp / "out"), skill_name="get-year-end-fx-rate",
+                currency_code="MXN", year=2024, rate=Decimal("17"),
+                rate_direction="foreign-per-usd", source_title=title, source_url="u",
+                source_category="c", retrieval_date="2026-01-01", source_note="fee €100",
+                document_title="Year-End FX Rate Workpaper", document_subtitle="s",
+                rate_phrase="year-end (2024-12-31)", caveats=["c"],
+                saved_proofs=[proof], proof_required=True,
+            )
+        )
+        folder = Path(workpaper["proof"]["workpaper_json"]).parent  # type: ignore[index]
+        # json keeps the original UTF-8 (machine-truth), untouched by transliteration
+        data = json.loads((folder / "workpaper.json").read_text(encoding="utf-8"))
+        assert data["source"]["title"] == title
+        assert "€" in data["source"]["note"]
+        # the latin-1 PDF degrades legibly: symbols -> codes, smart quotes -> ascii,
+        # and no non-latin1 bytes survive
+        pdf = (folder / "workpaper.pdf").read_bytes()
+        assert b"EUR" in pdf and b"KRW" in pdf
+        assert b'"oficial"' in pdf
+        assert "—".encode("utf-8") not in pdf
+        assert "€".encode("utf-8") not in pdf
+        # latin-1 accents that render fine are NOT stripped
+        assert wp._to_latin1_safe("Zürich café") == "Zürich café"
+
+
 def main() -> int:
     tests = [
         test_yearly_golden_md_and_json,
@@ -508,6 +542,7 @@ def main() -> int:
         test_link_and_artifact_helpers,
         test_helpers,
         test_hardening_boundary,
+        test_pdf_transliteration,
     ]
     for test in tests:
         test()
