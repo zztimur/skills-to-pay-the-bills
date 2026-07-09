@@ -39,7 +39,7 @@ The default hook embeds the installing script's absolute path, which is convenie
 
 `privacy-gate` blocks the stuff that should not be waved through:
 
-- Real-looking API keys, access tokens, private keys, service-account JSON, JWT-like tokens, and password assignments.
+- Real-looking API keys, access tokens, private keys, service-account JSON, JWT-like tokens, and password assignments — including secrets written as quoted JSON/dict keys (`"api_key": "..."`) and credentials embedded in connection strings (`postgres://user:<secret>@host`).
 - `.env` and local environment files, except placeholder examples like `.env.example`.
 - Generated `work/` and `outputs/` artifacts.
 - PDFs, images, spreadsheets, and office documents that the text scanner cannot safely inspect.
