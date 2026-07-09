@@ -185,6 +185,7 @@ def test_yearly_pdf_structural_terms() -> None:
             "Yearly FX Rate Workpaper",
             "Published annual average exchange-rate support",
             "RETAINED SUPPORT WORKPAPER",
+            "EXCHANGE RATE",
             "1 USD = 1.25 CAD",
             "yearly average",
             "Reciprocal: 1 CAD = 0.8 USD",
@@ -201,6 +202,8 @@ def test_yearly_pdf_structural_terms() -> None:
             # continuation header path
             "get-yearly-fx-rate support workpaper | Page 1 of 2",
             "get-yearly-fx-rate support workpaper | Page 2 of 2",
+            # page-2 continuation ribbon tag
+            "PROOF PACKET",
         ):
             assert wp.clean_text(term).encode("latin-1", "replace") in data, term
         # continuation header renders the doc title on page 2
