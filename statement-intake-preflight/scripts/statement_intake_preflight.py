@@ -22,6 +22,8 @@ except ImportError:  # pragma: no cover - exercised by users without deps.
 
 SCHEMA_VERSION = "1.0"
 MIN_TEXT_CHARS = 40
+MIN_TAX_YEAR = 1970
+MAX_TAX_YEAR = 2100
 SUPPORTED_SCOPES = {"one-account", "one-institution"}
 
 CURRENCY_CODES = {
@@ -453,6 +455,8 @@ def detect_currency(lines: Iterable[str]) -> dict[str, object]:
 def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, out_path: Path, csv_path: Path) -> dict[str, object]:
     if scope not in SUPPORTED_SCOPES:
         raise PreflightError(f"Unsupported scope {scope!r}. Use one-account or one-institution.")
+    if not (MIN_TAX_YEAR <= tax_year <= MAX_TAX_YEAR):
+        raise PreflightError(f"tax_year {tax_year} is outside the supported range {MIN_TAX_YEAR}-{MAX_TAX_YEAR}.")
 
     warnings: list[str] = []
     gates: list[dict[str, str]] = []
@@ -497,6 +501,15 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
                 "warnings": file_warnings,
             }
         )
+
+    resolved_counts: Counter[str] = Counter(
+        str(item.get("resolved_file") or item.get("file") or "") for item in statement_files
+    )
+    duplicate_inputs = sorted(path for path, count in resolved_counts.items() if path and count > 1)
+    if duplicate_inputs:
+        message = f"The same statement file was supplied more than once: {', '.join(Path(path).name for path in duplicate_inputs)}."
+        warnings.append(message)
+        add_gate(gates, "duplicate-input", message)
 
     detected_years = sorted({year for item in statement_files for year in item.get("detected_years", [])})
     outside_years = [year for year in detected_years if year != tax_year]
@@ -624,6 +637,20 @@ def write_json(path: Path, data: dict[str, object]) -> None:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def csv_safe(value: object) -> str:
+    """Neutralize spreadsheet formula injection in a review-CSV cell.
+
+    A statement is untrusted input: a cell beginning with =, +, -, @, or a
+    leading control character can execute as a formula when the CSV is opened in
+    Excel or Sheets. Prefix such values with an apostrophe so they render as
+    literal text (CWE-1236).
+    """
+    text = "" if value is None else str(value)
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + text
+    return text
+
+
 def write_review_csv(path: Path, data: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
@@ -647,27 +674,43 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
             if not isinstance(item, dict):
                 continue
             currency = item.get("currency") if isinstance(item.get("currency"), dict) else {}
-            writer.writerow(
-                {
-                    "file": item.get("file"),
-                    "is_pdf": item.get("is_pdf"),
-                    "page_count": item.get("page_count"),
-                    "character_count": item.get("character_count"),
-                    "detected_years": "; ".join(str(year) for year in item.get("detected_years", [])),
-                    "detected_periods": "; ".join(str(period) for period in item.get("detected_periods", [])),
-                    "statement_titles": "; ".join(str(title) for title in item.get("statement_titles", [])),
-                    "currency_code": currency.get("code") if isinstance(currency, dict) else "",
-                    "currency_candidates": "; ".join(str(code) for code in currency.get("candidates", []) if isinstance(currency, dict)),
-                    "account_hints": "; ".join(str(hint) for hint in item.get("account_hints", [])),
-                    "institution_hints": "; ".join(str(hint) for hint in item.get("institution_hints", [])),
-                    "warnings": "; ".join(str(warning) for warning in item.get("warnings", [])),
-                }
-            )
+            row = {
+                "file": item.get("file"),
+                "is_pdf": item.get("is_pdf"),
+                "page_count": item.get("page_count"),
+                "character_count": item.get("character_count"),
+                "detected_years": "; ".join(str(year) for year in item.get("detected_years", [])),
+                "detected_periods": "; ".join(str(period) for period in item.get("detected_periods", [])),
+                "statement_titles": "; ".join(str(title) for title in item.get("statement_titles", [])),
+                "currency_code": currency.get("code") if isinstance(currency, dict) else "",
+                "currency_candidates": "; ".join(str(code) for code in currency.get("candidates", []) if isinstance(currency, dict)),
+                "account_hints": "; ".join(str(hint) for hint in item.get("account_hints", [])),
+                "institution_hints": "; ".join(str(hint) for hint in item.get("institution_hints", [])),
+                "warnings": "; ".join(str(warning) for warning in item.get("warnings", [])),
+            }
+            writer.writerow({key: csv_safe(value) for key, value in row.items()})
+
+
+def check_output_paths(out_path: Path, csv_path: Path, pdf_paths: list[str]) -> None:
+    """Refuse output paths that would clobber each other or an input PDF.
+
+    Writing the CSV over the JSON (or over a source statement) silently destroys
+    data, so fail fast with a clear message instead.
+    """
+    out_resolved = normalize_path(out_path)
+    csv_resolved = normalize_path(csv_path)
+    if out_resolved == csv_resolved:
+        raise PreflightError(f"--out and --csv resolve to the same path ({out_path}); choose distinct files.")
+    inputs = {normalize_path(pdf): pdf for pdf in pdf_paths}
+    for label, resolved, original in (("--out", out_resolved, out_path), ("--csv", csv_resolved, csv_path)):
+        if resolved in inputs:
+            raise PreflightError(f"{label} ({original}) would overwrite an input PDF ({inputs[resolved]}); choose another path.")
 
 
 def command_preflight(args: argparse.Namespace) -> int:
     out_path = Path(args.out)
     csv_path = Path(args.csv) if args.csv else review_csv_path(out_path)
+    check_output_paths(out_path, csv_path, args.pdf)
     files = load_pdf_files(args.pdf)
     data = build_preflight(files, int(args.tax_year), args.scope, out_path, csv_path)
     write_json(out_path, data)
@@ -933,6 +976,51 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if any(gate.get("code") == "unknown-institution" for gate in fintech["review_gates"]):  # type: ignore[index]
             failures.append("fintech: 'Wise Account Statement' should satisfy the institution check")
 
+        # The same statement supplied twice is flagged, not silently double-counted.
+        duplicate = build_preflight(
+            [
+                synthetic_file("dup.pdf", "Example Bank\nAccount number 12345678\nStatement period January 2025\nCurrency USD"),
+                synthetic_file("dup.pdf", "Example Bank\nAccount number 12345678\nStatement period January 2025\nCurrency USD"),
+            ],
+            2025,
+            "one-account",
+            root / "dup.json",
+            root / "dup-review.csv",
+        )
+        if not any(gate.get("code") == "duplicate-input" for gate in duplicate["review_gates"]):  # type: ignore[index]
+            failures.append("duplicate: expected duplicate-input gate")
+
+        # CSV cells that begin with a formula lead are neutralized.
+        if csv_safe("=HYPERLINK(\"http://x\")") != "'=HYPERLINK(\"http://x\")":
+            failures.append("csv_safe: expected leading '=' to be quoted")
+        if csv_safe("@SUM(A1:A9)") != "'@SUM(A1:A9)":
+            failures.append("csv_safe: expected leading '@' to be quoted")
+        if csv_safe("Example Bank") != "Example Bank":
+            failures.append("csv_safe: ordinary text must be unchanged")
+
+        # Output paths that collide are rejected before anything is written.
+        for label, out_arg, csv_arg, pdfs in (
+            ("out==csv", root / "same.json", root / "same.json", []),
+            ("out over input", root / "in.pdf", root / "other.csv", [str(root / "in.pdf")]),
+        ):
+            try:
+                check_output_paths(out_arg, csv_arg, [str(p) for p in pdfs])
+                failures.append(f"paths: expected {label} collision to be rejected")
+            except PreflightError:
+                pass
+
+        # The tax year is bounded at both layers.
+        try:
+            _year_arg("20025")
+            failures.append("year: expected _year_arg to reject 20025")
+        except argparse.ArgumentTypeError:
+            pass
+        try:
+            build_preflight([synthetic_file("y.pdf", "Example Bank\nCurrency USD")], 3000, "one-account", root / "y.json", root / "y-review.csv")
+            failures.append("year: expected build_preflight to reject year 3000")
+        except PreflightError:
+            pass
+
         write_json(root / "clean.json", clean)
         write_review_csv(root / "clean-review.csv", clean)
         if not (root / "clean-review.csv").exists():
@@ -942,8 +1030,18 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 14 preflight cases")
+    print("Self-test passed: 15 preflight cases")
     return 0
+
+
+def _year_arg(raw: str) -> int:
+    try:
+        year = int(raw)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"year {raw!r} is not an integer") from None
+    if not (MIN_TAX_YEAR <= year <= MAX_TAX_YEAR):
+        raise argparse.ArgumentTypeError(f"year {year} is outside the supported range {MIN_TAX_YEAR}-{MAX_TAX_YEAR}")
+    return year
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -952,7 +1050,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     preflight = subparsers.add_parser("preflight", help="Preflight one statement PDF set.")
     preflight.add_argument("--pdf", nargs="+", required=True, help="Statement PDFs for one tax year and one scope.")
-    preflight.add_argument("--tax-year", type=int, required=True, help="Calendar/tax year to verify.")
+    preflight.add_argument("--tax-year", type=_year_arg, required=True, help=f"Calendar/tax year to verify ({MIN_TAX_YEAR}-{MAX_TAX_YEAR}).")
     preflight.add_argument("--scope", choices=sorted(SUPPORTED_SCOPES), required=True, help="Expected downstream scope.")
     preflight.add_argument("--out", required=True, help="Output preflight JSON path.")
     preflight.add_argument("--csv", help="Optional review CSV path.")
