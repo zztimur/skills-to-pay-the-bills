@@ -14,10 +14,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable
 
+_PDFPLUMBER_IMPORT_ERROR: BaseException | None = None
 try:
     import pdfplumber
-except ImportError:  # pragma: no cover - exercised by users without deps.
+except BaseException as _exc:  # noqa: BLE001 - see below  # pragma: no cover
+    # A broken native dependency (e.g. a cryptography/pyo3 ABI mismatch) raises a
+    # non-Exception PanicException at import time, which "except ImportError"
+    # misses -- crashing even dependency-check with a raw traceback. Degrade to
+    # "unavailable" instead, but never swallow a genuine interrupt or exit.
+    if isinstance(_exc, (KeyboardInterrupt, SystemExit)):
+        raise
     pdfplumber = None
+    _PDFPLUMBER_IMPORT_ERROR = _exc
 
 
 # Handoff-contract version, distinct from the package version in plugin.json.
@@ -97,7 +105,12 @@ CURRENCY_ALIASES = {
 # "Account Number Summary".
 ACCOUNT_LABEL_RE = re.compile(
     r"\b(?:account|acct|a/c|cuenta)\s*"
-    r"(?:numbers?|no\.?|nbr\.?|nros?\.?|n[uú]ms?\.?|id)\b"
+    # Assert the word boundary on the label word, THEN consume an optional
+    # trailing dot. Putting \b after the dot ("no\.?\b") failed for
+    # dot-terminated labels ("No.", "Nro.", "Núm.") because there is no
+    # boundary between "." and the following space, so those forms matched
+    # nothing at all.
+    r"(?:numbers?|nos?|nbrs?|nros?|n[uú]ms?|id)\b\.?"
     r"[\s:#-]*([*Xx0-9A-Za-z][*Xx0-9A-Za-z.\- ]{2,33})",
     re.I,
 )
@@ -109,7 +122,7 @@ ACCOUNT_BARE_RE = re.compile(
     r"\b(?:account|acct|a/c|cuenta|n[uú]mero de cuenta)\b[\s:#-]*([*Xx0-9][*Xx0-9.\- ]{3,33})",
     re.I,
 )
-ACCOUNT_IBAN_RE = re.compile(r"\bIBAN\b[\s:#-]*([A-Z]{2}[A-Z0-9 ]{8,34})", re.I)
+ACCOUNT_IBAN_RE = re.compile(r"\bIBAN\b[\s:#-]*([A-Z]{2}\d{2}[A-Z0-9 ]{6,40})", re.I)
 ACCOUNT_ENDING_RE = re.compile(r"\b(?:ending in|ends in|termina en)\s*([*Xx0-9]{2,8})", re.I)
 
 TITLE_TERMS = (
@@ -203,6 +216,30 @@ INSTITUTION_NOISE = {
     "el",
 } | set(MONTH_NAMES)
 
+# Legal-entity suffixes dropped from an institution signature so the same bank
+# reads the same whether a given statement spells out its legal name or not
+# ("Example Bank N.A." vs "Example Bank"). Ambiguous two-letter words that could
+# be a real name part (e.g. "co", "ab") are deliberately excluded.
+INSTITUTION_LEGAL_SUFFIXES = {
+    "na",
+    "sa",
+    "nv",
+    "ag",
+    "plc",
+    "ltd",
+    "llc",
+    "inc",
+    "corp",
+    "cia",
+    "sac",
+    "srl",
+    "spa",
+    "gmbh",
+    "bv",
+    "oyj",
+    "asa",
+}
+
 YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 ISO_CURRENCY_RE = re.compile(r"\b[A-Z]{3}\b")
 
@@ -215,7 +252,18 @@ CURRENCY_LABEL_RE = re.compile(
     re.I,
 )
 _CURRENCY_CODE_ALT = "|".join(sorted(CURRENCY_CODES))
-_AMOUNT = r"[-+(]?\s*[$€£¥]?\s*\d[\d.,]*"
+# An "amount" must look monetary, not just be a digit run: a currency symbol, a
+# decimal-cents figure, a thousands-grouped figure, or a long (>=5 digit) number.
+# A bare 1-4 digit integer no longer counts, so a year ("2025 TRY") or a clock
+# fragment ("TRY 24/7") can no longer corroborate a currency code.
+_AMOUNT = (
+    r"[-+(]?\s*(?:"
+    r"[$€£¥]\s?\d[\d.,]*"
+    r"|\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?"
+    r"|\d+[.,]\d{2}"
+    r"|\d{5,}"
+    r")"
+)
 CURRENCY_AMOUNT_RE = re.compile(
     rf"\b(?P<pre>{_CURRENCY_CODE_ALT})\b\s*{_AMOUNT}"
     rf"|{_AMOUNT}\s*\b(?P<post>{_CURRENCY_CODE_ALT})\b"
@@ -360,9 +408,38 @@ def account_token(raw: str) -> str | None:
     compact = re.sub(r"[ .\-]", "", token)
     digits = sum(char.isdigit() for char in compact)
     masks = sum(char in "*Xx" for char in compact)
-    if digits + masks < 2:
+    # Require at least four digit/mask characters. A real account identifier has
+    # them; a one-or-two-digit run captured after a label (a page count or table
+    # index such as "12 of 34") is not an account.
+    if digits + masks < 4:
         return None
     return token
+
+
+def iban_mod97_ok(iban: str) -> bool:
+    """ISO 13616 check: move the first four chars to the end, map letters to
+    their base-36 values, and require the whole number mod 97 == 1."""
+    rearranged = iban[4:] + iban[:4]
+    return int("".join(str(int(char, 36)) for char in rearranged)) % 97 == 1
+
+
+def iban_token(raw: str) -> str | None:
+    """Reduce a captured IBAN to its checksum-valid compact form, or reject.
+
+    The capture can swallow trailing words on the line (a holder name after the
+    IBAN); trimming to the longest mod-97-valid prefix drops that tail and, as a
+    bonus, collapses grouped and compact spellings of one IBAN to a single hint.
+    """
+    compact = re.sub(r"\s+", "", raw).upper()
+    match = re.match(r"[A-Z]{2}\d{2}[A-Z0-9]+", compact)
+    if not match:
+        return None
+    candidate = match.group(0)
+    for end in range(min(len(candidate), 34), 14, -1):
+        prefix = candidate[:end]
+        if iban_mod97_ok(prefix):
+            return prefix
+    return None
 
 
 def detect_account_hints(lines: Iterable[str]) -> list[str]:
@@ -374,9 +451,9 @@ def detect_account_hints(lines: Iterable[str]) -> list[str]:
                 if token:
                     hints.append(token)
         for match in ACCOUNT_IBAN_RE.finditer(line):
-            iban = clean_line(match.group(1))
-            if len(re.sub(r"\s", "", iban)) >= 10:
-                hints.append(iban)
+            token = iban_token(match.group(1))
+            if token:
+                hints.append(token)
         for match in ACCOUNT_ENDING_RE.finditer(line):
             hints.append(clean_line(match.group(1)))
     return stable_unique(hints, limit=20)
@@ -397,12 +474,29 @@ def detect_institution_hints(lines: Iterable[str]) -> list[str]:
 def institution_signature(hint: str) -> str:
     """Normalize an institution hint for equality comparison.
 
-    Strips digits, punctuation, single letters (e.g. the "N A" in "N.A."), and
-    structural statement words so cosmetic per-statement differences do not read
-    as different institutions.
+    Merges runs of single letters ("U.S." -> "us", "M&T" -> "mt") so
+    initial-based names stay distinct instead of collapsing to their shared
+    word, then strips structural statement words and legal-entity suffixes so
+    cosmetic per-statement differences do not read as different institutions.
     """
     lowered = re.sub(r"[^a-z ]+", " ", hint.casefold())
-    tokens = [token for token in lowered.split() if len(token) > 1 and token not in INSTITUTION_NOISE]
+    merged: list[str] = []
+    letters = ""
+    for token in lowered.split():
+        if len(token) == 1:
+            letters += token
+        else:
+            if letters:
+                merged.append(letters)
+                letters = ""
+            merged.append(token)
+    if letters:
+        merged.append(letters)
+    tokens = [
+        token
+        for token in merged
+        if len(token) > 1 and token not in INSTITUTION_NOISE and token not in INSTITUTION_LEGAL_SUFFIXES
+    ]
     return " ".join(tokens)
 
 
@@ -743,7 +837,10 @@ def command_preflight(args: argparse.Namespace) -> int:
 
 def command_dependency_check(_args: argparse.Namespace) -> int:
     if pdfplumber is None:
-        print("pdfplumber missing")
+        if _PDFPLUMBER_IMPORT_ERROR is not None:
+            print(f"pdfplumber missing (installed but failed to import: {type(_PDFPLUMBER_IMPORT_ERROR).__name__})")
+        else:
+            print("pdfplumber missing")
         return 1
     print("pdfplumber ok")
     return 0
@@ -885,6 +982,15 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if adjacency["currency"]["code"] != "GBP":  # type: ignore[index]
             failures.append(f"adjacency: expected GBP from amount adjacency, got {adjacency['currency']}")
 
+        # A code next to a bare year or a clock fragment is not adjacent to an
+        # amount and must not confirm; a real monetary figure still does.
+        if detect_currency(["Currency USD", "Closing balance 100.00 USD", "PLEASE TRY 24/7 ONLINE BANKING"])["code"] != "USD":
+            failures.append("currency-amount: 'TRY 24/7' must not confirm a second currency")
+        if detect_currency(["Currency USD", "IN 2025 TRY OUR NEW APP"])["code"] != "USD":
+            failures.append("currency-amount: a bare year beside 'TRY' must not confirm it")
+        if detect_currency(["Ending balance 9.999,99 GBP"])["code"] != "GBP":
+            failures.append("currency-amount: a monetary figure adjacent to a code must still confirm")
+
         accounts = build_preflight(
             [synthetic_file("accounts.pdf", "Example Bank\nAccount 11112222\nAccount 33334444\nStatement period January 2025\nCurrency USD")],
             2025,
@@ -990,6 +1096,73 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if any(gate.get("code") == "unknown-institution" for gate in fintech["review_gates"]):  # type: ignore[index]
             failures.append("fintech: 'Wise Account Statement' should satisfy the institution check")
 
+        # Initial-based bank names must stay distinct instead of collapsing to
+        # their shared word, and legal-suffix drift on one bank must not split it.
+        if institution_signature("U.S. Bank") == institution_signature("M&T Bank"):
+            failures.append("institution-signature: 'U.S. Bank' and 'M&T Bank' must not collide")
+        if institution_signature("Example Bank, N.A.") != institution_signature("Example Bank NA"):
+            failures.append("institution-signature: 'N.A.' and 'NA' must match")
+        if institution_signature("Example Bank N.A.") != institution_signature("Example Bank"):
+            failures.append("institution-signature: a legal suffix must not split the same bank")
+
+        short_name_banks = build_preflight(
+            [
+                synthetic_file("usbank.pdf", "U.S. Bank\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00 USD"),
+                synthetic_file("mtbank.pdf", "M&T Bank\nStatement period February 1 2025 to February 28 2025\nCurrency USD\nClosing balance 200.00 USD"),
+            ],
+            2025,
+            "one-institution",
+            root / "short-banks.json",
+            root / "short-banks-review.csv",
+        )
+        if not any(gate.get("code") == "possible-mixed-institutions" for gate in short_name_banks["review_gates"]):  # type: ignore[index]
+            failures.append("short-name-banks: 'U.S. Bank' vs 'M&T Bank' must trip possible-mixed-institutions")
+
+        suffix_drift = build_preflight(
+            [
+                synthetic_file("drift-a.pdf", "EXAMPLE BANK, N.A.\nStatement period January 1 2025 to January 31 2025\nCurrency USD"),
+                synthetic_file("drift-b.pdf", "Example Bank NA - Monthly Statement\nStatement period February 1 2025 to February 28 2025\nCurrency USD"),
+            ],
+            2025,
+            "one-institution",
+            root / "drift.json",
+            root / "drift-review.csv",
+        )
+        if any(gate.get("code") == "possible-mixed-institutions" for gate in suffix_drift["review_gates"]):  # type: ignore[index]
+            failures.append("suffix-drift: same bank with and without 'N.A.' must not trip possible-mixed-institutions")
+
+        # Dot-terminated account labels ("No.", "Nro.", "Núm.") must capture, not
+        # silently miss. Fixtures avoid the "account no NNNN" spelling that the
+        # repo privacy scan flags, while still exercising every label branch.
+        account_label_forms = {
+            "Account No. 12 34 56": ["12 34 56"],
+            "Cuenta Nro. 4567890": ["4567890"],
+            "Cuenta Núm. 4567890": ["4567890"],
+            "Account ID 12345678": ["12345678"],
+            "Account 12345678": ["12345678"],
+        }
+        for line, expected in account_label_forms.items():
+            got = detect_account_hints([line])
+            if got != expected:
+                failures.append(f"account-label {line!r}: expected {expected}, got {got}")
+        if detect_account_hints(["Account Nro. 11112222", "Account 33334444"]) != ["11112222", "33334444"]:
+            failures.append("account-label: a dot-label account plus a bare account must yield two hints")
+        if detect_account_hints(["Account No. Statement of activity"]):
+            failures.append("account-label: a label followed by a word must not yield a hint")
+        if detect_account_hints(["Account No. 12 of 34 pages"]):
+            failures.append("account-label: a short number embedded in text after a label must not be captured as an account")
+
+        # IBAN captures trim a trailing holder name to the checksum-valid IBAN,
+        # and grouped vs compact spellings collapse to one hint.
+        grouped_iban = "GB82 WEST 1234 5698 7654 32"  # privacy-gate: allow (public documentation IBAN, synthetic test value)
+        compact_iban = grouped_iban.replace(" ", "")
+        if iban_token(grouped_iban + " HOLDER JANE DOE") != compact_iban:
+            failures.append("iban: expected the trailing name trimmed off the IBAN")
+        if iban_token(compact_iban) != compact_iban:
+            failures.append("iban: a valid compact IBAN should validate")
+        if iban_token("GB00 0000 0000 0000 0000 00") is not None:  # privacy-gate: allow (synthetic invalid IBAN)
+            failures.append("iban: an invalid checksum must be rejected")
+
         # The same statement supplied twice is flagged, not silently double-counted.
         duplicate = build_preflight(
             [
@@ -1052,7 +1225,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 15 preflight cases")
+    print("Self-test passed: 18 preflight cases")
     return 0
 
 
