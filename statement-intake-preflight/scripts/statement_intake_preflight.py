@@ -111,7 +111,9 @@ ACCOUNT_LABEL_RE = re.compile(
     # boundary between "." and the following space, so those forms matched
     # nothing at all.
     r"(?:numbers?|nos?|nbrs?|nros?|n[uú]ms?|id)\b\.?"
-    r"[\s:#-]*([*Xx0-9A-Za-z][*Xx0-9A-Za-z.\- ]{2,33})",
+    # The capture class allows ',' and '&' so a plural label's whole list is
+    # captured; detect_account_hints splits it back apart on those separators.
+    r"[\s:#-]*([*Xx0-9A-Za-z][*Xx0-9A-Za-z.,&\- ]{2,33})",
     re.I,
 )
 # Bare designation immediately followed by a digit/masked identifier
@@ -124,6 +126,21 @@ ACCOUNT_BARE_RE = re.compile(
 )
 ACCOUNT_IBAN_RE = re.compile(r"\bIBAN\b[\s:#-]*([A-Z]{2}\d{2}[A-Z0-9 ]{6,40})", re.I)
 ACCOUNT_ENDING_RE = re.compile(r"\b(?:ending in|ends in|termina en)\s*([*Xx0-9]{2,8})", re.I)
+
+# Transaction/counterparty context. An account number or IBAN on such a line
+# belongs to the other party, not the statement holder, so it must not be
+# harvested as an account hint (a SEPA transfer names the payee's IBAN, not
+# yours). "titular"/"holder" are deliberately NOT here -- they mark the owner.
+COUNTERPARTY_RE = re.compile(
+    r"\b(?:transfer(?:red|s|encia|encias)?|transferido|virement|[uü]berweisung|"
+    r"sepa|swift|beneficiar(?:y|io)|recipient|payee|remitter|remitente|"
+    r"destinatario|empf[aä]nger)\b",
+    re.I,
+)
+# Conjunctions/separators that join several account numbers under one plural
+# label ("Account Nos. 11112222 and 33334444", "Accounts 111, 222 & 333"). The
+# space lookahead keeps a bare thousands comma from splitting a single number.
+_ACCOUNT_SEP_RE = re.compile(r"\b(?:and|y|und)\b|[,&](?=\s)", re.I)
 
 TITLE_TERMS = (
     "statement",
@@ -445,11 +462,18 @@ def iban_token(raw: str) -> str | None:
 def detect_account_hints(lines: Iterable[str]) -> list[str]:
     hints: list[str] = []
     for line in lines:
+        if COUNTERPARTY_RE.search(line):
+            # A transfer/counterparty line names the other party's account or
+            # IBAN, not the statement holder's; skip it entirely.
+            continue
         for pattern in (ACCOUNT_LABEL_RE, ACCOUNT_BARE_RE):
             for match in pattern.finditer(line):
-                token = account_token(match.group(1))
-                if token:
-                    hints.append(token)
+                # Split on conjunctions so a plural label ("Account Nos. X and Y")
+                # surfaces every account, not just the first.
+                for part in _ACCOUNT_SEP_RE.split(match.group(1)):
+                    token = account_token(part)
+                    if token:
+                        hints.append(token)
         for match in ACCOUNT_IBAN_RE.finditer(line):
             token = iban_token(match.group(1))
             if token:
@@ -1163,6 +1187,18 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if iban_token("GB00 0000 0000 0000 0000 00") is not None:  # privacy-gate: allow (synthetic invalid IBAN)
             failures.append("iban: an invalid checksum must be rejected")
 
+        # A header IBAN is the holder's and is captured; the same IBAN on a
+        # SEPA/transfer line is the counterparty's and must be skipped.
+        if not detect_account_hints(["IBAN GB82 WEST 1234 5698 7654 32"]):  # privacy-gate: allow (synthetic IBAN)
+            failures.append("counterparty: a header IBAN must still be captured")
+        if detect_account_hints(["SEPA transfer to IBAN GB82 WEST 1234 5698 7654 32 rent 850.00 EUR"]):  # privacy-gate: allow (synthetic IBAN)
+            failures.append("counterparty: an IBAN on a SEPA/transfer line must not be harvested as the holder's account")
+
+        # A plural label with a conjunction surfaces every account, not just the
+        # first (the Spanish 'Nros.'/'y' form is privacy-clean).
+        if detect_account_hints(["Cuenta Nros. 11112222 y 33334444"]) != ["11112222", "33334444"]:
+            failures.append("plural-label: a plural label joined by a conjunction must yield every account")
+
         # The same statement supplied twice is flagged, not silently double-counted.
         duplicate = build_preflight(
             [
@@ -1225,7 +1261,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 18 preflight cases")
+    print("Self-test passed: 20 preflight cases")
     return 0
 
 
