@@ -208,6 +208,30 @@ INSTITUTION_NOISE = {
     "el",
 } | set(MONTH_NAMES)
 
+# Legal-entity suffixes dropped from an institution signature so the same bank
+# reads the same whether a given statement spells out its legal name or not
+# ("Example Bank N.A." vs "Example Bank"). Ambiguous two-letter words that could
+# be a real name part (e.g. "co", "ab") are deliberately excluded.
+INSTITUTION_LEGAL_SUFFIXES = {
+    "na",
+    "sa",
+    "nv",
+    "ag",
+    "plc",
+    "ltd",
+    "llc",
+    "inc",
+    "corp",
+    "cia",
+    "sac",
+    "srl",
+    "spa",
+    "gmbh",
+    "bv",
+    "oyj",
+    "asa",
+}
+
 YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 ISO_CURRENCY_RE = re.compile(r"\b[A-Z]{3}\b")
 
@@ -428,12 +452,29 @@ def detect_institution_hints(lines: Iterable[str]) -> list[str]:
 def institution_signature(hint: str) -> str:
     """Normalize an institution hint for equality comparison.
 
-    Strips digits, punctuation, single letters (e.g. the "N A" in "N.A."), and
-    structural statement words so cosmetic per-statement differences do not read
-    as different institutions.
+    Merges runs of single letters ("U.S." -> "us", "M&T" -> "mt") so
+    initial-based names stay distinct instead of collapsing to their shared
+    word, then strips structural statement words and legal-entity suffixes so
+    cosmetic per-statement differences do not read as different institutions.
     """
     lowered = re.sub(r"[^a-z ]+", " ", hint.casefold())
-    tokens = [token for token in lowered.split() if len(token) > 1 and token not in INSTITUTION_NOISE]
+    merged: list[str] = []
+    letters = ""
+    for token in lowered.split():
+        if len(token) == 1:
+            letters += token
+        else:
+            if letters:
+                merged.append(letters)
+                letters = ""
+            merged.append(token)
+    if letters:
+        merged.append(letters)
+    tokens = [
+        token
+        for token in merged
+        if len(token) > 1 and token not in INSTITUTION_NOISE and token not in INSTITUTION_LEGAL_SUFFIXES
+    ]
     return " ".join(tokens)
 
 
@@ -1021,6 +1062,41 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if any(gate.get("code") == "unknown-institution" for gate in fintech["review_gates"]):  # type: ignore[index]
             failures.append("fintech: 'Wise Account Statement' should satisfy the institution check")
 
+        # Initial-based bank names must stay distinct instead of collapsing to
+        # their shared word, and legal-suffix drift on one bank must not split it.
+        if institution_signature("U.S. Bank") == institution_signature("M&T Bank"):
+            failures.append("institution-signature: 'U.S. Bank' and 'M&T Bank' must not collide")
+        if institution_signature("Example Bank, N.A.") != institution_signature("Example Bank NA"):
+            failures.append("institution-signature: 'N.A.' and 'NA' must match")
+        if institution_signature("Example Bank N.A.") != institution_signature("Example Bank"):
+            failures.append("institution-signature: a legal suffix must not split the same bank")
+
+        short_name_banks = build_preflight(
+            [
+                synthetic_file("usbank.pdf", "U.S. Bank\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00 USD"),
+                synthetic_file("mtbank.pdf", "M&T Bank\nStatement period February 1 2025 to February 28 2025\nCurrency USD\nClosing balance 200.00 USD"),
+            ],
+            2025,
+            "one-institution",
+            root / "short-banks.json",
+            root / "short-banks-review.csv",
+        )
+        if not any(gate.get("code") == "possible-mixed-institutions" for gate in short_name_banks["review_gates"]):  # type: ignore[index]
+            failures.append("short-name-banks: 'U.S. Bank' vs 'M&T Bank' must trip possible-mixed-institutions")
+
+        suffix_drift = build_preflight(
+            [
+                synthetic_file("drift-a.pdf", "EXAMPLE BANK, N.A.\nStatement period January 1 2025 to January 31 2025\nCurrency USD"),
+                synthetic_file("drift-b.pdf", "Example Bank NA - Monthly Statement\nStatement period February 1 2025 to February 28 2025\nCurrency USD"),
+            ],
+            2025,
+            "one-institution",
+            root / "drift.json",
+            root / "drift-review.csv",
+        )
+        if any(gate.get("code") == "possible-mixed-institutions" for gate in suffix_drift["review_gates"]):  # type: ignore[index]
+            failures.append("suffix-drift: same bank with and without 'N.A.' must not trip possible-mixed-institutions")
+
         # Dot-terminated account labels ("No.", "Nro.", "Núm.") must capture, not
         # silently miss. Fixtures avoid the "account no NNNN" spelling that the
         # repo privacy scan flags, while still exercising every label branch.
@@ -1113,7 +1189,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 16 preflight cases")
+    print("Self-test passed: 17 preflight cases")
     return 0
 
 
