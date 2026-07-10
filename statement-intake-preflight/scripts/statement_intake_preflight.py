@@ -81,12 +81,26 @@ CURRENCY_ALIASES = {
     "usd": "USD",
 }
 
-ACCOUNT_PATTERNS = (
-    re.compile(r"\b(?:account|acct|a/c)\s*(?:number|no\.?|#|id)?\s*[:#-]?\s*([A-Z0-9*Xx.\- ]{4,32})", re.I),
-    re.compile(r"\b(?:cuenta|n[uú]mero de cuenta)\s*[:#-]?\s*([A-Z0-9*Xx.\- ]{4,32})", re.I),
-    re.compile(r"\bIBAN\s*[:#-]?\s*([A-Z]{2}[A-Z0-9 ]{8,34})", re.I),
-    re.compile(r"\b(?:ending in|ends in|termina en)\s*([0-9*Xx]{2,8})", re.I),
+# Explicit designation word ("Account Number", "A/C No.", "Cuenta Nro."):
+# consumes the label so the capture starts at the identifier. The capture is
+# still validated by account_token(), which rejects word-only matches such as
+# "Account Number Summary".
+ACCOUNT_LABEL_RE = re.compile(
+    r"\b(?:account|acct|a/c|cuenta)\s*"
+    r"(?:numbers?|no\.?|nbr\.?|nros?\.?|n[uú]ms?\.?|id)\b"
+    r"[\s:#-]*([*Xx0-9A-Za-z][*Xx0-9A-Za-z.\- ]{2,33})",
+    re.I,
 )
+# Bare designation immediately followed by a digit/masked identifier
+# ("Account 12345678", "Cuenta 001234"). The capture must START with a digit or
+# masking char, so a following word ("Account Summary", "Account holder JUAN")
+# cannot match at all.
+ACCOUNT_BARE_RE = re.compile(
+    r"\b(?:account|acct|a/c|cuenta|n[uú]mero de cuenta)\b[\s:#-]*([*Xx0-9][*Xx0-9.\- ]{3,33})",
+    re.I,
+)
+ACCOUNT_IBAN_RE = re.compile(r"\bIBAN\b[\s:#-]*([A-Z]{2}[A-Z0-9 ]{8,34})", re.I)
+ACCOUNT_ENDING_RE = re.compile(r"\b(?:ending in|ends in|termina en)\s*([*Xx0-9]{2,8})", re.I)
 
 TITLE_TERMS = (
     "statement",
@@ -305,15 +319,41 @@ def detect_periods(lines: Iterable[str]) -> list[str]:
     return stable_unique(periods, limit=20)
 
 
+def account_token(raw: str) -> str | None:
+    """Reduce a captured account match to its identifier, or reject free text.
+
+    Keeps the leading run of digits/masking (allowing a short alpha prefix like
+    "ABX" and internal separators), dropping any trailing words the greedy
+    capture pulled in, and rejects captures that are not identifier-shaped --
+    e.g. a holder name or "Summary for January".
+    """
+    cleaned = clean_line(raw)
+    match = re.match(r"[A-Za-z]{0,4}[*Xx0-9](?:[*Xx0-9]|[ .\-](?=[*Xx0-9]))*", cleaned)
+    if not match:
+        return None
+    token = match.group(0).strip(" .-")
+    compact = re.sub(r"[ .\-]", "", token)
+    digits = sum(char.isdigit() for char in compact)
+    masks = sum(char in "*Xx" for char in compact)
+    if digits + masks < 2:
+        return None
+    return token
+
+
 def detect_account_hints(lines: Iterable[str]) -> list[str]:
     hints: list[str] = []
     for line in lines:
-        for pattern in ACCOUNT_PATTERNS:
+        for pattern in (ACCOUNT_LABEL_RE, ACCOUNT_BARE_RE):
             for match in pattern.finditer(line):
-                hint = clean_line(match.group(1))
-                hint = re.sub(r"\s{2,}", " ", hint)
-                if hint and len(hint) >= 2:
-                    hints.append(hint)
+                token = account_token(match.group(1))
+                if token:
+                    hints.append(token)
+        for match in ACCOUNT_IBAN_RE.finditer(line):
+            iban = clean_line(match.group(1))
+            if len(re.sub(r"\s", "", iban)) >= 10:
+                hints.append(iban)
+        for match in ACCOUNT_ENDING_RE.finditer(line):
+            hints.append(clean_line(match.group(1)))
     return stable_unique(hints, limit=20)
 
 
@@ -636,7 +676,7 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
 
         doc = canvas.Canvas(str(pdf_path))
         doc.drawString(72, 740, "Example Bank Monthly Statement")
-        doc.drawString(72, 720, "Account number ACCT")
+        doc.drawString(72, 720, "Account number 12345678")
         doc.drawString(72, 700, "Statement period January 1 2025 to January 31 2025")
         doc.drawString(72, 680, "Currency EUR")
         doc.drawString(72, 660, "Closing balance 100.00 EUR")
@@ -650,8 +690,8 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
             failures.append(f"status: expected ready, got {data['status']}")
         if data["currency"]["code"] != "EUR":  # type: ignore[index]
             failures.append(f"currency: expected EUR, got {data['currency']}")
-        if data["account_hints"] != ["ACCT"]:  # type: ignore[index]
-            failures.append(f"account: expected account hint ACCT, got {data['account_hints']}")
+        if data["account_hints"] != ["12345678"]:  # type: ignore[index]
+            failures.append(f"account: expected account hint 12345678, got {data['account_hints']}")
         if not out_path.exists():
             failures.append("json: expected smoke JSON to be written")
         if not csv_path.exists():
@@ -677,7 +717,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             [
                 synthetic_file(
                     "clean.pdf",
-                    "Example Bank\nAccount number ACCT\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00",
+                    "Example Bank\nAccount number 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00",
                 )
             ],
             2025,
@@ -689,11 +729,11 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append(f"clean-status: expected ready, got {clean['status']}")
         if clean["currency"]["code"] != "USD":  # type: ignore[index]
             failures.append(f"clean-currency: expected USD, got {clean['currency']}")
-        if clean["account_hints"] != ["ACCT"]:  # type: ignore[index]
-            failures.append(f"clean-account: expected account hint ACCT, got {clean['account_hints']}")
+        if clean["account_hints"] != ["12345678"]:  # type: ignore[index]
+            failures.append(f"clean-account: expected account hint 12345678, got {clean['account_hints']}")
 
         mixed_year = build_preflight(
-            [synthetic_file("mixed-year.pdf", "Example Bank\nAccount number ACCT\nStatement period December 2024 to January 2025\nCurrency USD")],
+            [synthetic_file("mixed-year.pdf", "Example Bank\nAccount number 12345678\nStatement period December 2024 to January 2025\nCurrency USD")],
             2025,
             "one-account",
             root / "mixed-year.json",
@@ -703,7 +743,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("mixed-year: expected mixed-years gate")
 
         mixed_currency = build_preflight(
-            [synthetic_file("mixed-currency.pdf", "Example Bank\nAccount number ACCT\nStatement period January 2025\nCurrency USD\nCurrency COP")],
+            [synthetic_file("mixed-currency.pdf", "Example Bank\nAccount number 12345678\nStatement period January 2025\nCurrency USD\nCurrency COP")],
             2025,
             "one-account",
             root / "mixed-currency.json",
@@ -713,7 +753,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("mixed-currency: expected mixed-currencies gate")
 
         dollar = build_preflight(
-            [synthetic_file("dollar.pdf", "Example Bank\nAccount number ACCT\nStatement period January 2025\nClosing balance $100.00")],
+            [synthetic_file("dollar.pdf", "Example Bank\nAccount number 12345678\nStatement period January 2025\nClosing balance $100.00")],
             2025,
             "one-account",
             root / "dollar.json",
@@ -723,7 +763,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("dollar: expected ambiguous-dollar gate")
 
         accounts = build_preflight(
-            [synthetic_file("accounts.pdf", "Example Bank\nAccount number ACCT\nAccount number OTHR\nStatement period January 2025\nCurrency USD")],
+            [synthetic_file("accounts.pdf", "Example Bank\nAccount number 11112222\nAccount number 33334444\nStatement period January 2025\nCurrency USD")],
             2025,
             "one-account",
             root / "accounts.json",
@@ -731,6 +771,26 @@ def command_self_test(_args: argparse.Namespace) -> int:
         )
         if not any(gate.get("code") == "possible-mixed-accounts" for gate in accounts["review_gates"]):  # type: ignore[index]
             failures.append("accounts: expected possible-mixed-accounts gate")
+
+        # A realistic single-account statement: only the real number is a hint.
+        # "Account Summary" and the holder name must not be captured (they used
+        # to trip a false possible-mixed-accounts gate and leak PII downstream).
+        one_account = build_preflight(
+            [
+                synthetic_file(
+                    "one-account.pdf",
+                    "Example Bank\nMonthly Account Statement\nAccount Summary\nAccount holder JUAN PEREZ GARCIA\nAccount number 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD",
+                )
+            ],
+            2025,
+            "one-account",
+            root / "one-account.json",
+            root / "one-account-review.csv",
+        )
+        if one_account["account_hints"] != ["12345678"]:  # type: ignore[index]
+            failures.append(f"one-account: expected only ['12345678'], got {one_account['account_hints']}")
+        if any(gate.get("code") == "possible-mixed-accounts" for gate in one_account["review_gates"]):  # type: ignore[index]
+            failures.append("one-account: a single account must not trip possible-mixed-accounts")
 
         low_text = build_preflight(
             [synthetic_file("scan.pdf", "", [], is_pdf=True)],
@@ -816,7 +876,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 11 preflight cases")
+    print("Self-test passed: 12 preflight cases")
     return 0
 
 
