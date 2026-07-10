@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import re
+import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -529,25 +530,58 @@ def command_manual(args: argparse.Namespace) -> int:
         raise RateError("Pass --annual-average-confirmed after verifying the source labels the value as yearly/annual average.", 2)
     rate = parse_user_rate(args.rate)
     proof_path = Path(args.proof_file)
+    staged_proof = stage_manual_proof(proof_path)
+    try:
+        workpaper = create_workpaper(
+            output_root=args.output_root,
+            currency_code=code,
+            year=args.year,
+            rate=rate,
+            rate_direction=args.rate_direction,
+            source_title=args.source_title,
+            source_url=args.source_url,
+            retrieval_date=args.retrieved or today_iso(),
+            source_note=args.source_note,
+            source_category=args.source_category,
+            saved_proofs=[staged_proof],
+            proof_limitations=[],
+        )
+    finally:
+        staged_proof.unlink(missing_ok=True)
+    print(final_text(workpaper))
+    return 0
+
+
+def stage_manual_proof(proof_path: Path) -> Path:
+    """Copy a manual proof before creating a packet folder.
+
+    The staged copy closes the gap between CLI validation and the workpaper
+    builder's later copy. A proof that disappears at either point fails cleanly
+    without creating an empty output root or packet folder.
+    """
     if not proof_path.is_file():
         raise RateError(f"Proof file does not exist or is not a regular file: {proof_path}", 2)
 
-    workpaper = create_workpaper(
-        output_root=args.output_root,
-        currency_code=code,
-        year=args.year,
-        rate=rate,
-        rate_direction=args.rate_direction,
-        source_title=args.source_title,
-        source_url=args.source_url,
-        retrieval_date=args.retrieved or today_iso(),
-        source_note=args.source_note,
-        source_category=args.source_category,
-        saved_proofs=[proof_path],
-        proof_limitations=[],
-    )
-    print(final_text(workpaper))
-    return 0
+    staged_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="get-yearly-fx-rate-proof-",
+            suffix=proof_path.suffix,
+            delete=False,
+        ) as staged_file:
+            staged_path = Path(staged_file.name)
+        shutil.copy2(proof_path, staged_path)
+    except FileNotFoundError as exc:
+        if staged_path is not None:
+            staged_path.unlink(missing_ok=True)
+        raise RateError(f"Proof file does not exist or is not a regular file: {proof_path}", 2) from exc
+    except OSError as exc:
+        if staged_path is not None:
+            staged_path.unlink(missing_ok=True)
+        raise RateError(f"Could not stage proof file: {proof_path}: {exc}", 2) from exc
+
+    assert staged_path is not None
+    return staged_path
 
 
 def command_map_check(args: argparse.Namespace) -> int:
@@ -722,17 +756,23 @@ def command_self_test(_args: argparse.Namespace) -> int:
         manual_workpaper = next((Path(tmp) / "manual-proof").glob("cop-2024-*/workpaper.json"))
         manual_data = json.loads(manual_workpaper.read_text(encoding="utf-8"))
         assert manual_data["foreign_per_usd"] == "4200"
+        for key in ("workpaper_pdf", "workpaper_md", "workpaper_json"):
+            assert Path(manual_data["proof"][key]).exists(), key
         saved_file = manual_data["proof"]["saved_files"][0]
         assert saved_file["filename"] == "source-proof-1.html"
         saved_path = Path(saved_file["path"])
         assert saved_path.exists()
         assert saved_path.parent.resolve() == manual_workpaper.parent.resolve()
+        assert saved_file["sha256"] == hashlib.sha256(proof_file.read_bytes()).hexdigest()
 
         directory_proof = Path(tmp) / "proof-directory"
         directory_proof.mkdir()
+        broken_link = Path(tmp) / "broken-proof-link.html"
+        broken_link.symlink_to(Path(tmp) / "missing-proof-target.html")
         for label, invalid_proof in (
             ("directory", directory_proof),
             ("missing", Path(tmp) / "missing-proof.html"),
+            ("broken-link", broken_link),
         ):
             rejected_args = argparse.Namespace(**vars(manual_args))
             rejected_root = Path(tmp) / f"manual-{label}-proof"
@@ -745,6 +785,61 @@ def command_self_test(_args: argparse.Namespace) -> int:
             else:
                 raise AssertionError(f"{label} proof should be rejected")
             assert not rejected_root.exists(), f"{label} proof must not create a packet"
+
+        # The source can disappear after its initial is_file() check. Staging
+        # must fail before the builder creates an output root in that case.
+        vanishing_proof = Path(tmp) / "vanishing-proof.html"
+        vanishing_proof.write_text("<p>published annual average</p>", encoding="utf-8")
+        vanishing_args = argparse.Namespace(**vars(manual_args))
+        vanishing_root = Path(tmp) / "manual-vanishing-proof"
+        vanishing_args.proof_file = str(vanishing_proof)
+        vanishing_args.output_root = str(vanishing_root)
+        original_copy2 = shutil.copy2
+
+        def delete_source_before_copy(source: str | Path, destination: str | Path, *copy_args: object, **copy_kwargs: object) -> str:
+            if Path(source) == vanishing_proof:
+                vanishing_proof.unlink()
+            return original_copy2(source, destination, *copy_args, **copy_kwargs)
+
+        shutil.copy2 = delete_source_before_copy
+        try:
+            try:
+                command_manual(vanishing_args)
+            except RateError as exc:
+                assert exc.code == 2
+                assert "Proof file does not exist or is not a regular file" in str(exc)
+            else:
+                raise AssertionError("proof deleted during staging should be rejected")
+        finally:
+            shutil.copy2 = original_copy2
+        assert not vanishing_root.exists(), "vanishing proof must not create an output root"
+
+        # Once staging succeeds, later source deletion must not affect the
+        # packet: the staged copy is the artifact copied and hashed by the kit.
+        late_deleted_proof = Path(tmp) / "late-deleted-proof.html"
+        late_deleted_proof.write_text("<p>published annual average</p>", encoding="utf-8")
+        late_deleted_args = argparse.Namespace(**vars(manual_args))
+        late_deleted_root = Path(tmp) / "manual-late-deleted-proof"
+        late_deleted_args.proof_file = str(late_deleted_proof)
+        late_deleted_args.output_root = str(late_deleted_root)
+        original_create_workpaper = create_workpaper
+
+        def delete_source_after_staging(**kwargs: object) -> dict[str, object]:
+            late_deleted_proof.unlink()
+            return original_create_workpaper(**kwargs)
+
+        globals()["create_workpaper"] = delete_source_after_staging
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                command_manual(late_deleted_args)
+        finally:
+            globals()["create_workpaper"] = original_create_workpaper
+        late_deleted_workpaper = next(late_deleted_root.glob("cop-2024-*/workpaper.json"))
+        late_deleted_data = json.loads(late_deleted_workpaper.read_text(encoding="utf-8"))
+        late_saved_file = late_deleted_data["proof"]["saved_files"][0]
+        assert not late_deleted_proof.exists()
+        assert Path(late_saved_file["path"]).exists()
+        assert late_saved_file["sha256"] == hashlib.sha256(b"<p>published annual average</p>").hexdigest()
 
         assert _year_arg("2024") == 2024
         for bad in ("24", "1969", "2101", "abc"):
