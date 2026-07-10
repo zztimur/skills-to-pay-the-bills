@@ -268,6 +268,13 @@ CURRENCY_LABEL_RE = re.compile(
     r"\b(?:currenc(?:y|ies)|monedas?|divisas?|denominat(?:ed|ion)|iso\s*4217)\b",
     re.I,
 )
+# A currency label only confirms a code within this many characters of it, so
+# "Currency: COP" confirms COP but "currency conversion fees ... in COP and MXN"
+# (disclosure boilerplate) does not.
+CURRENCY_LABEL_WINDOW = 16
+# "US$" / "U$S" / "US $" -> USD (standard Latin-American notation), so a dollar
+# sign written that way is resolved rather than flagged ambiguous.
+US_DOLLAR_RE = re.compile(r"\bUS ?\$|\bU\$S\b", re.I)
 _CURRENCY_CODE_ALT = "|".join(sorted(CURRENCY_CODES))
 # An "amount" must look monetary, not just be a digit run: a currency symbol, a
 # decimal-cents figure, a thousands-grouped figure, or a long (>=5 digit) number.
@@ -282,8 +289,10 @@ _AMOUNT = (
     r")"
 )
 CURRENCY_AMOUNT_RE = re.compile(
-    rf"\b(?P<pre>{_CURRENCY_CODE_ALT})\b\s*{_AMOUNT}"
-    rf"|{_AMOUNT}\s*\b(?P<post>{_CURRENCY_CODE_ALT})\b"
+    # No word boundary between the code and the amount, so a glued "EUR1.234,56"
+    # or "987.65GBP" is recognized; the outer boundaries still anchor the code.
+    rf"\b(?P<pre>{_CURRENCY_CODE_ALT})\s*{_AMOUNT}"
+    rf"|{_AMOUNT}\s*(?P<post>{_CURRENCY_CODE_ALT})\b"
 )
 
 
@@ -524,6 +533,15 @@ def institution_signature(hint: str) -> str:
     return " ".join(tokens)
 
 
+def _span_gap(a: tuple[int, int], b: tuple[int, int]) -> int:
+    """Character gap between two spans on a line (0 if they overlap)."""
+    if a[1] <= b[0]:
+        return b[0] - a[1]
+    if b[1] <= a[0]:
+        return a[0] - b[1]
+    return 0
+
+
 def detect_currency(lines: Iterable[str]) -> dict[str, object]:
     lines = list(lines)
     joined = "\n".join(lines)
@@ -533,17 +551,21 @@ def detect_currency(lines: Iterable[str]) -> dict[str, object]:
     alias_evidence: list[str] = []
 
     for line in lines:
-        has_label = bool(CURRENCY_LABEL_RE.search(line))
+        label_spans = [match.span() for match in CURRENCY_LABEL_RE.finditer(line)]
         adjacent = {
             (match.group("pre") or match.group("post")).upper()
             for match in CURRENCY_AMOUNT_RE.finditer(line)
             if (match.group("pre") or match.group("post"))
         }
+        # A code beside a monetary amount is confirmed -- even glued
+        # ("EUR1.234,56"), where the bare three-letter scan below can't see it.
+        confirmed.extend(adjacent)
         for match in ISO_CURRENCY_RE.finditer(line):
             token = match.group(0).upper()
-            if token not in CURRENCY_CODES:
+            if token not in CURRENCY_CODES or token in adjacent:
                 continue
-            if has_label or token in adjacent:
+            near_label = any(_span_gap(span, match.span()) <= CURRENCY_LABEL_WINDOW for span in label_spans)
+            if near_label:
                 confirmed.append(token)
             else:
                 weak.append(token)
@@ -553,6 +575,9 @@ def detect_currency(lines: Iterable[str]) -> dict[str, object]:
         if alias in low:
             confirmed.append(code)
             alias_evidence.append(alias)
+    if US_DOLLAR_RE.search(joined):
+        confirmed.append("USD")
+        symbol_markers.add("US$")
     if "$" in joined:
         symbol_markers.add("$")
     for symbol, code in (("€", "EUR"), ("£", "GBP"), ("¥", "JPY")):
@@ -1015,6 +1040,21 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if detect_currency(["Ending balance 9.999,99 GBP"])["code"] != "GBP":
             failures.append("currency-amount: a monetary figure adjacent to a code must still confirm")
 
+        # A label confirms only a nearby code; distant disclosure boilerplate
+        # ("conversion fees ... in COP and MXN") stays weak, not confirmed.
+        disclosure = detect_currency(
+            ["Currency USD", "Closing balance 1,234.56 USD", "conversion fees apply to transactions in COP and MXN"]
+        )
+        if disclosure["code"] != "USD" or "COP" not in disclosure["weak_candidates"]:  # type: ignore[index]
+            failures.append(f"currency-label: distant boilerplate codes must stay weak, got {disclosure}")
+        # 'US$' notation resolves to USD instead of ambiguous-dollar.
+        us_dollar = detect_currency(["Saldo final US$ 1,234.56"])
+        if us_dollar["code"] != "USD" or us_dollar["ambiguous_dollar"]:  # type: ignore[index]
+            failures.append(f"currency-symbol: 'US$' must resolve to USD, got {us_dollar}")
+        # A code glued to its amount is still recognized.
+        if detect_currency(["Ending balance EUR1.234,56"])["code"] != "EUR":
+            failures.append("currency-glued: a code glued to its amount (EUR1.234,56) must confirm")
+
         accounts = build_preflight(
             [synthetic_file("accounts.pdf", "Example Bank\nAccount 11112222\nAccount 33334444\nStatement period January 2025\nCurrency USD")],
             2025,
@@ -1261,7 +1301,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 20 preflight cases")
+    print("Self-test passed: 21 preflight cases")
     return 0
 
 
