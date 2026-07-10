@@ -119,6 +119,7 @@ After changing this skill, run:
 
 ```bash
 python3 "<package-root>/scripts/get_year_end_fx_rate.py" self-test
+python3 "<package-root>/tests/run_regressions.py"
 python3 -S skill-forge/scripts/inspect_skill_package.py "<package-root>" --json --strict
 ```
 

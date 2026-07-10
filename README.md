@@ -139,7 +139,7 @@ The root GitHub Actions workflow runs the checks that are stable on a clean runn
 - strict `skill-forge` inspection for every skill package;
 - a strict `privacy-gate` scan of the repo tree, so a stray secret or private file fails the build the same way the pre-commit hook fails a commit;
 - a `workpaper-kit/sync.sh --check` backstop, so a vendored `_workpaper.py` copy that drifted from the canonical source fails the build;
-- deterministic self-tests for the scripts that carry behavior, including the `workpaper-kit` golden test;
+- deterministic self-tests and regression runners for the scripts that carry behavior, including the `workpaper-kit` golden test;
 - no live IRS/Treasury lookups and no local-only Claude validator assumptions.
 
 Live source checks still belong in release review when the task needs them. A green badge should mean "the package still holds together," not "the internet behaved today."
