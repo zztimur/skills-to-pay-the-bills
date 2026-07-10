@@ -118,7 +118,7 @@ python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py self-test
 python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py map-check --year 2025 --currency AED --strict
 ```
 
-The script keeps a Treasury row-to-ISO map because Fiscal Data uses labels like `United Arab Emirates-Dirham`, not ISO codes like `AED`. Use targeted `map-check --currency <ISO>` when adding a currency. Use untargeted `map-check --year <year>` when you want to see the broader backlog of Treasury rows this helper does not map yet. If `map-check` reports unmapped rows that users actually need, update `TREASURY_ROWS_BY_CODE`, add only unambiguous aliases, and put that currency into `self-test`.
+The script keeps a Treasury row-to-ISO map because Fiscal Data uses labels like `United Arab Emirates-Dirham`, not ISO codes like `AED`. Use targeted `map-check --currency <ISO>` when adding a currency. Untargeted strict `map-check` must classify every row as mapped or explicitly excepted; an unexplained row is a map-maintenance failure, not proof that Treasury lacks a rate. The frozen 2025 Treasury response in `tests/fixtures/` keeps that test deterministic.
 
 The workpaper machinery — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — lives in [`workpaper-kit`](../workpaper-kit/), vendored here as `scripts/_workpaper.py` and shared with `get-yearly-fx-rate` so both proof packets look the same. Edit the canonical `workpaper-kit/workpaper.py`, never the generated copy; the pre-commit hook re-syncs it (or run `workpaper-kit/sync.sh`). The Treasury lookup, the `reject_average_language` rule, and currency handling stay here in the skill.
 
