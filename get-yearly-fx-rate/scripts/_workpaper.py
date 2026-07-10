@@ -294,10 +294,9 @@ def wrap_for_pdf(value: object, max_width: float, font_size: float) -> list[str]
 # appear in the persisted, consumer-facing JSON.
 _PRESENTATION_KEY = "_presentation"
 
-# Appended when a proof-required workpaper is built with no usable proof file.
-# Only get-year-end-fx-rate sets ``proof_required`` today, and it only reaches
-# this branch on a manual source with no ``--proof-file``; the wording matches
-# that path. yearly (``proof_required=False``) never appends it.
+# Appended when a proof-required workpaper is built without a usable proof
+# entry. Callers that require a supplied proof should validate it before
+# building so no incomplete packet is created.
 NO_PROOF_LIMITATION = "No saved source proof file was supplied for this manual workpaper."
 
 

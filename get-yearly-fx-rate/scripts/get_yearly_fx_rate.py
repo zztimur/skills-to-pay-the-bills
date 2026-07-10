@@ -469,7 +469,7 @@ def create_workpaper(
             "Do not describe this rate as IRS-approved.",
         ],
         saved_proofs=saved_proofs,
-        proof_required=False,
+        proof_required=True,
         proof_limitations=proof_limitations,
     )
     return build_workpaper(spec)
@@ -529,8 +529,8 @@ def command_manual(args: argparse.Namespace) -> int:
         raise RateError("Pass --annual-average-confirmed after verifying the source labels the value as yearly/annual average.", 2)
     rate = parse_user_rate(args.rate)
     proof_path = Path(args.proof_file)
-    if not proof_path.exists():
-        raise RateError(f"Proof file does not exist: {proof_path}", 2)
+    if not proof_path.is_file():
+        raise RateError(f"Proof file does not exist or is not a regular file: {proof_path}", 2)
 
     workpaper = create_workpaper(
         output_root=args.output_root,
@@ -727,6 +727,24 @@ def command_self_test(_args: argparse.Namespace) -> int:
         saved_path = Path(saved_file["path"])
         assert saved_path.exists()
         assert saved_path.parent.resolve() == manual_workpaper.parent.resolve()
+
+        directory_proof = Path(tmp) / "proof-directory"
+        directory_proof.mkdir()
+        for label, invalid_proof in (
+            ("directory", directory_proof),
+            ("missing", Path(tmp) / "missing-proof.html"),
+        ):
+            rejected_args = argparse.Namespace(**vars(manual_args))
+            rejected_root = Path(tmp) / f"manual-{label}-proof"
+            rejected_args.proof_file = str(invalid_proof)
+            rejected_args.output_root = str(rejected_root)
+            try:
+                command_manual(rejected_args)
+            except RateError as exc:
+                assert exc.code == 2
+            else:
+                raise AssertionError(f"{label} proof should be rejected")
+            assert not rejected_root.exists(), f"{label} proof must not create a packet"
 
         assert _year_arg("2024") == 2024
         for bad in ("24", "1969", "2101", "abc"):
