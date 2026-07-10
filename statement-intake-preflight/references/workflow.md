@@ -46,7 +46,7 @@ The command writes:
 
 Open the JSON and CSV before continuing. Confirm:
 
-- `statement_files` are the exact PDFs expected for the downstream run.
+- `statement_files` are the exact PDFs expected for the downstream run. Each carries a `content_sha256` of its bytes, so a downstream run can pin that it parsed the same files preflight saw.
 - `tax_year` and `scope` match the intended downstream workflow.
 - The files have enough machine-readable text.
 - `profile.statement_titles` and `coverage_hints.detected_periods` look like the requested year.
@@ -69,8 +69,9 @@ Complete gate catalog:
 | `missing-file` | stop | A supplied file was not found. |
 | `unreadable-pdf` | stop | A `.pdf` could not be parsed as a PDF. |
 | `low-text-pdf` | stop | Machine-readable text is below threshold (scanned/image-only; out of scope for v1). |
-| `duplicate-input` | review | The same statement file was supplied more than once. |
-| `mixed-years` | review | A detected statement year falls outside the requested tax year. |
+| `duplicate-input` | review | The same statement file (same resolved path) was supplied more than once. |
+| `duplicate-content` | review | Byte-identical statements were supplied under different names. |
+| `mixed-years` | review | A detected statement year falls outside the requested tax year. Copyright/heritage footer years (`© 2019`, `since 1904`) are excluded. |
 | `unknown-year-coverage` | review | No statement year was detected; verify the periods manually. |
 | `ambiguous-dollar` | review | `$` appears with no unambiguous ISO code or currency name. |
 | `unknown-currency` | review | No account currency marker was found. |
