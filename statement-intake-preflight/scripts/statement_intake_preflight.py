@@ -225,11 +225,21 @@ INSTITUTION_STEM_STOPWORDS = {
 }
 # A one-token brand can also END in "bank" ("Commerzbank", "Postbank",
 # "Rabobank"), which the start-anchored prefix stem above cannot see (there is no
-# word boundary before "bank" inside "Commerzbank"). Match a token that ends in
-# "bank" and exclude the common nouns/place-names that share the suffix but are
-# not institutions. "banking"/"embankment" etc. do not end in "bank", so the
-# trailing \b already keeps them out; the stopword set covers the words that do.
+# word boundary before "bank" inside "Commerzbank"). But an unbounded set of
+# common English nouns also ends in "bank" ("foodbank", "snowbank", "bloodbank",
+# ...), which a stopword blocklist can never fully enumerate. So a suffix match is
+# trusted only when its line ALSO carries banking/statement context (a document
+# word, an account label, or a legal-entity suffix): that admits real mastheads
+# ("Commerzbank Kontoauszug", "Rabobank Account Statement") while rejecting prose
+# that merely ends in "-bank" ("Local Foodbank donation drive"). The stopword set
+# is kept as a second guard for the rare common-noun-plus-context line.
 INSTITUTION_STEM_SUFFIX_RE = re.compile(r"\b\w*bank\b", re.I)
+INSTITUTION_CONTEXT_RE = re.compile(
+    r"\b(?:statement|kontoauszug|auszug|rekeningafschrift|afschrift|relev[eé]|"
+    r"estratto|account|konto|rekening|compte|conto|cuenta|iban|bic|swift|"
+    r"a\.?g\.?|n\.?a\.?|n\.?v\.?|s\.?a\.?|s\.?p\.?a\.?|gmbh|plc|inc|ltd)\b",
+    re.I,
+)
 INSTITUTION_STEM_SUFFIX_STOPWORDS = {
     "bank",  # the bare word is already an INSTITUTION_TERM, matched earlier
     "riverbank",
@@ -242,6 +252,13 @@ INSTITUTION_STEM_SUFFIX_STOPWORDS = {
     "mountebank",
     "burbank",
     "wordbank",
+    "foodbank",
+    "snowbank",
+    "bloodbank",
+    "seedbank",
+    "greenbank",
+    "cutbank",
+    "outbank",
 }
 
 
@@ -265,12 +282,16 @@ def line_names_institution(line: str) -> bool:
     ):
         return True
     # Suffix brand stems: a token ending in "bank" ("Commerzbank", "Postbank",
-    # "Rabobank") that the start-anchored prefix stem cannot reach, minus the
-    # common -bank words that are not institutions.
-    return any(
-        match.group(0).casefold() not in INSTITUTION_STEM_SUFFIX_STOPWORDS
-        for match in INSTITUTION_STEM_SUFFIX_RE.finditer(line)
-    )
+    # "Rabobank") that the start-anchored prefix stem cannot reach -- but only
+    # when the line also carries banking/statement context, so common -bank nouns
+    # in prose ("Foodbank", "snowbank") are not read as institutions. The stopword
+    # set is a second guard for a common-noun-plus-context line.
+    if INSTITUTION_CONTEXT_RE.search(line):
+        return any(
+            match.group(0).casefold() not in INSTITUTION_STEM_SUFFIX_STOPWORDS
+            for match in INSTITUTION_STEM_SUFFIX_RE.finditer(line)
+        )
+    return False
 
 # A customer mailing address that happens to sit on a street with a bank-like
 # name (a number followed by "<Bank-word> Street") is not the statement's
@@ -385,9 +406,18 @@ ISO_CURRENCY_RE = re.compile(r"\b[A-Z]{3}\b")
 # coverage; otherwise that footer alone would force an otherwise-clean statement
 # into the mixed-years review gate. Kept tight (word-boundaried markers, small
 # window) so a genuine period year on the same line is never suppressed.
-BOILERPLATE_YEAR_MARKER_RE = re.compile(
-    r"©|\(c\)|copyright|all rights reserved|\bsince\b|\bestablished\b|\best\.|"
-    r"\bfounded\b|member\s+(?:fdic|sipc)",
+# Year markers come in two kinds, handled differently in detect_years:
+#   HARD copyright/legal markers ("© 2019", "(c) 2019 ... All rights reserved")
+#   never head a statement period -- a year in their clause is always dropped,
+#   even in "© May 2019" or a "© 2019-2024" range.
+#   DUAL-USE markers ("since"/"established"/"founded"/"Member FDIC") also head
+#   real dates, so a year next to them is dropped only when it is bare; a year
+#   carrying a NUMERIC date ("since 2025-04-01", "...since 01.01.2025") is kept.
+# A month name is NOT treated as date context for dual-use markers, because
+# "Customer since March 2015" is an account-open/heritage date, not a period.
+HARD_COPYRIGHT_MARKER_RE = re.compile(r"©|\(c\)|copyright|all rights reserved", re.I)
+DUAL_USE_MARKER_RE = re.compile(
+    r"\bsince\b|\bestablished\b|\best\.|\bfounded\b|member\s+(?:fdic|sipc)",
     re.I,
 )
 YEAR_CONTEXT_WINDOW = 8
@@ -410,11 +440,14 @@ NUMERIC_PERIOD_RE = re.compile(
 # an amount. This keeps all-caps prose ("PLEASE TRY OUR APP") and merchant names
 # out of the confirmed set while still surfacing them as weak candidates.
 CURRENCY_LABEL_RE = re.compile(
-    # English/Spanish plus German (Währung, umlaut-stripped Wahrung), French
-    # (devise), and Italian/Dutch/Nordic (valuta) -- so a European statement that
-    # only labels its currency in its own language ("Währung: CHF") can still
-    # confirm the code instead of leaving it a weak, unconfirmed candidate.
-    r"\b(?:currenc(?:y|ies)|monedas?|divisas?|w[aä]hrung|devise|valuta|"
+    # English/Spanish plus German (Währung, umlaut-stripped Wahrung) -- so a
+    # European statement that labels its currency in its own language ("Währung:
+    # CHF") still confirms the code. Deliberately NOT "devise" (collides with the
+    # common English verb, "devise a EUR plan") nor "valuta" (means "value date"
+    # in German/Nordic banking, "Valuta 15.01.2025 USD", not currency): both
+    # produced false confirmations. French/Italian/Dutch statements still confirm
+    # via the € symbol or an adjacent amount, so nothing real is lost.
+    r"\b(?:currenc(?:y|ies)|monedas?|divisas?|w[aä]hrung|"
     r"denominat(?:ed|ion)|iso\s*4217)\b",
     re.I,
 )
@@ -606,43 +639,61 @@ def file_profile(
     }
 
 
-# Date context that proves a year is a real period year, not copyright/heritage.
 # ISO_DATE_TAIL_RE matches the "-MM-DD" that FOLLOWS a year heading a numeric
 # date ("2025-04-01"); the tail form ("01.01.2025") is caught by the preceding
-# separator instead. MONTH_ADJ_RE finds a month name (English or Spanish) so a
-# year beside one ("since March 2025", "marzo de 2025") is kept. The month
-# window allows the Spanish "<month> de <year>" gap, not just a single space.
+# separator instead. MONTH_ADJ_RE finds a month name; it is used ONLY to bridge a
+# hard copyright marker to its year across an intervening month ("© May 2019"),
+# never to rescue a year next to a dual-use marker.
 ISO_DATE_TAIL_RE = re.compile(r"[-/.]\d{1,2}[-/.]\d{1,2}")
 MONTH_ADJ_RE = re.compile(r"\b(?:" + "|".join(MONTH_NAMES) + r")\b", re.I)
 MONTH_YEAR_WINDOW = 5
 
 
+def _marker_reaches_year(marker_spans: list, yspan: tuple, month_spans: list) -> bool:
+    """Whether a marker sits near a year on the line -- directly (within
+    YEAR_CONTEXT_WINDOW), or bridged by an intervening month name ("© May 2019",
+    "Member since January 2015"). The month bridge makes suppression independent
+    of the month name's length, so "since March"/"since January"/"since
+    September" all behave identically."""
+    if any(_span_gap(marker, yspan) <= YEAR_CONTEXT_WINDOW for marker in marker_spans):
+        return True
+    return any(
+        _span_gap(marker, mon) <= YEAR_CONTEXT_WINDOW and _span_gap(mon, yspan) <= MONTH_YEAR_WINDOW
+        for marker in marker_spans
+        for mon in month_spans
+    )
+
+
 def detect_years(lines: Iterable[str]) -> list[int]:
     years: set[int] = set()
     for line in lines:
-        marker_spans = [match.span() for match in BOILERPLATE_YEAR_MARKER_RE.finditer(line)]
+        hard_spans = [match.span() for match in HARD_COPYRIGHT_MARKER_RE.finditer(line)]
+        dual_spans = [match.span() for match in DUAL_USE_MARKER_RE.finditer(line)]
         month_spans = [match.span() for match in MONTH_ADJ_RE.finditer(line)]
         for match in YEAR_RE.finditer(line):
-            # A copyright/heritage year sits as a bare year within a few
-            # characters of its marker ("© 2019", "since 1904"); drop it so it
-            # cannot masquerade as a statement-period year. But those markers are
-            # dual-use -- "since"/"established" also head real dates -- so a year
-            # that carries date context is kept even next to a marker: the tail of
-            # a numeric date ("...since 01.01.2025"), the head of one ("since
-            # 2025-04-01"), or a year beside a month name ("since March 2025").
-            # Only a truly bare year next to a marker is suppressed. (Trade: a rare
-            # "Established March 1901" is kept; mixed-years is a fail-safe review
-            # gate, so a spurious keep only prompts a human, never corrupts data.)
-            in_numeric_date = (
+            yspan = match.span()
+            # Hard copyright/legal marker: a year in its clause is never a
+            # statement period. Drop it whether it abuts the marker directly
+            # ("© 2019", each end of a "© 2019-2024" range) or through a month
+            # name ("© May 2019", "Copyright January 2020").
+            # Known limitation (low, fail-safe): a rare comma-separated multi-year
+            # copyright list ("© 2019, 2020, 2021") can leak a trailing year past
+            # the window; transitive year-run suppression is deliberately not added
+            # for so uncommon a footer. Worst case is a mixed-years review prompt,
+            # never a wrong result -- and copyright *ranges* are fully covered.
+            if _marker_reaches_year(hard_spans, yspan, month_spans):
+                continue
+            # Dual-use marker ("since"/"established"/...): keep a year that carries
+            # a NUMERIC date -- the tail of one ("...since 01.01.2025") or the head
+            # of one ("since 2025-04-01") -- and suppress a bare or month-only year
+            # ("since 1904", "Customer since March 2015"), which is a heritage/
+            # account-open date, not a period, and would else false-trip
+            # mixed-years on an otherwise-clean statement.
+            numeric_date = (
                 (match.start() > 0 and line[match.start() - 1] in "./-")
                 or ISO_DATE_TAIL_RE.match(line, match.end()) is not None
             )
-            near_month = any(
-                _span_gap(span, match.span()) <= MONTH_YEAR_WINDOW for span in month_spans
-            )
-            if not (in_numeric_date or near_month) and any(
-                _span_gap(span, match.span()) <= YEAR_CONTEXT_WINDOW for span in marker_spans
-            ):
+            if not numeric_date and _marker_reaches_year(dual_spans, yspan, month_spans):
                 continue
             years.add(int(match.group(1)))
     return sorted(years)
@@ -1420,12 +1471,19 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("currency-usd-label: a labeled 'Currency USD' must still confirm")
         if detect_currency(["Closing balance 100.00 USD"])["code"] != "USD":  # type: ignore[index]
             failures.append("currency-usd-amount: 'USD' beside an amount must still confirm")
-        # F1b: German/French currency labels confirm the code beside them, so a
-        # European statement labeled only in its own language is not left unknown.
+        # F1b: the German currency label confirms the code beside it, so a German
+        # statement labeled only in its own language is not left unknown.
         if detect_currency([clean_line("Währung: CHF")])["code"] != "CHF":  # type: ignore[index]
             failures.append("currency-label-de: 'Währung: CHF' must confirm CHF")
-        if detect_currency(["Devise: EUR"])["code"] != "EUR":  # type: ignore[index]
-            failures.append("currency-label-fr: 'Devise: EUR' must confirm EUR")
+        # Round-8 A: "devise" and "valuta" are deliberately NOT currency labels --
+        # "devise" collides with the English verb ("devise a EUR plan") and
+        # "valuta" means "value date" in German/Nordic banking ("Valuta 15.01.2025
+        # USD"). Neither may confirm a code; French/Dutch statements confirm via €
+        # or amount adjacency instead.
+        if "EUR" in detect_currency(["We can devise a EUR plan for you"])["candidates"]:  # type: ignore[index]
+            failures.append("currency-devise-verb: the English verb 'devise' must not confirm a currency")
+        if "USD" in detect_currency(["Valuta 15.01.2025 USD", "Saldo EUR 1.234,56"])["candidates"]:  # type: ignore[index]
+            failures.append("currency-valuta-valuedate: a 'Valuta <date>' value-date line must not confirm USD")
         # F2: a negative amount keeps code-adjacency -- accounting parens and the
         # European trailing minus both sit between figure and code.
         if detect_currency(["Service charge (1.234,56) EUR"])["code"] != "EUR":  # type: ignore[index]
@@ -1445,23 +1503,31 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if detect_currency([clean_line("Closing balance 1.234,56 EUR¹")])["code"] != "EUR":  # type: ignore[index]
             failures.append("currency-footnote: a footnoted 'EUR¹' beside an amount must confirm EUR")
 
-        # --- Round-7 coverage (F4/F5/F6) ---
-        # F4: a year with date context survives beside a dual-use marker. The
-        # head of an ISO date ("since 2025-04-01") and a month-adjacent year
-        # ("since March 2025") are kept; a bare heritage/copyright year is still
-        # suppressed; a year range is not mistaken for a single ISO date.
+        # --- Round-7 coverage (F4/F5/F6), corrected by round 8 ---
+        # F4/B: beside a DUAL-USE marker a year is kept only with NUMERIC date
+        # context ("since 2025-04-01"); a bare or month-only year is suppressed,
+        # independent of the month name's length. A HARD copyright marker
+        # suppresses its year even through a month or a range.
         if 2025 not in detect_years(["Portfolio value since 2025-04-01"]):
-            failures.append("year-iso-head: 'since 2025-04-01' must keep the temporal year")
-        if 2025 not in detect_years(["Interest earned since March 2025"]):
-            failures.append("year-month-adj: 'since March 2025' must keep the temporal year")
+            failures.append("year-iso-head: numeric 'since 2025-04-01' must keep the year")
+        march = detect_years(["Interest earned since March 2025"])
+        january = detect_years(["Interest earned since January 2025"])
+        if (2025 in march) or (2025 in january) or (march != january):
+            failures.append(f"year-month-since: month-only 'since <Month> 2025' must be suppressed and month-length independent, got march={march} january={january}")
         if 1904 in detect_years(["Serving our community since 1904"]):
             failures.append("year-heritage: bare 'since 1904' must stay suppressed")
-        if 2019 in detect_years(["(c) 2019 Example Bancorp. All rights reserved."]):
-            failures.append("year-copyright: a bare copyright year must stay suppressed")
+        for leak, line in [
+            (2019, "© May 2019 Example Bank. All rights reserved."),
+            (2020, "Copyright January 2020 Example Bancorp"),
+            (2024, "© 2019-2024 Example Bank"),
+        ]:
+            if leak in detect_years([line]):
+                failures.append(f"year-hard-copyright: {leak} must stay suppressed in {line!r}")
         if detect_years(["Comparative 2024-2025 summary"]) != [2024, 2025]:
-            failures.append("year-range: a year range must keep both years, not be read as one ISO date")
-        # F5: a one-token brand ending in "bank" is recognized, as is a German
-        # savings bank; common -bank nouns/place-names are not institutions.
+            failures.append("year-range: a bare year range (no marker) must keep both years")
+        # F5: a one-token brand ending in "bank" (with banking context on the
+        # line) is recognized, as is a German savings bank; common -bank nouns and
+        # place-names are not institutions.
         if not line_names_institution("Commerzbank Kontoauszug"):
             failures.append("inst-suffix: 'Commerzbank' must be recognized as an institution")
         if not line_names_institution("Rabobank Account Statement"):
@@ -1472,6 +1538,11 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("inst-guard: 'riverbank' must not be an institution")
         if line_names_institution("See our nonbank lender disclosure"):
             failures.append("inst-guard: 'nonbank' must not be an institution")
+        # Round-8 C: the -bank suffix needs banking context, so common -bank nouns
+        # in prose are not institutions even when capitalized.
+        for noun in ["Local Foodbank donation drive", "snowbank cleared from the lot", "Community Bloodbank notice"]:
+            if line_names_institution(noun):
+                failures.append(f"inst-bank-noun: {noun!r} must not be read as an institution")
         # F6: German/French bare account labels yield the account number.
         if detect_account_hints(["Konto 12345678"]) != ["12345678"]:
             failures.append("acct-konto: German 'Konto 12345678' must yield the account")
@@ -1923,7 +1994,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 39 preflight cases")
+    print("Self-test passed: 42 preflight cases")
     return 0
 
 

@@ -716,6 +716,58 @@ check("COV-4 Dutch '-bank' brand (Rabobank) is recognized as the institution",
       f"inst={d['institution_hints'] if d else '?'} gates={gates_of(d)}")
 
 # --------------------------------------------------------------------------- #
+# Round-8 fixes: copyright/heritage year leaks, devise/valuta labels, -bank nouns
+# --------------------------------------------------------------------------- #
+
+# R8-1 (finding B): a clean 2025 statement carrying a "© May 2019" copyright
+# footer must NOT trip a false mixed-years gate -- the hard-copyright year is
+# suppressed even with an intervening month.
+p = make_pdf("copyright-month.pdf", [
+    "Example Bank Monthly Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Currency USD",
+    "Closing balance 1,234.56 USD",
+    "© May 2019 Example Bank. All rights reserved.",
+])
+proc, d = run("copyright-month", [str(p)])
+check("R8-1 a '© May 2019' footer does not trip mixed-years on a 2025 statement",
+      d and "mixed-years" not in gates_of(d) and d["coverage_hints"]["detected_years"] == [2025],
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
+
+# R8-2 (finding A): an advisory-prose line using the English verb "devise" near a
+# currency code must NOT flip an otherwise-USD statement to mixed-currencies.
+p = make_pdf("devise-verb.pdf", [
+    "Example Bank Wealth Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Currency USD",
+    "Closing balance 12,345.67 USD",
+    "Your advisor can devise a PLN allocation on request",
+])
+proc, d = run("devise-verb", [str(p)])
+check("R8-2 an advisory 'devise a PLN' line does not trip false mixed-currencies",
+      d and d["currency"]["code"] == "USD" and "mixed-currencies" not in gates_of(d),
+      f"currency={d['currency'] if d else '?'} gates={gates_of(d)}")
+
+# R8-3 (finding C): a '-bank' common noun in the header region ("Foodbank") with
+# no banking context is not mined as the institution; the real header bank wins.
+p = make_pdf("foodbank-noise.pdf", [
+    "Commerzbank Kontoauszug",
+    "Konto 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Währung EUR",
+    "Saldo 1.234,56",
+    "01.01.2025 Local Foodbank charity payment 25.00",
+])
+proc, d = run("foodbank-noise", [str(p)], scope="one-institution")
+insts = [h.casefold() for h in (d["institution_hints"] if d else [])]
+check("R8-3 a 'Foodbank' prose line does not pollute institution hints",
+      d and not any("foodbank" in h for h in insts)
+      and "possible-mixed-institutions" not in gates_of(d),
+      f"inst={d['institution_hints'] if d else '?'} gates={gates_of(d)}")
+
+# --------------------------------------------------------------------------- #
 # Report
 # --------------------------------------------------------------------------- #
 
