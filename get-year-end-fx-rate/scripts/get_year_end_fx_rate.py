@@ -108,6 +108,8 @@ ALIASES = {
     "rand": "ZAR",
 }
 
+KNOWN_CURRENCY_CODES = set(TREASURY_ROWS_BY_CODE) | set(ALIASES.values())
+
 AMBIGUOUS_TERMS = {
     "peso": "Use a country or ISO code, for example COP, MXN, ARS, CLP, or UYU.",
     "dollar": "Use a country or ISO code, for example CAD, AUD, NZD, SGD, HKD, or TWD.",
@@ -187,6 +189,21 @@ def parse_decimal(raw: object) -> Decimal:
     try:
         return Decimal(value)
     except InvalidOperation as exc:
+        raise RateError(f"Could not parse rate value '{raw}'.", 3) from exc
+
+
+def parse_user_rate(raw: str) -> Decimal:
+    """Parse a manual rate without guessing at locale or separator intent."""
+    text = clean_text(raw)
+    if not re.fullmatch(r"-?\d+(\.\d+)?", text):
+        raise RateError(
+            f"Rate '{raw}' is not an unambiguous number. Use digits with an optional "
+            f"period decimal and no thousands separators, e.g. 3900, 3900.00, or 0.00025.",
+            3,
+        )
+    try:
+        return Decimal(text)
+    except InvalidOperation as exc:  # pragma: no cover - regex already guards this
         raise RateError(f"Could not parse rate value '{raw}'.", 3) from exc
 
 
@@ -459,6 +476,12 @@ def command_lookup(args: argparse.Namespace) -> int:
 
 def command_manual(args: argparse.Namespace) -> int:
     code = normalize_currency(args.currency)
+    if code not in KNOWN_CURRENCY_CODES and not args.allow_unknown_code:
+        raise RateError(
+            f"Currency code {code} is not in this skill's known Treasury/alias set. If it is a "
+            f"real ISO 4217 code, re-run with --allow-unknown-code; otherwise fix the currency.",
+            2,
+        )
     if not args.year_end_confirmed:
         raise RateError("Pass --year-end-confirmed after verifying the source supports a year-end or YYYY-12-31 rate.", 2)
     reject_average_language(args.source_title, args.source_note, args.source_category)
@@ -469,7 +492,7 @@ def command_manual(args: argparse.Namespace) -> int:
         currency_code=code,
         year=args.year,
         year_end_date=f"{args.year}-12-31",
-        rate=parse_decimal(args.rate),
+        rate=parse_user_rate(args.rate),
         rate_direction=args.rate_direction,
         source_title=args.source_title,
         source_url=args.source_url,
@@ -588,6 +611,36 @@ def command_self_test(_args: argparse.Namespace) -> int:
     else:
         raise AssertionError("yearly average wording should fail")
 
+    assert parse_user_rate("3900") == Decimal("3900")
+    assert parse_user_rate("3900.00") == Decimal("3900.00")
+    assert parse_user_rate("0.00025") == Decimal("0.00025")
+    for bad in ("1.234,56", "4,200", "1.2.3", "1e3", "abc"):
+        try:
+            parse_user_rate(bad)
+        except RateError as exc:
+            assert exc.code == 3, bad
+        else:
+            raise AssertionError(f"parse_user_rate should reject {bad!r}")
+
+    assert _year_arg("1900") == 1900
+    assert _year_arg("2025") == 2025
+    for bad in ("1899", "2101", "abc"):
+        try:
+            _year_arg(bad)
+        except argparse.ArgumentTypeError:
+            pass
+        else:
+            raise AssertionError(f"_year_arg should reject {bad!r}")
+
+    assert _iso_date_arg("2026-07-09") == "2026-07-09"
+    for bad in ("not-a-date", "2026-13-01", "07/09/2026", "20260709", "2026-7-9"):
+        try:
+            _iso_date_arg(bad)
+        except argparse.ArgumentTypeError:
+            pass
+        else:
+            raise AssertionError(f"_iso_date_arg should reject {bad!r}")
+
     with tempfile.TemporaryDirectory() as tmp:
         api_file = Path(tmp) / "treasury.json"
         api_file.write_text(json_text, encoding="utf-8")
@@ -693,6 +746,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             year_end_confirmed=True,
             retrieved="2026-07-03",
             proof_file=str(proof_file),
+            allow_unknown_code=False,
             output_root=str(Path(tmp) / "manual-proof"),
         )
         manual_output = io.StringIO()
@@ -728,15 +782,36 @@ def command_self_test(_args: argparse.Namespace) -> int:
         else:
             raise AssertionError("manual yearly-average wording should fail")
 
+        unknown_args = argparse.Namespace(
+            **{
+                **manual_args.__dict__,
+                "currency": "XQZ",
+                "allow_unknown_code": False,
+                "output_root": str(Path(tmp) / "unknown-proof"),
+            }
+        )
+        try:
+            command_manual(unknown_args)
+        except RateError as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError("unknown currency code should require --allow-unknown-code")
+
+        allowed_unknown_args = argparse.Namespace(
+            **{**unknown_args.__dict__, "allow_unknown_code": True}
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert command_manual(allowed_unknown_args) == 0
+
     print("self-test passed")
     return 0
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--currency", required=True, help="Currency code or unambiguous currency name.")
-    parser.add_argument("--year", required=True, type=int, help="Calendar year.")
+    parser.add_argument("--year", required=True, type=_year_arg, help="Calendar year (1900-2100).")
     parser.add_argument("--output-root", default="work/fbar-fx-rate-proof", help="Proof output root.")
-    parser.add_argument("--retrieved", help="Retrieval date YYYY-MM-DD; defaults to today.")
+    parser.add_argument("--retrieved", type=_iso_date_arg, help="Retrieval date YYYY-MM-DD; defaults to today.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -763,11 +838,12 @@ def build_parser() -> argparse.ArgumentParser:
     manual.add_argument("--source-category", default="published year-end rate", help="Source class.")
     manual.add_argument("--source-note", default="", help="Note confirming the source supports a year-end rate.")
     manual.add_argument("--year-end-confirmed", action="store_true", help="Required confirmation that the source supports a year-end or YYYY-MM-DD rate.")
+    manual.add_argument("--allow-unknown-code", action="store_true", help="Confirm a real ISO 4217 code that is not in the skill's known Treasury/alias set.")
     manual.add_argument("--proof-file", help="Optional local screenshot/PDF/HTML/source proof file to copy, hash, and reference.")
     manual.set_defaults(func=command_manual)
 
     map_check = subparsers.add_parser("map-check", help="Compare a Treasury/Fiscal Data year-end response with the hard-coded currency map.")
-    map_check.add_argument("--year", required=True, type=int, help="Calendar year to inspect.")
+    map_check.add_argument("--year", required=True, type=_year_arg, help="Calendar year to inspect (1900-2100).")
     map_check.add_argument("--currency", help="Optional ISO code or unambiguous currency name to check against the map.")
     map_check.add_argument("--api-url", default=TREASURY_API_URL, help="Treasury/Fiscal Data API endpoint.")
     map_check.add_argument("--api-file", help="Use a local JSON response instead of fetching the API.")
@@ -777,6 +853,26 @@ def build_parser() -> argparse.ArgumentParser:
     self_test = subparsers.add_parser("self-test", help="Run dependency-free parser/workpaper tests.")
     self_test.set_defaults(func=command_self_test)
     return parser
+
+
+def _year_arg(raw: str) -> int:
+    try:
+        year = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"year must be an integer, got {raw!r}")
+    if not (1900 <= year <= 2100):
+        raise argparse.ArgumentTypeError(f"year {year} is outside the supported range 1900-2100")
+    return year
+
+
+def _iso_date_arg(raw: str) -> str:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        raise argparse.ArgumentTypeError(f"retrieved date must be YYYY-MM-DD, got {raw!r}")
+    try:
+        _dt.date.fromisoformat(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"retrieved date must be a real YYYY-MM-DD date, got {raw!r}")
+    return raw
 
 
 def main(argv: list[str] | None = None) -> int:
