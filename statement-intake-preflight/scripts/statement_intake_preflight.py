@@ -111,7 +111,9 @@ ACCOUNT_LABEL_RE = re.compile(
     # boundary between "." and the following space, so those forms matched
     # nothing at all.
     r"(?:numbers?|nos?|nbrs?|nros?|n[uú]ms?|id)\b\.?"
-    r"[\s:#-]*([*Xx0-9A-Za-z][*Xx0-9A-Za-z.\- ]{2,33})",
+    # The capture class allows ',' and '&' so a plural label's whole list is
+    # captured; detect_account_hints splits it back apart on those separators.
+    r"[\s:#-]*([*Xx0-9A-Za-z][*Xx0-9A-Za-z.,&\- ]{2,33})",
     re.I,
 )
 # Bare designation immediately followed by a digit/masked identifier
@@ -124,6 +126,21 @@ ACCOUNT_BARE_RE = re.compile(
 )
 ACCOUNT_IBAN_RE = re.compile(r"\bIBAN\b[\s:#-]*([A-Z]{2}\d{2}[A-Z0-9 ]{6,40})", re.I)
 ACCOUNT_ENDING_RE = re.compile(r"\b(?:ending in|ends in|termina en)\s*([*Xx0-9]{2,8})", re.I)
+
+# Transaction/counterparty context. An account number or IBAN on such a line
+# belongs to the other party, not the statement holder, so it must not be
+# harvested as an account hint (a SEPA transfer names the payee's IBAN, not
+# yours). "titular"/"holder" are deliberately NOT here -- they mark the owner.
+COUNTERPARTY_RE = re.compile(
+    r"\b(?:transfer(?:red|s|encia|encias)?|transferido|virement|[uü]berweisung|"
+    r"sepa|swift|beneficiar(?:y|io)|recipient|payee|remitter|remitente|"
+    r"destinatario|empf[aä]nger)\b",
+    re.I,
+)
+# Conjunctions/separators that join several account numbers under one plural
+# label ("Account Nos. 11112222 and 33334444", "Accounts 111, 222 & 333"). The
+# space lookahead keeps a bare thousands comma from splitting a single number.
+_ACCOUNT_SEP_RE = re.compile(r"\b(?:and|y|und)\b|[,&](?=\s)", re.I)
 
 TITLE_TERMS = (
     "statement",
@@ -155,6 +172,18 @@ INSTITUTION_TERMS = (
 # the fintech brands ("Wise", "Revolut") while ignoring those common words.
 INSTITUTION_TERM_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(term) for term in INSTITUTION_TERMS) + r")\b",
+    re.I,
+)
+
+# A customer mailing address that happens to sit on a street with a bank-like
+# name (a number followed by "<Bank-word> Street") is not the statement's
+# institution. Drop lines that begin with a street number and carry a street
+# suffix, so an address printed above the masthead cannot become the file's
+# institution signature.
+STREET_ADDRESS_RE = re.compile(
+    r"^\s*\d{1,6}\s+.*\b(?:st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|"
+    r"ln|lane|ct|court|way|pl|place|plaza|sq|square|suite|ste|"
+    r"calle|avenida|carrera|rua|stra(?:ss|ß)e)\b",
     re.I,
 )
 
@@ -227,6 +256,7 @@ INSTITUTION_LEGAL_SUFFIXES = {
     "ag",
     "plc",
     "ltd",
+    "ltda",
     "llc",
     "inc",
     "corp",
@@ -238,6 +268,12 @@ INSTITUTION_LEGAL_SUFFIXES = {
     "bv",
     "oyj",
     "asa",
+    # Latin-American entity forms: "S.A. de C.V." -> cv, "S.A.B." -> sab,
+    # "S.A.P.I." -> sapi, "S. de R.L." -> rl.
+    "cv",
+    "sab",
+    "sapi",
+    "rl",
 }
 
 YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
@@ -251,6 +287,13 @@ CURRENCY_LABEL_RE = re.compile(
     r"\b(?:currenc(?:y|ies)|monedas?|divisas?|denominat(?:ed|ion)|iso\s*4217)\b",
     re.I,
 )
+# A currency label only confirms a code within this many characters of it, so
+# "Currency: COP" confirms COP but "currency conversion fees ... in COP and MXN"
+# (disclosure boilerplate) does not.
+CURRENCY_LABEL_WINDOW = 16
+# "US$" / "U$S" / "US $" -> USD (standard Latin-American notation), so a dollar
+# sign written that way is resolved rather than flagged ambiguous.
+US_DOLLAR_RE = re.compile(r"\bUS ?\$|\bU\$S\b", re.I)
 _CURRENCY_CODE_ALT = "|".join(sorted(CURRENCY_CODES))
 # An "amount" must look monetary, not just be a digit run: a currency symbol, a
 # decimal-cents figure, a thousands-grouped figure, or a long (>=5 digit) number.
@@ -265,8 +308,10 @@ _AMOUNT = (
     r")"
 )
 CURRENCY_AMOUNT_RE = re.compile(
-    rf"\b(?P<pre>{_CURRENCY_CODE_ALT})\b\s*{_AMOUNT}"
-    rf"|{_AMOUNT}\s*\b(?P<post>{_CURRENCY_CODE_ALT})\b"
+    # No word boundary between the code and the amount, so a glued "EUR1.234,56"
+    # or "987.65GBP" is recognized; the outer boundaries still anchor the code.
+    rf"\b(?P<pre>{_CURRENCY_CODE_ALT})\s*{_AMOUNT}"
+    rf"|{_AMOUNT}\s*(?P<post>{_CURRENCY_CODE_ALT})\b"
 )
 
 
@@ -445,11 +490,18 @@ def iban_token(raw: str) -> str | None:
 def detect_account_hints(lines: Iterable[str]) -> list[str]:
     hints: list[str] = []
     for line in lines:
+        if COUNTERPARTY_RE.search(line):
+            # A transfer/counterparty line names the other party's account or
+            # IBAN, not the statement holder's; skip it entirely.
+            continue
         for pattern in (ACCOUNT_LABEL_RE, ACCOUNT_BARE_RE):
             for match in pattern.finditer(line):
-                token = account_token(match.group(1))
-                if token:
-                    hints.append(token)
+                # Split on conjunctions so a plural label ("Account Nos. X and Y")
+                # surfaces every account, not just the first.
+                for part in _ACCOUNT_SEP_RE.split(match.group(1)):
+                    token = account_token(part)
+                    if token:
+                        hints.append(token)
         for match in ACCOUNT_IBAN_RE.finditer(line):
             token = iban_token(match.group(1))
             if token:
@@ -466,7 +518,7 @@ def detect_institution_hints(lines: Iterable[str]) -> list[str]:
         # that names an institution term at a word boundary; do not drop it just
         # because it also says "statement" ("Alpha Bank Statement",
         # "Wise Account Statement" are exactly the headers we want).
-        if INSTITUTION_TERM_RE.search(line):
+        if INSTITUTION_TERM_RE.search(line) and not STREET_ADDRESS_RE.search(line):
             hints.append(line)
     return stable_unique(hints, limit=12)
 
@@ -500,6 +552,15 @@ def institution_signature(hint: str) -> str:
     return " ".join(tokens)
 
 
+def _span_gap(a: tuple[int, int], b: tuple[int, int]) -> int:
+    """Character gap between two spans on a line (0 if they overlap)."""
+    if a[1] <= b[0]:
+        return b[0] - a[1]
+    if b[1] <= a[0]:
+        return a[0] - b[1]
+    return 0
+
+
 def detect_currency(lines: Iterable[str]) -> dict[str, object]:
     lines = list(lines)
     joined = "\n".join(lines)
@@ -509,17 +570,21 @@ def detect_currency(lines: Iterable[str]) -> dict[str, object]:
     alias_evidence: list[str] = []
 
     for line in lines:
-        has_label = bool(CURRENCY_LABEL_RE.search(line))
+        label_spans = [match.span() for match in CURRENCY_LABEL_RE.finditer(line)]
         adjacent = {
             (match.group("pre") or match.group("post")).upper()
             for match in CURRENCY_AMOUNT_RE.finditer(line)
             if (match.group("pre") or match.group("post"))
         }
+        # A code beside a monetary amount is confirmed -- even glued
+        # ("EUR1.234,56"), where the bare three-letter scan below can't see it.
+        confirmed.extend(adjacent)
         for match in ISO_CURRENCY_RE.finditer(line):
             token = match.group(0).upper()
-            if token not in CURRENCY_CODES:
+            if token not in CURRENCY_CODES or token in adjacent:
                 continue
-            if has_label or token in adjacent:
+            near_label = any(_span_gap(span, match.span()) <= CURRENCY_LABEL_WINDOW for span in label_spans)
+            if near_label:
                 confirmed.append(token)
             else:
                 weak.append(token)
@@ -529,6 +594,9 @@ def detect_currency(lines: Iterable[str]) -> dict[str, object]:
         if alias in low:
             confirmed.append(code)
             alias_evidence.append(alias)
+    if US_DOLLAR_RE.search(joined):
+        confirmed.append("USD")
+        symbol_markers.add("US$")
     if "$" in joined:
         symbol_markers.add("$")
     for symbol, code in (("€", "EUR"), ("£", "GBP"), ("¥", "JPY")):
@@ -735,8 +803,12 @@ def review_csv_path(out_path: Path) -> Path:
 
 
 def write_json(path: Path, data: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError as exc:
+        # e.g. --out points beneath an existing file, or an unwritable directory.
+        raise PreflightError(f"Could not write {path}: {exc}") from exc
 
 
 def csv_safe(value: object) -> str:
@@ -754,7 +826,6 @@ def csv_safe(value: object) -> str:
 
 
 def write_review_csv(path: Path, data: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "file",
         "is_pdf",
@@ -769,7 +840,13 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
         "institution_hints",
         "warnings",
     ]
-    with path.open("w", newline="", encoding="utf-8") as handle:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("w", newline="", encoding="utf-8")
+    except OSError as exc:
+        # e.g. --out points beneath an existing file, or an unwritable directory.
+        raise PreflightError(f"Could not write {path}: {exc}") from exc
+    with handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for item in data.get("statement_files", []):
@@ -991,6 +1068,21 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if detect_currency(["Ending balance 9.999,99 GBP"])["code"] != "GBP":
             failures.append("currency-amount: a monetary figure adjacent to a code must still confirm")
 
+        # A label confirms only a nearby code; distant disclosure boilerplate
+        # ("conversion fees ... in COP and MXN") stays weak, not confirmed.
+        disclosure = detect_currency(
+            ["Currency USD", "Closing balance 1,234.56 USD", "conversion fees apply to transactions in COP and MXN"]
+        )
+        if disclosure["code"] != "USD" or "COP" not in disclosure["weak_candidates"]:  # type: ignore[index]
+            failures.append(f"currency-label: distant boilerplate codes must stay weak, got {disclosure}")
+        # 'US$' notation resolves to USD instead of ambiguous-dollar.
+        us_dollar = detect_currency(["Saldo final US$ 1,234.56"])
+        if us_dollar["code"] != "USD" or us_dollar["ambiguous_dollar"]:  # type: ignore[index]
+            failures.append(f"currency-symbol: 'US$' must resolve to USD, got {us_dollar}")
+        # A code glued to its amount is still recognized.
+        if detect_currency(["Ending balance EUR1.234,56"])["code"] != "EUR":
+            failures.append("currency-glued: a code glued to its amount (EUR1.234,56) must confirm")
+
         accounts = build_preflight(
             [synthetic_file("accounts.pdf", "Example Bank\nAccount 11112222\nAccount 33334444\nStatement period January 2025\nCurrency USD")],
             2025,
@@ -1104,6 +1196,16 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("institution-signature: 'N.A.' and 'NA' must match")
         if institution_signature("Example Bank N.A.") != institution_signature("Example Bank"):
             failures.append("institution-signature: a legal suffix must not split the same bank")
+        # Latin-American entity forms must not split the same institution.
+        if institution_signature("Banco Ejemplo S.A. de C.V.") != institution_signature("Banco Ejemplo"):
+            failures.append("institution-signature: 'S.A. de C.V.' must not split the same bank")
+        if institution_signature("Empresa Grande S.A.P.I. de C.V.") != institution_signature("Empresa Grande"):
+            failures.append("institution-signature: 'S.A.P.I. de C.V.' must not split the same institution")
+        # A customer street address is not an institution hint (it used to become
+        # the file's masthead signature and trip a false mixed gate).
+        address_hints = detect_institution_hints(["12 Bank Street", "Example Bank N.A."])  # privacy-gate: allow (synthetic address)
+        if address_hints != ["Example Bank N.A."]:
+            failures.append(f"address: a street address must not be an institution hint, got {address_hints}")
 
         short_name_banks = build_preflight(
             [
@@ -1163,6 +1265,18 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if iban_token("GB00 0000 0000 0000 0000 00") is not None:  # privacy-gate: allow (synthetic invalid IBAN)
             failures.append("iban: an invalid checksum must be rejected")
 
+        # A header IBAN is the holder's and is captured; the same IBAN on a
+        # SEPA/transfer line is the counterparty's and must be skipped.
+        if not detect_account_hints(["IBAN GB82 WEST 1234 5698 7654 32"]):  # privacy-gate: allow (synthetic IBAN)
+            failures.append("counterparty: a header IBAN must still be captured")
+        if detect_account_hints(["SEPA transfer to IBAN GB82 WEST 1234 5698 7654 32 rent 850.00 EUR"]):  # privacy-gate: allow (synthetic IBAN)
+            failures.append("counterparty: an IBAN on a SEPA/transfer line must not be harvested as the holder's account")
+
+        # A plural label with a conjunction surfaces every account, not just the
+        # first (the Spanish 'Nros.'/'y' form is privacy-clean).
+        if detect_account_hints(["Cuenta Nros. 11112222 y 33334444"]) != ["11112222", "33334444"]:
+            failures.append("plural-label: a plural label joined by a conjunction must yield every account")
+
         # The same statement supplied twice is flagged, not silently double-counted.
         duplicate = build_preflight(
             [
@@ -1196,6 +1310,16 @@ def command_self_test(_args: argparse.Namespace) -> int:
             except PreflightError:
                 pass
 
+        # A filesystem error on write (e.g. --out beneath an existing file)
+        # degrades to a clean PreflightError, not a raw traceback.
+        blocker_file = root / "blocker-file"
+        blocker_file.write_text("i am a file, not a directory")
+        try:
+            write_json(blocker_file / "out.json", {"x": 1})
+            failures.append("write: expected a filesystem error to become PreflightError")
+        except PreflightError:
+            pass
+
         # The tax year is bounded at both layers.
         try:
             _year_arg("20025")
@@ -1225,7 +1349,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 18 preflight cases")
+    print("Self-test passed: 22 preflight cases")
     return 0
 
 
