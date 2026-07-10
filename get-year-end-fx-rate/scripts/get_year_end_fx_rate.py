@@ -121,13 +121,7 @@ AMBIGUOUS_TERMS = {
     "krona": "Use a country or ISO code, for example SEK.",
 }
 
-AVERAGE_LANGUAGE = (
-    "yearly average",
-    "yearly-average",
-    "annual average",
-    "annual-average",
-    "average exchange rate",
-)
+AVERAGE_LANGUAGE = re.compile(r"\b(?:annual(?:ly)?|yearly|average(?:s|d|ing)?)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -172,12 +166,11 @@ def normalize_currency(raw: str) -> str:
 
 def reject_average_language(*values: object) -> None:
     combined = " ".join(clean_text(value).lower() for value in values if value is not None)
-    for phrase in AVERAGE_LANGUAGE:
-        if phrase in combined:
-            raise RateError(
-                "This skill is for year-end rates only. Use get-yearly-fx-rate for yearly/annual averages.",
-                2,
-            )
+    if AVERAGE_LANGUAGE.search(combined):
+        raise RateError(
+            "This skill is for year-end rates only. Use get-yearly-fx-rate for yearly/annual averages.",
+            2,
+        )
 
 
 def parse_decimal(raw: object) -> Decimal:
@@ -402,6 +395,7 @@ def create_workpaper(
     its exact top-level shape. The PDF now uses the kit's (yearly's) engine.
     """
     reject_average_language(source_title, source_note, source_category)
+    saved_proof_list = list(saved_proofs)
     spec = WorkpaperSpec(
         output_root=output_root,
         skill_name="get-year-end-fx-rate",
@@ -428,8 +422,8 @@ def create_workpaper(
             "treasury_record": treasury_record,
             "source": {"year_end_confirmed": True},
         },
-        saved_proofs=list(saved_proofs),
-        proof_required=True,
+        saved_proofs=saved_proof_list,
+        proof_required=bool(saved_proof_list),
         proof_limitations=proof_limitations,
     )
     return build_workpaper(spec)
@@ -484,9 +478,19 @@ def command_manual(args: argparse.Namespace) -> int:
         )
     if not args.year_end_confirmed:
         raise RateError("Pass --year-end-confirmed after verifying the source supports a year-end or YYYY-12-31 rate.", 2)
-    reject_average_language(args.source_title, args.source_note, args.source_category)
+    source_note = clean_text(args.source_note)
+    if not source_note:
+        raise RateError("Pass a nonempty --source-note confirming why this source supports year-end use.", 2)
+    reject_average_language(args.source_title, source_note, args.source_category)
     proof_files = [Path(args.proof_file)] if args.proof_file else []
-    note = args.source_note or "Manual fallback source confirmed by user/preparer as year-end support."
+    no_proof_reason = clean_text(args.no_proof_file_reason)
+    if proof_files and no_proof_reason:
+        raise RateError("Pass either --proof-file or --no-proof-file-reason, not both.", 2)
+    if not proof_files and not no_proof_reason:
+        raise RateError("Pass --proof-file or explain its absence with --no-proof-file-reason.", 2)
+    proof_limitations = []
+    if not proof_files:
+        proof_limitations.append(f"No saved source proof file was supplied. Reason: {no_proof_reason}")
     workpaper = create_workpaper(
         output_root=args.output_root,
         currency_code=code,
@@ -497,12 +501,14 @@ def command_manual(args: argparse.Namespace) -> int:
         source_title=args.source_title,
         source_url=args.source_url,
         retrieval_date=args.retrieved or today_iso(),
-        source_note=note,
+        source_note=source_note,
         source_category=args.source_category,
         saved_proofs=proof_files,
-        proof_limitations=[],
+        proof_limitations=proof_limitations,
     )
     print(final_text(workpaper))
+    if proof_limitations:
+        print(f"Caveat: {proof_limitations[0]}")
     return 0
 
 
@@ -604,12 +610,19 @@ def command_self_test(_args: argparse.Namespace) -> int:
     else:
         raise AssertionError("ambiguous peso should fail")
 
-    try:
-        reject_average_language("published yearly average")
-    except RateError as exc:
-        assert exc.code == 2
-    else:
-        raise AssertionError("yearly average wording should fail")
+    for average_source in (
+        "published yearly average",
+        "Central Bank 2025 Average",
+        "Central Bank average for 2025",
+        "annual rate",
+        "annual-average rate",
+    ):
+        try:
+            reject_average_language(average_source)
+        except RateError as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError(f"average source should fail: {average_source}")
 
     assert parse_user_rate("3900") == Decimal("3900")
     assert parse_user_rate("3900.00") == Decimal("3900.00")
@@ -746,6 +759,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             year_end_confirmed=True,
             retrieved="2026-07-03",
             proof_file=str(proof_file),
+            no_proof_file_reason="",
             allow_unknown_code=False,
             output_root=str(Path(tmp) / "manual-proof"),
         )
@@ -774,13 +788,58 @@ def command_self_test(_args: argparse.Namespace) -> int:
             ["yearly average", "annual average"],
         )
 
-        bad_manual_args = argparse.Namespace(**{**manual_args.__dict__, "source_note": "Published yearly average."})
+        bad_manual_args = argparse.Namespace(**{**manual_args.__dict__, "source_note": "Central Bank 2025 Average"})
         try:
             command_manual(bad_manual_args)
         except RateError as exc:
             assert exc.code == 2
         else:
             raise AssertionError("manual yearly-average wording should fail")
+
+        missing_note_args = argparse.Namespace(**{**manual_args.__dict__, "source_note": ""})
+        try:
+            command_manual(missing_note_args)
+        except RateError as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError("manual source note should be required")
+
+        missing_proof_args = argparse.Namespace(**{**manual_args.__dict__, "proof_file": None})
+        try:
+            command_manual(missing_proof_args)
+        except RateError as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError("manual proof or reason should be required")
+
+        both_proof_args = argparse.Namespace(
+            **{**manual_args.__dict__, "no_proof_file_reason": "A reason"}
+        )
+        try:
+            command_manual(both_proof_args)
+        except RateError as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError("manual proof and reason should be mutually exclusive")
+
+        no_proof_args = argparse.Namespace(
+            **{
+                **manual_args.__dict__,
+                "proof_file": None,
+                "no_proof_file_reason": "The source page could not be saved during retrieval.",
+                "output_root": str(Path(tmp) / "manual-no-proof"),
+            }
+        )
+        no_proof_output = io.StringIO()
+        with contextlib.redirect_stdout(no_proof_output):
+            assert command_manual(no_proof_args) == 0
+        assert "Caveat: No saved source proof file was supplied. Reason: The source page could not be saved during retrieval." in no_proof_output.getvalue()
+        no_proof_json = next((Path(tmp) / "manual-no-proof").glob("cop-2025-*/workpaper.json"))
+        no_proof_data = json.loads(no_proof_json.read_text(encoding="utf-8"))
+        assert no_proof_data["proof"]["saved_files"] == []
+        assert no_proof_data["proof"]["limitations"] == [
+            "No saved source proof file was supplied. Reason: The source page could not be saved during retrieval."
+        ]
 
         unknown_args = argparse.Namespace(
             **{
@@ -836,10 +895,11 @@ def build_parser() -> argparse.ArgumentParser:
     manual.add_argument("--source-title", required=True, help="Published source title.")
     manual.add_argument("--source-url", required=True, help="Published source URL.")
     manual.add_argument("--source-category", default="published year-end rate", help="Source class.")
-    manual.add_argument("--source-note", default="", help="Note confirming the source supports a year-end rate.")
+    manual.add_argument("--source-note", required=True, help="Note confirming why the source supports year-end use.")
     manual.add_argument("--year-end-confirmed", action="store_true", help="Required confirmation that the source supports a year-end or YYYY-MM-DD rate.")
     manual.add_argument("--allow-unknown-code", action="store_true", help="Confirm a real ISO 4217 code that is not in the skill's known Treasury/alias set.")
-    manual.add_argument("--proof-file", help="Optional local screenshot/PDF/HTML/source proof file to copy, hash, and reference.")
+    manual.add_argument("--proof-file", help="Local screenshot/PDF/HTML/source proof file to copy, hash, and reference.")
+    manual.add_argument("--no-proof-file-reason", default="", help="Required explanation when no local source proof file is available; cannot be used with --proof-file.")
     manual.set_defaults(func=command_manual)
 
     map_check = subparsers.add_parser("map-check", help="Compare a Treasury/Fiscal Data year-end response with the hard-coded currency map.")

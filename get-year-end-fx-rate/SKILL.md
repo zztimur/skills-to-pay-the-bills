@@ -54,6 +54,8 @@ Use `foreign-per-usd` when the rate means one U.S. dollar equals the foreign-cur
 
 For manual workpapers, do not run the script until the source clearly supports a year-end rate. A saved local proof file is strongly preferred; the script accepts `--proof-file` and copies/hashes it. If no proof file is available, the workpaper records that limitation.
 
+`--source-note` is required and must explain why the source supports year-end use. Pass either `--proof-file` or a specific `--no-proof-file-reason`; never omit both and never pass both. When no proof file is available, the script records the reason and prints one `Caveat:` line in its final output.
+
 ## Treasury Map Maintenance
 
 The helper uses a Treasury row-to-ISO map because Fiscal Data rows use country/currency labels, not ISO codes. When a valid Treasury-supported currency is rejected as unmapped, update `TREASURY_ROWS_BY_CODE` and any unambiguous aliases in `scripts/get_year_end_fx_rate.py`, then run:
@@ -101,7 +103,7 @@ Use Markdown links for every retained local artifact so the chat UI can expose t
 
 A Markdown link to a local absolute path is only clickable/downloadable when the chat client has direct filesystem access to this machine, true for a local desktop session but not for a hosted/remote session (for example, Claude Code on the web) where the user's browser cannot reach this container's filesystem. When running in such a session, also deliver each retained artifact using the host's file-delivery capability (for example, Claude Code's `SendUserFile` tool) in addition to the links above.
 
-Add one short caveat only when needed, such as `Treasury/Fiscal Data did not list this currency/year, so this uses a manual year-end source.` Do not call the rate official tax advice.
+Add one short caveat only when needed, such as `Treasury/Fiscal Data did not list this currency/year, so this uses a manual year-end source.` The script already emits the caveat when a manual source has no saved proof file. Do not call the rate official tax advice.
 
 ## Runtime And Validation
 
