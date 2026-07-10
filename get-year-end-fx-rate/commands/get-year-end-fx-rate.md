@@ -15,7 +15,8 @@ Use the package root `SKILL.md` as the control plane and read `references/source
 4. If Treasury/Fiscal Data does not list the currency/year, find or request another verifiable year-end source.
 5. Never calculate averages and never reuse a yearly-average rate.
 6. Use `scripts/get_year_end_fx_rate.py lookup` for Treasury/Fiscal Data extraction and workpaper creation.
-7. Use `scripts/get_year_end_fx_rate.py manual` only after confirming the source supports a year-end or `YYYY-12-31` rate. Pass a nonempty `--source-note` and `--year-end-confirmed`; pass either `--proof-file` or a specific `--no-proof-file-reason`.
-8. Return only the concise rate/source/proof output defined in `SKILL.md`. Preserve the script's caveat when no saved source proof file was available.
+7. If a Treasury command exits 5, fetch the exact query URL from its error, save the raw JSON response, and rerun with `--api-file`. Do not use a search snippet, screenshot, or copied number as the substitute source.
+8. Use `scripts/get_year_end_fx_rate.py manual` only after confirming the source supports a year-end or `YYYY-12-31` rate. Pass a nonempty `--source-note` and `--year-end-confirmed`; pass either `--proof-file` or a specific `--no-proof-file-reason`.
+9. Return only the concise rate/source/proof output defined in `SKILL.md`. Preserve the script's caveat when no saved source proof file was available.
 
 Do not call the rate legal/tax advice and do not use yearly-average wording.
