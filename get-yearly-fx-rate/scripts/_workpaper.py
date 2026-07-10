@@ -793,8 +793,8 @@ def _deep_merge(base: dict, extra: dict) -> dict:
 def _copy_saved_proofs(folder: Path, saved_proofs: Iterable[Path], *, proof_required: bool) -> list[dict[str, object]]:
     """Copy each proof into the packet folder and record its hashed entry.
 
-    ``proof_required`` selects the divergent proof policy: year-end raises on a
-    missing file; yearly tolerantly skips it.
+    ``proof_required`` determines whether an unusable proof raises ``RateError``
+    or is skipped.
     """
     entries: list[dict[str, object]] = []
     for index, original_path in enumerate(saved_proofs, start=1):
