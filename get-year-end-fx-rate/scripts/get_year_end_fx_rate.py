@@ -359,8 +359,24 @@ def parse_user_rate(raw: str) -> Decimal:
         raise RateError(f"Could not parse rate value '{raw}'.", 3) from exc
 
 
+def today_date() -> _dt.date:
+    return _dt.date.today()
+
+
 def today_iso() -> str:
-    return _dt.date.today().isoformat()
+    return today_date().isoformat()
+
+
+def ensure_year_end_has_occurred(year: int, today: _dt.date | None = None) -> str:
+    year_end = _dt.date(year, 12, 31)
+    current_date = today or today_date()
+    if year_end > current_date:
+        raise RateError(
+            f"Year-end date {year_end.isoformat()} has not occurred yet as of {current_date.isoformat()}. "
+            "Do not create a year-end FX workpaper until the YYYY-12-31 rate can exist.",
+            2,
+        )
+    return year_end.isoformat()
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -665,6 +681,7 @@ def create_workpaper(
 
 def command_lookup(args: argparse.Namespace) -> int:
     code = normalize_currency(args.currency)
+    ensure_year_end_has_occurred(args.year)
     query_url = treasury_query_url(code, args.year, args.api_url)
     json_text, source_ref, snapshot_origin = load_json_text(query_url, args.api_file)
     rate = find_treasury_rate(code, args.year, json_text, query_url)
@@ -712,6 +729,7 @@ def command_lookup(args: argparse.Namespace) -> int:
 
 def command_manual(args: argparse.Namespace) -> int:
     code = normalize_currency(args.currency)
+    year_end_date = ensure_year_end_has_occurred(args.year)
     if code not in KNOWN_CURRENCY_CODES and not args.allow_unknown_code:
         raise RateError(
             f"Currency code {code} is not in this skill's known Treasury/alias set. If it is a "
@@ -737,7 +755,7 @@ def command_manual(args: argparse.Namespace) -> int:
         output_root=args.output_root,
         currency_code=code,
         year=args.year,
-        year_end_date=f"{args.year}-12-31",
+        year_end_date=year_end_date,
         rate=parse_user_rate(args.rate),
         rate_direction=args.rate_direction,
         source_title=args.source_title,
@@ -927,6 +945,15 @@ def command_self_test(_args: argparse.Namespace) -> int:
             pass
         else:
             raise AssertionError(f"_iso_date_arg should reject {bad!r}")
+
+    assert ensure_year_end_has_occurred(2025, _dt.date(2026, 1, 1)) == "2025-12-31"
+    try:
+        ensure_year_end_has_occurred(2026, _dt.date(2026, 7, 10))
+    except RateError as exc:
+        assert exc.code == 2
+        assert "has not occurred yet" in str(exc)
+    else:
+        raise AssertionError("unopened year-end date should fail")
 
     with tempfile.TemporaryDirectory() as tmp:
         api_file = Path(tmp) / "treasury.json"
