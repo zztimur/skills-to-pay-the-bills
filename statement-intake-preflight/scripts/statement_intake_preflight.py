@@ -113,6 +113,14 @@ INSTITUTION_TERMS = (
     "revolut",
 )
 
+# Match institution terms only at word boundaries. Substring matching wrongly
+# fired on "otherwi(se)", "like(wise)", and "(trust)ed"; a boundary match keeps
+# the fintech brands ("Wise", "Revolut") while ignoring those common words.
+INSTITUTION_TERM_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(term) for term in INSTITUTION_TERMS) + r")\b",
+    re.I,
+)
+
 MONTH_NAMES = (
     "january",
     "february",
@@ -139,6 +147,37 @@ MONTH_NAMES = (
     "noviembre",
     "diciembre",
 )
+
+# Structural statement words stripped before comparing two institution hints, so
+# that the same bank across months ("Example Bank January Statement" vs
+# "... February Statement") collapses to one signature instead of looking like
+# two institutions.
+INSTITUTION_NOISE = {
+    "statement",
+    "statements",
+    "account",
+    "accounts",
+    "monthly",
+    "quarterly",
+    "annual",
+    "period",
+    "periodo",
+    "summary",
+    "resumen",
+    "extracto",
+    "movimientos",
+    "cuenta",
+    "page",
+    "date",
+    "the",
+    "of",
+    "for",
+    "and",
+    "de",
+    "del",
+    "la",
+    "el",
+} | set(MONTH_NAMES)
 
 YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 ISO_CURRENCY_RE = re.compile(r"\b[A-Z]{3}\b")
@@ -281,11 +320,25 @@ def detect_account_hints(lines: Iterable[str]) -> list[str]:
 def detect_institution_hints(lines: Iterable[str]) -> list[str]:
     hints: list[str] = []
     for line in list(lines)[:80]:
-        low = line.casefold()
-        if any(term in low for term in INSTITUTION_TERMS):
-            if not any(skip in low for skip in ("statement", "extracto", "account number", "cuenta no")):
-                hints.append(line)
+        # A statement's institution name lives in the header. Keep any early line
+        # that names an institution term at a word boundary; do not drop it just
+        # because it also says "statement" ("Alpha Bank Statement",
+        # "Wise Account Statement" are exactly the headers we want).
+        if INSTITUTION_TERM_RE.search(line):
+            hints.append(line)
     return stable_unique(hints, limit=12)
+
+
+def institution_signature(hint: str) -> str:
+    """Normalize an institution hint for equality comparison.
+
+    Strips digits, punctuation, single letters (e.g. the "N A" in "N.A."), and
+    structural statement words so cosmetic per-statement differences do not read
+    as different institutions.
+    """
+    lowered = re.sub(r"[^a-z ]+", " ", hint.casefold())
+    tokens = [token for token in lowered.split() if len(token) > 1 and token not in INSTITUTION_NOISE]
+    return " ".join(tokens)
 
 
 def detect_currency(lines: Iterable[str]) -> dict[str, object]:
@@ -406,9 +459,23 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
         warnings.append(message)
         add_gate(gates, "unknown-account", message)
 
-    institution_hints = detect_institution_hints(all_lines)
-    normalized_institutions = {re.sub(r"[^a-z0-9]+", " ", hint.casefold()).strip() for hint in institution_hints}
-    if scope == "one-institution" and len(normalized_institutions) > 1:
+    # Compare institutions from the union of per-file hints, not a re-scan of the
+    # first 80 lines of every file concatenated: a long first statement used to
+    # push later files out of view, hiding a second bank entirely. Compare one
+    # representative header signature per file so two banks are caught while the
+    # same bank across months is not falsely split.
+    institution_hints = stable_unique(
+        hint for item in statement_files for hint in item.get("institution_hints", [])
+    )
+    per_file_institution_signatures: set[str] = set()
+    for item in statement_files:
+        file_hints = [str(hint) for hint in item.get("institution_hints", []) if str(hint).strip()]
+        if not file_hints:
+            continue
+        signature = institution_signature(file_hints[0])
+        if signature:
+            per_file_institution_signatures.add(signature)
+    if scope == "one-institution" and len(per_file_institution_signatures) > 1:
         message = f"Multiple institution hints found; verify this is one institution: {', '.join(institution_hints[:6])}."
         warnings.append(message)
         add_gate(gates, "possible-mixed-institutions", message)
@@ -675,6 +742,71 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if not any(gate.get("code") == "low-text-pdf" for gate in low_text["review_gates"]):  # type: ignore[index]
             failures.append("low-text: expected low-text-pdf gate")
 
+        # Two banks where the first statement is long enough (>80 lines) to have
+        # hidden the second bank from the old combined-line scan.
+        long_alpha = "Alpha Bank N.A.\nAccount number 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\n" + "\n".join(
+            f"01/{(day % 28) + 1:02d}/2025 card purchase ref {day:04d} 10.00 balance 90.00" for day in range(1, 90)
+        )
+        mixed_institutions = build_preflight(
+            [
+                synthetic_file("alpha.pdf", long_alpha),
+                synthetic_file("beta.pdf", "Beta Banco S.A.\nAccount number 12345678\nStatement period February 1 2025 to February 28 2025\nCurrency USD"),
+            ],
+            2025,
+            "one-institution",
+            root / "mixed-institutions.json",
+            root / "mixed-institutions-review.csv",
+        )
+        if not any(gate.get("code") == "possible-mixed-institutions" for gate in mixed_institutions["review_gates"]):  # type: ignore[index]
+            failures.append("mixed-institutions: expected possible-mixed-institutions gate across files")
+
+        # The same bank across two months must not read as two institutions.
+        same_institution = build_preflight(
+            [
+                synthetic_file("jan.pdf", "Example Bank Monthly Statement January 2025\nAccount number 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD"),
+                synthetic_file("feb.pdf", "Example Bank Monthly Statement February 2025\nAccount number 12345678\nStatement period February 1 2025 to February 28 2025\nCurrency USD"),
+            ],
+            2025,
+            "one-institution",
+            root / "same-institution.json",
+            root / "same-institution-review.csv",
+        )
+        if any(gate.get("code") == "possible-mixed-institutions" for gate in same_institution["review_gates"]):  # type: ignore[index]
+            failures.append("same-institution: same bank across months must not trip possible-mixed-institutions")
+
+        # Common words that merely contain a term substring are not institutions.
+        substring_noise = build_preflight(
+            [
+                synthetic_file(
+                    "substring.pdf",
+                    "Example Bank Monthly Statement\nAccount number 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nOtherwise please contact the branch\nWe value your trusted partnership likewise",
+                )
+            ],
+            2025,
+            "one-institution",
+            root / "substring.json",
+            root / "substring-review.csv",
+        )
+        substring_hints = substring_noise["institution_hints"]  # type: ignore[index]
+        if any("Otherwise" in hint or "likewise" in hint for hint in substring_hints):
+            failures.append(f"substring: word-boundary match should exclude Otherwise/likewise, got {substring_hints}")
+        if any(gate.get("code") == "possible-mixed-institutions" for gate in substring_noise["review_gates"]):  # type: ignore[index]
+            failures.append("substring: single real institution must not trip possible-mixed-institutions")
+
+        # A fintech header ("Wise Account Statement") must still be recognized as
+        # an institution even though the line also says "Statement".
+        fintech = build_preflight(
+            [synthetic_file("wise.pdf", "Wise Account Statement\nAccount number 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency EUR\nClosing balance 100.00 EUR")],
+            2025,
+            "one-institution",
+            root / "wise.json",
+            root / "wise-review.csv",
+        )
+        if not fintech["institution_hints"]:  # type: ignore[index]
+            failures.append("fintech: expected an institution hint from a 'Wise Account Statement' header")
+        if any(gate.get("code") == "unknown-institution" for gate in fintech["review_gates"]):  # type: ignore[index]
+            failures.append("fintech: 'Wise Account Statement' should satisfy the institution check")
+
         write_json(root / "clean.json", clean)
         write_review_csv(root / "clean-review.csv", clean)
         if not (root / "clean-review.csv").exists():
@@ -684,7 +816,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 7 preflight cases")
+    print("Self-test passed: 11 preflight cases")
     return 0
 
 
