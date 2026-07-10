@@ -71,7 +71,7 @@ Complete gate catalog:
 | `low-text-pdf` | stop | Machine-readable text is below threshold (scanned/image-only; out of scope for v1). |
 | `duplicate-input` | review | The same statement file (same resolved path) was supplied more than once. |
 | `duplicate-content` | review | Byte-identical statements were supplied under different names. |
-| `mixed-years` | review | A detected statement year falls outside the requested tax year. Copyright/heritage footer years (`© 2019`, `since 1904`) are excluded. |
+| `mixed-years` | review | A detected statement year falls outside the requested tax year. Copyright/legal years are excluded even with an intervening month, a range, or a comma/space-separated list (`© 2019`, `© May 2019`, `© 2019-2024`, `© 2019, 2020, 2021`), as are bare or month-only heritage/account-open years (`since 1904`, `Customer since March 2015`); a period year carrying a numeric date (`since 2025-04-01`) is kept. |
 | `unknown-year-coverage` | review | No statement year was detected; verify the periods manually. |
 | `ambiguous-dollar` | review | `$` appears with no unambiguous ISO code or currency name. |
 | `unknown-currency` | review | No account currency marker was found. |
@@ -80,6 +80,8 @@ Complete gate catalog:
 | `unknown-account` | review (`one-account`) | No account identifier was found. |
 | `possible-mixed-institutions` | review (`one-institution`) | More than one institution was found. |
 | `unknown-institution` | review (`one-institution`) | No institution was found in early statement text. |
+
+Detection is multilingual where it matters. Currency labels include the German `Währung` (`devise` and `valuta` are deliberately excluded: they collide with the English verb "devise" and with "value date"); negative amounts (accounting parens `(1.234,56)` and the European trailing minus `1.234,56-`) and footnoted codes (`USD¹`) still corroborate a currency; institution detection recognizes `-bank` compound brands (`Commerzbank`, `Rabobank`) when the line also carries banking/statement context, plus `Sparkasse`; account labels include `Konto`, `Kontonummer`, and `Compte`. `USD` is corroborated exactly like every other ISO code — via the `$`/`US$` symbol, a currency label, or an adjacent amount — with no bare-word shortcut, so an incidental "usd" substring or a lone card-FX disclosure line never confirms it.
 
 Preflight is not a guarantee of complete coverage. It is an intake guardrail and handoff artifact.
 
