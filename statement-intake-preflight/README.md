@@ -132,6 +132,15 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py smoke-t
 python3 -S skill-forge/scripts/inspect_skill_package.py statement-intake-preflight --json --strict
 ```
 
+The `self-test` is dependency-free and runs in CI. Before shipping a detector
+change, also run the end-to-end adversarial suite, which drives real PDFs
+through the CLI to reproduce every failure mode past audits surfaced (needs
+`reportlab` + `pdfplumber`; it skips cleanly when they are absent):
+
+```bash
+python3 statement-intake-preflight/tests/run_pressure_suite.py
+```
+
 If Claude Code is available locally:
 
 ```bash
