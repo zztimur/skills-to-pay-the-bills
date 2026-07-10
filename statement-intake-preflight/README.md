@@ -111,7 +111,7 @@ The skill should stop or ask for review when:
 - a file is missing or is not a PDF;
 - a `.pdf` file cannot actually be read as a PDF;
 - the PDF has little or no machine-readable text;
-- the same statement PDF is handed in more than once;
+- the same statement PDF is handed in more than once, even under a different name;
 - statement years do not line up with the requested year;
 - `$` appears without enough context to know the currency;
 - multiple currencies appear in one supposed currency bucket;
@@ -130,6 +130,15 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py depende
 python3 statement-intake-preflight/scripts/statement_intake_preflight.py self-test
 python3 statement-intake-preflight/scripts/statement_intake_preflight.py smoke-test
 python3 -S skill-forge/scripts/inspect_skill_package.py statement-intake-preflight --json --strict
+```
+
+The `self-test` is dependency-free and runs in CI. Before shipping a detector
+change, also run the end-to-end adversarial suite, which drives real PDFs
+through the CLI to reproduce every failure mode past audits surfaced (needs
+`reportlab` + `pdfplumber`; it skips cleanly when they are absent):
+
+```bash
+python3 statement-intake-preflight/tests/run_pressure_suite.py
 ```
 
 If Claude Code is available locally:

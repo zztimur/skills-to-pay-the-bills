@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import re
 import sys
 import tempfile
+import unicodedata
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -175,6 +177,62 @@ INSTITUTION_TERM_RE = re.compile(
     re.I,
 )
 
+# "Banco"/"Bank" also head one-token brand names ("Marca66", "Bancomer",
+# "Bankia", "Bankinter") that a word-boundary match misses. Match them as a stem
+# -- but only "banco"/"bank" (not the bare "banc" stem, which would also catch
+# the Spanish adjective "bancario" and "bancarrota"), and reject the handful of
+# common words that share the stem, so marketing prose ("Mobile banking made
+# easy", "avoid bankruptcy") cannot become a header institution hint.
+INSTITUTION_STEM_RE = re.compile(r"\b(?:banco|bank)\w+", re.I)
+# A stem stopword like "banking" is excluded on its own (marketing prose), but
+# a corporate entity name built on it IS a real institution ("Lloyds Banking
+# Group", "First Banking Corporation", "Meridian Bank Holdings"). Match a
+# capitalized/all-caps proper-noun lead word + "bank(ing)" + a corporate
+# designator: the lead requirement is what separates the name "Lloyds Banking
+# Group" from the marketing line "our banking group rewards today" (a lowercase
+# function word before the phrase). The lead's case is verified in
+# line_names_institution, since re.I would make an inline [A-Z] case-blind.
+INSTITUTION_BANKING_ENTITY_RE = re.compile(
+    r"(?P<lead>\w[\w&.\-]*)\s+bank(?:ing)?\s+"
+    r"(?:corp(?:oration)?|company|co|group|holdings?|association|trust|union)\b",
+    re.I,
+)
+INSTITUTION_STEM_STOPWORDS = {
+    "banking",
+    "banked",
+    "banks",
+    "banker",
+    "bankers",
+    "bankable",
+    "bankrupt",
+    "bankruptcy",
+    "banknote",
+    "banknotes",
+    "bankroll",
+    "bancos",
+    "bancomat",
+}
+
+
+def line_names_institution(line: str) -> bool:
+    """Whether a line names a financial institution.
+
+    Word-boundary term match, plus a "banco"/"bank" stem so a one-token brand
+    is recognized while common stem-sharing words are excluded -- except when a
+    stopword like "banking" heads a corporate entity name led by a proper noun.
+    """
+    if INSTITUTION_TERM_RE.search(line):
+        return True
+    for match in INSTITUTION_BANKING_ENTITY_RE.finditer(line):
+        # Require the lead word to be a proper noun (capitalized/all-caps), so
+        # "Lloyds Banking Group" counts but "our banking group rewards" does not.
+        if match.group("lead")[:1].isupper():
+            return True
+    return any(
+        match.group(0).casefold() not in INSTITUTION_STEM_STOPWORDS
+        for match in INSTITUTION_STEM_RE.finditer(line)
+    )
+
 # A customer mailing address that happens to sit on a street with a bank-like
 # name (a number followed by "<Bank-word> Street") is not the statement's
 # institution. Drop lines that begin with a street number and carry a street
@@ -279,6 +337,35 @@ INSTITUTION_LEGAL_SUFFIXES = {
 YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 ISO_CURRENCY_RE = re.compile(r"\b[A-Z]{3}\b")
 
+# A 4-digit year printed next to one of these markers describes the institution
+# or the document, not the statement period: a copyright/legal footer ("© 2019",
+# "(c) 2019 ... All rights reserved") or a heritage/membership tagline ("since
+# 1904", "Established 1852", "Member FDIC since 1933"). Almost every real
+# statement carries a copyright footer whose year rarely equals the tax year, so
+# a year within YEAR_CONTEXT_WINDOW characters of a marker is dropped from year
+# coverage; otherwise that footer alone would force an otherwise-clean statement
+# into the mixed-years review gate. Kept tight (word-boundaried markers, small
+# window) so a genuine period year on the same line is never suppressed.
+BOILERPLATE_YEAR_MARKER_RE = re.compile(
+    r"©|\(c\)|copyright|all rights reserved|\bsince\b|\bestablished\b|\best\.|"
+    r"\bfounded\b|member\s+(?:fdic|sipc)",
+    re.I,
+)
+YEAR_CONTEXT_WINDOW = 8
+
+# Two numeric dates (dd.mm.yyyy, dd/mm/yyyy, yyyy-mm-dd) joined by a range
+# connector, so a statement that prints its period numerically ("01.01.2025 -
+# 31.01.2025", "01/01/2025 al 31/01/2025") is recognized as a period even with
+# no month name or period word. The dash connector allows no surrounding space;
+# the alphabetic connectors ("to", "al", "bis", "hasta", "through") require it,
+# so a lone hyphen elsewhere cannot bridge two unrelated numbers.
+NUMERIC_PERIOD_RE = re.compile(
+    r"\d{1,4}[./-]\d{1,2}[./-]\d{1,4}"
+    r"(?:\s*[-–—]\s*|\s+(?:to|al?|bis|hasta|through)\s+)"
+    r"\d{1,4}[./-]\d{1,2}[./-]\d{1,4}",
+    re.I,
+)
+
 # A three-letter ISO token is only trusted as a currency when it is corroborated:
 # either its line carries a currency-label word, or the code sits directly beside
 # an amount. This keeps all-caps prose ("PLEASE TRY OUR APP") and merchant names
@@ -291,18 +378,28 @@ CURRENCY_LABEL_RE = re.compile(
 # "Currency: COP" confirms COP but "currency conversion fees ... in COP and MXN"
 # (disclosure boilerplate) does not.
 CURRENCY_LABEL_WINDOW = 16
-# "US$" / "U$S" / "US $" -> USD (standard Latin-American notation), so a dollar
-# sign written that way is resolved rather than flagged ambiguous.
-US_DOLLAR_RE = re.compile(r"\bUS ?\$|\bU\$S\b", re.I)
+# A currency symbol glued to a country/currency prefix resolves an otherwise
+# ambiguous sign: "US$"/"U$S"/"US $" -> USD, "R$" -> BRL (Brazil), "S/." or "S/"
+# -> PEN (Peru). Each requires the disambiguating prefix, so a bare "$" is still
+# flagged ambiguous. The sol pattern additionally requires a *monetary* amount
+# (a decimal-cents figure) right after it, because "S/" is also serial/series
+# shorthand -- "Reference S/ 0099887" is a document number, not 9,887 soles.
+SYMBOL_CURRENCY_RULES = (
+    (re.compile(r"\bUS ?\$|\bU\$S\b", re.I), "USD", "US$"),
+    (re.compile(r"\bR\$", re.I), "BRL", "R$"),
+    (re.compile(r"\bS/\.?\s?\d[\d.,]*[.,]\d{2}\b", re.I), "PEN", "S/"),
+)
 _CURRENCY_CODE_ALT = "|".join(sorted(CURRENCY_CODES))
 # An "amount" must look monetary, not just be a digit run: a currency symbol, a
 # decimal-cents figure, a thousands-grouped figure, or a long (>=5 digit) number.
 # A bare 1-4 digit integer no longer counts, so a year ("2025 TRY") or a clock
-# fragment ("TRY 24/7") can no longer corroborate a currency code.
+# fragment ("TRY 24/7") can no longer corroborate a currency code. Thousands
+# separators include the Swiss apostrophe (ASCII ' and U+2019) so "1'234.56"
+# reads as an amount.
 _AMOUNT = (
     r"[-+(]?\s*(?:"
-    r"[$€£¥]\s?\d[\d.,]*"
-    r"|\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?"
+    r"[$€£¥]\s?\d[\d.,'’]*"
+    r"|\d{1,3}(?:[.,'’]\d{3})+(?:[.,]\d{1,2})?"
     r"|\d+[.,]\d{2}"
     r"|\d{5,}"
     r")"
@@ -322,7 +419,19 @@ class PreflightError(Exception):
 
 
 def clean_line(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
+    # NFKC at ingestion folds compatibility characters that a PDF text layer
+    # routinely emits -- ligatures ("ﬁnancial" -> "financial"), full-width
+    # digits, the numero sign -- so detectors see canonical ASCII-ish text
+    # instead of missing a term spelled with a ligature. Accents are preserved
+    # here (NFKC keeps precomposed "á"); they are folded only for institution
+    # signature comparison, so displayed hints keep their diacritics.
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", value)).strip()
+
+
+def fold_accents(text: str) -> str:
+    """Drop combining diacritics so 'Bogotá' and 'Bogota' compare equal."""
+    decomposed = unicodedata.normalize("NFD", text)
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
 
 
 def stable_unique(values: Iterable[str], limit: int | None = None) -> list[str]:
@@ -381,8 +490,30 @@ def load_pdf_files(paths: list[str]) -> list[dict[str, object]]:
         except Exception as exc:  # pragma: no cover - depends on malformed PDF internals.
             warnings.append(f"{path.name} could not be read as a PDF: {exc}")
             read_failed = True
-        files.append(file_profile(path, pages, warnings, is_pdf=True, text_layer_expected=not read_failed))
+        files.append(
+            file_profile(
+                path, pages, warnings, is_pdf=True, text_layer_expected=not read_failed,
+                content_sha256=file_sha256(path),
+            )
+        )
     return files
+
+
+def file_sha256(path: Path) -> str | None:
+    """SHA-256 of a file's bytes, or None if it cannot be read.
+
+    Two statements with different names but identical bytes -- the classic
+    duplicated download -- share a digest even though their paths differ, which
+    path-based duplicate detection alone cannot see.
+    """
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:  # pragma: no cover - unreadable file already warned elsewhere.
+        return None
 
 
 def file_profile(
@@ -391,6 +522,7 @@ def file_profile(
     warnings: list[str],
     is_pdf: bool,
     text_layer_expected: bool = True,
+    content_sha256: str | None = None,
 ) -> dict[str, object]:
     text = "\n".join(str(page.get("text", "")) for page in pages)
     lines = split_lines(text)
@@ -403,6 +535,7 @@ def file_profile(
         "is_pdf": is_pdf,
         "page_count": len(pages),
         "character_count": char_count,
+        "content_sha256": content_sha256,
         "lines": lines,
         "warnings": stable_unique(warnings),
     }
@@ -411,7 +544,19 @@ def file_profile(
 def detect_years(lines: Iterable[str]) -> list[int]:
     years: set[int] = set()
     for line in lines:
+        marker_spans = [match.span() for match in BOILERPLATE_YEAR_MARKER_RE.finditer(line)]
         for match in YEAR_RE.finditer(line):
+            # A copyright/heritage year sits as a bare year within a few
+            # characters of its marker ("© 2019", "since 1904"); drop it so it
+            # cannot masquerade as a statement-period year. But "since" is also
+            # temporal ("activity since 01.01.2025"): a year that is the tail of
+            # a numeric date (preceded by . / -) is a real period year, never a
+            # heritage year, so it is kept even next to a marker.
+            in_numeric_date = match.start() > 0 and line[match.start() - 1] in "./-"
+            if not in_numeric_date and any(
+                _span_gap(span, match.span()) <= YEAR_CONTEXT_WINDOW for span in marker_spans
+            ):
+                continue
             years.add(int(match.group(1)))
     return sorted(years)
 
@@ -432,7 +577,7 @@ def detect_periods(lines: Iterable[str]) -> list[str]:
         has_period_term = any(term in low for term in ("period", "periodo", "from", "to", "desde", "hasta", "statement date"))
         has_month = any(month in low for month in MONTH_NAMES)
         has_year = bool(YEAR_RE.search(line))
-        if (has_period_term and has_year) or (has_month and has_year):
+        if (has_period_term and has_year) or (has_month and has_year) or NUMERIC_PERIOD_RE.search(line):
             periods.append(line)
     return stable_unique(periods, limit=20)
 
@@ -487,8 +632,77 @@ def iban_token(raw: str) -> str | None:
     return None
 
 
+def _account_compact(hint: str) -> str:
+    """Separator-free uppercase form of an account/IBAN hint, for comparison."""
+    return re.sub(r"[ .\-]", "", hint).upper()
+
+
+def _account_trailing_digits(compact: str) -> str:
+    match = re.search(r"\d+$", compact)
+    return match.group(0) if match else ""
+
+
+def _same_account(a: str, a_partial: bool, b: str, b_partial: bool) -> bool:
+    """Whether two compacted hints denote the same account.
+
+    Separator-free equality always counts, so a spaced header and a compact
+    footer with the same digits, or a grouped IBAN and its compact spelling,
+    collapse to one account. Beyond exact equality, only a *partial* hint -- one
+    that is masked ("****6666") or an "ending in" suffix -- may absorb into
+    another by matching trailing digits, so two distinct full numbers never
+    merge on a shared tail (that stays a real possible-mixed-accounts signal).
+    """
+    if a == b:
+        return True
+    if not (a_partial or b_partial):
+        return False
+    ta, tb = _account_trailing_digits(a), _account_trailing_digits(b)
+    if len(ta) < 3 or len(tb) < 3:
+        return False
+    return ta.endswith(tb) or tb.endswith(ta)
+
+
+def _dedupe_accounts(raw: list[tuple[str, str, bool]], limit: int = 20) -> list[str]:
+    """Collapse hints that are the same account printed in different forms.
+
+    Each raw entry is (display, compact, is_partial). Full (non-partial) hints
+    are considered first so partial hints attach to them and the fuller spelling
+    wins as the display form. Conservative by construction: genuinely different
+    full account numbers stay separate and still trip possible-mixed-accounts.
+    """
+    ordered = [item for item in raw if not item[2]] + [item for item in raw if item[2]]
+    kept: list[tuple[str, str, bool]] = []
+    for display, compact, partial in ordered:
+        if not compact:
+            continue
+        merged = False
+        for index, (_kept_display, kept_compact, kept_partial) in enumerate(kept):
+            if _same_account(compact, partial, kept_compact, kept_partial):
+                # Prefer the fuller spelling: a masked/suffix hint yields to a
+                # full number once one is seen for the same account.
+                if kept_partial and not partial:
+                    kept[index] = (display, compact, partial)
+                merged = True
+                break
+        if not merged:
+            kept.append((display, compact, partial))
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for display, _compact, _partial in kept:
+        cleaned = clean_line(display)
+        key = cleaned.casefold()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        out.append(cleaned)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def detect_account_hints(lines: Iterable[str]) -> list[str]:
-    hints: list[str] = []
+    raw: list[tuple[str, str, bool]] = []
     for line in lines:
         if COUNTERPARTY_RE.search(line):
             # A transfer/counterparty line names the other party's account or
@@ -501,24 +715,28 @@ def detect_account_hints(lines: Iterable[str]) -> list[str]:
                 for part in _ACCOUNT_SEP_RE.split(match.group(1)):
                     token = account_token(part)
                     if token:
-                        hints.append(token)
+                        compact = _account_compact(token)
+                        # A masked token ("****6666") only pins a suffix.
+                        raw.append((token, compact, "*" in compact or "X" in compact))
         for match in ACCOUNT_IBAN_RE.finditer(line):
             token = iban_token(match.group(1))
             if token:
-                hints.append(token)
+                raw.append((token, _account_compact(token), False))
         for match in ACCOUNT_ENDING_RE.finditer(line):
-            hints.append(clean_line(match.group(1)))
-    return stable_unique(hints, limit=20)
+            fragment = clean_line(match.group(1))
+            # An "ending in N" fragment is inherently a partial (suffix) hint.
+            raw.append((fragment, _account_compact(fragment), True))
+    return _dedupe_accounts(raw)
 
 
 def detect_institution_hints(lines: Iterable[str]) -> list[str]:
     hints: list[str] = []
     for line in list(lines)[:80]:
         # A statement's institution name lives in the header. Keep any early line
-        # that names an institution term at a word boundary; do not drop it just
-        # because it also says "statement" ("Alpha Bank Statement",
+        # that names an institution term or a "banco"/"bank" brand stem; do not
+        # drop it just because it also says "statement" ("Alpha Bank Statement",
         # "Wise Account Statement" are exactly the headers we want).
-        if INSTITUTION_TERM_RE.search(line) and not STREET_ADDRESS_RE.search(line):
+        if line_names_institution(line) and not STREET_ADDRESS_RE.search(line):
             hints.append(line)
     return stable_unique(hints, limit=12)
 
@@ -531,7 +749,10 @@ def institution_signature(hint: str) -> str:
     word, then strips structural statement words and legal-entity suffixes so
     cosmetic per-statement differences do not read as different institutions.
     """
-    lowered = re.sub(r"[^a-z ]+", " ", hint.casefold())
+    # Fold accents first: otherwise "[^a-z ]" would turn "bogotá" into "bogot "
+    # (accent -> space, truncating the word) while "bogota" stays intact, so the
+    # same bank across two text layers would read as two institutions.
+    lowered = re.sub(r"[^a-z ]+", " ", fold_accents(hint.casefold()))
     merged: list[str] = []
     letters = ""
     for token in lowered.split():
@@ -594,9 +815,10 @@ def detect_currency(lines: Iterable[str]) -> dict[str, object]:
         if alias in low:
             confirmed.append(code)
             alias_evidence.append(alias)
-    if US_DOLLAR_RE.search(joined):
-        confirmed.append("USD")
-        symbol_markers.add("US$")
+    for pattern, code, marker in SYMBOL_CURRENCY_RULES:
+        if pattern.search(joined):
+            confirmed.append(code)
+            symbol_markers.add(marker)
     if "$" in joined:
         symbol_markers.add("$")
     for symbol, code in (("€", "EUR"), ("£", "GBP"), ("¥", "JPY")):
@@ -662,6 +884,7 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
                 "is_pdf": item.get("is_pdf"),
                 "page_count": item.get("page_count"),
                 "character_count": item.get("character_count"),
+                "content_sha256": item.get("content_sha256"),
                 "detected_years": years,
                 "detected_periods": detect_periods(lines),
                 "statement_titles": detect_statement_titles(lines),
@@ -680,6 +903,23 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
         message = f"The same statement file was supplied more than once: {', '.join(Path(path).name for path in duplicate_inputs)}."
         warnings.append(message)
         add_gate(gates, "duplicate-input", message)
+
+    # Byte-identical files supplied under different names (a re-downloaded
+    # statement) share a content digest even though their paths differ, which
+    # the path check above cannot see. Only flag when the matching digest spans
+    # more than one distinct path, so a same-path repeat stays a duplicate-input.
+    content_groups: dict[str, list[dict[str, object]]] = {}
+    for item in statement_files:
+        digest = item.get("content_sha256")
+        if digest:
+            content_groups.setdefault(str(digest), []).append(item)
+    for group in content_groups.values():
+        distinct_paths = {str(entry.get("resolved_file") or entry.get("file")) for entry in group}
+        if len(distinct_paths) > 1:
+            names = sorted({Path(str(entry.get("file"))).name for entry in group})
+            message = f"Byte-identical statements were supplied under different names: {', '.join(names)}."
+            warnings.append(message)
+            add_gate(gates, "duplicate-content", message)
 
     detected_years = sorted({year for item in statement_files for year in item.get("detected_years", [])})
     outside_years = [year for year in detected_years if year != tax_year]
@@ -1207,6 +1447,42 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if address_hints != ["Example Bank N.A."]:
             failures.append(f"address: a street address must not be an institution hint, got {address_hints}")
 
+        # A one-token brand ("Marca66") heads a name the word-boundary match
+        # misses; the stem catches it, but a marketing line sharing the stem
+        # ("Personal banking made easy") must not become an institution hint.
+        if not detect_institution_hints(["Marca66 S.A."]):
+            failures.append("institution-stem: 'Marca66 S.A.' must be recognized as an institution")
+        if not line_names_institution("Bankinter"):
+            failures.append("institution-stem: 'Bankinter' must be recognized as an institution")
+        if line_names_institution("Personal banking made easy"):
+            failures.append("institution-stem: a 'banking' marketing line must not name an institution")
+        if line_names_institution("Please avoid bankruptcy fees"):
+            failures.append("institution-stem: 'bankruptcy' must not name an institution")
+        # "banking" is a stopword on its own, but a corporate entity name led by
+        # a proper noun ("First Banking Corporation", "Lloyds Banking Group") is
+        # a real institution.
+        if not line_names_institution("First Banking Corporation"):
+            failures.append("institution-stem: 'Banking Corporation' entity name must name an institution")
+        if not line_names_institution("Lloyds Banking Group"):
+            failures.append("institution-stem: 'Lloyds Banking Group' must name an institution")
+        if not detect_institution_hints(["First Banking Corporation"]):
+            failures.append("institution-stem: a 'Banking Corporation' header must yield an institution hint")
+        if line_names_institution("Enjoy online banking anywhere"):
+            failures.append("institution-stem: bare 'online banking' marketing must stay excluded")
+        # A lowercase function word before the entity phrase marks marketing
+        # prose ("our banking group rewards"), not a name; it must stay excluded.
+        if line_names_institution("Join our banking group rewards today and save"):
+            failures.append("institution-stem: a lowercase-led 'banking group' marketing line must stay excluded")
+
+        # Accent drift between two text layers must not split one bank, and a
+        # ligature in the extracted text must not hide an institution term.
+        if institution_signature("Banco Bogotá Ejemplo") != institution_signature("Banco Bogota Ejemplo"):
+            failures.append("unicode: accented and unaccented spellings of one bank must share a signature")
+        if clean_line("Example ﬁnancial Group") != "Example financial Group":
+            failures.append("unicode: an NFKC ligature must fold to ASCII at ingestion")
+        if not detect_institution_hints([clean_line("Example ﬁnancial Group Statement")]):
+            failures.append("unicode: a ligatured 'financial' must still name an institution after NFKC")
+
         short_name_banks = build_preflight(
             [
                 synthetic_file("usbank.pdf", "U.S. Bank\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00 USD"),
@@ -1277,6 +1553,86 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if detect_account_hints(["Cuenta Nros. 11112222 y 33334444"]) != ["11112222", "33334444"]:
             failures.append("plural-label: a plural label joined by a conjunction must yield every account")
 
+        # One account printed in several forms is one account, not a mixed set:
+        # spaced header vs compact footer, masked header vs "ending in" footer,
+        # and a grouped IBAN under a label vs its compact spelling under IBAN.
+        # Two genuinely different full numbers must still surface as two.
+        account_alias_forms = {
+            "spaced+compact": (["Account No. 5555 6666", "questions about account 55556666"], ["5555 6666"]),  # privacy-gate: allow (synthetic account fixture)
+            "masked+ending": (["Account No. ****6666", "your account ending in 6666"], ["****6666"]),  # privacy-gate: allow (synthetic account fixture)
+            "iban-label+keyword": (
+                ["Account No: DE89 3704 0044 0532 0130 00", "IBAN: DE89370400440532013000"],  # privacy-gate: allow (synthetic IBAN)
+                ["DE89 3704 0044 0532 0130 00"],
+            ),
+        }
+        for label, (alias_lines, expected) in account_alias_forms.items():
+            got = detect_account_hints(alias_lines)
+            if got != expected:
+                failures.append(f"account-alias {label}: expected {expected}, got {got}")
+        if _same_account("55556666", False, "12346666", False):
+            failures.append("account-alias: two distinct full numbers sharing a suffix must not merge")
+        if not _same_account("****6666", True, "6666", True):
+            failures.append("account-alias: a masked token and its 'ending in' suffix must merge")
+        # Documented tradeoff: a masked token DOES absorb into a full number
+        # sharing its revealed digits, because on a real statement the mask is
+        # almost always the same account shown redacted. This can hide the rare
+        # case of two different accounts sharing a last-4 when one is masked; the
+        # alternative (never merging masked->full) re-opens a false mixed gate on
+        # every statement that prints its own number masked, which is far more
+        # common. Kept intentional here so a future edit does not flip it blindly.
+        if not _same_account("****6666", True, "12346666", False):
+            failures.append("account-alias: a masked token is intentionally absorbed by a full number sharing its tail")
+
+        aliased = build_preflight(
+            [
+                synthetic_file(
+                    "aliased.pdf",
+                    "Example Bank Monthly Statement\nAccount No. 5555 6666\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nQuestions about account 55556666 call us anytime",
+                )
+            ],
+            2025,
+            "one-account",
+            root / "aliased.json",
+            root / "aliased-review.csv",
+        )
+        if any(gate.get("code") == "possible-mixed-accounts" for gate in aliased["review_gates"]):  # type: ignore[index]
+            failures.append("account-alias: one account in two printed forms must not trip possible-mixed-accounts")
+
+        # A copyright footer or heritage tagline year describes the institution,
+        # not the period; it must not trip mixed-years on an otherwise-clean file.
+        if detect_years(["(c) 2019 Example Bancorp. All rights reserved."]) != []:
+            failures.append("boilerplate-year: a copyright footer year must not count as a statement year")
+        if detect_years(["Serving customers since 1904"]) != []:
+            failures.append("boilerplate-year: a heritage 'since 1904' year must not count as a statement year")
+        if detect_years(["Statement period January 1 2025 to January 31 2025"]) != [2025]:
+            failures.append("boilerplate-year: a real period year must still be detected")
+        # "since" is dual-use: heritage ("since 1904") suppresses, but temporal
+        # ("since 01.01.2025", a date tail) must keep the real period year.
+        if detect_years(["Account activity since 01.01.2025"]) != [2025]:
+            failures.append("boilerplate-year: a date-form year after 'since' must be kept, not suppressed")
+        if detect_years(["Serving customers since 1904"]) != []:
+            failures.append("boilerplate-year: a bare heritage 'since 1904' must still be suppressed")
+        # Suppression is per-token: a real out-of-year period must still gate
+        # even when the same year also appears in a footer.
+        if 2024 not in detect_years(["Statement period March 1 2024 to March 31 2024", "(c) 2024 Example Bancorp."]):
+            failures.append("boilerplate-year: a real period year must survive a same-year footer")
+        boilerplate = build_preflight(
+            [
+                synthetic_file(
+                    "boilerplate.pdf",
+                    "Example Bank Monthly Statement\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 1,234.56 USD\n(c) 2019 Example Bancorp. All rights reserved. Member FDIC.",
+                )
+            ],
+            2025,
+            "one-account",
+            root / "boilerplate.json",
+            root / "boilerplate-review.csv",
+        )
+        if any(gate.get("code") == "mixed-years" for gate in boilerplate["review_gates"]):  # type: ignore[index]
+            failures.append("boilerplate-year: a copyright-footer year must not trip mixed-years")
+        if boilerplate["status"] != "ready-for-domain-extraction":  # type: ignore[index]
+            failures.append(f"boilerplate-year: a clean statement with a footer year must stay ready, got {boilerplate['status']}")
+
         # The same statement supplied twice is flagged, not silently double-counted.
         duplicate = build_preflight(
             [
@@ -1290,6 +1646,48 @@ def command_self_test(_args: argparse.Namespace) -> int:
         )
         if not any(gate.get("code") == "duplicate-input" for gate in duplicate["review_gates"]):  # type: ignore[index]
             failures.append("duplicate: expected duplicate-input gate")
+
+        # A byte-for-byte copy under a different name shares a content digest and
+        # trips duplicate-content, which the path check alone cannot see.
+        probe = root / "hashme.bin"
+        probe.write_bytes(b"example statement bytes")
+        if file_sha256(probe) != hashlib.sha256(b"example statement bytes").hexdigest():
+            failures.append("file-sha256: digest must match hashlib over the same bytes")
+        if file_sha256(root / "does-not-exist.bin") is not None:
+            failures.append("file-sha256: an unreadable path must return None")
+        copy_a = synthetic_file("download.pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nCurrency USD")
+        copy_b = synthetic_file("download (1).pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nCurrency USD")
+        copy_a["content_sha256"] = copy_b["content_sha256"] = "0" * 64
+        content_dup = build_preflight(
+            [copy_a, copy_b], 2025, "one-account", root / "cdup.json", root / "cdup-review.csv"
+        )
+        if not any(gate.get("code") == "duplicate-content" for gate in content_dup["review_gates"]):  # type: ignore[index]
+            failures.append("duplicate-content: byte-identical files under different names must gate")
+
+        # Swiss apostrophe grouping ("CHF 1'234.56") reads as a monetary amount.
+        if detect_currency(["Saldo CHF 1'234.56"])["code"] != "CHF":
+            failures.append("currency-swiss: \"CHF 1'234.56\" must confirm CHF")
+        # Prefixed dollar/sol notations resolve the ambiguous sign.
+        brl = detect_currency(["Saldo final R$ 1.234,56"])
+        if brl["code"] != "BRL" or brl["ambiguous_dollar"]:  # type: ignore[index]
+            failures.append(f"currency-brl: 'R$' must resolve to BRL, got {brl}")
+        if detect_currency(["Saldo S/. 1,234.56"])["code"] != "PEN":
+            failures.append("currency-pen: 'S/.' before a monetary amount must resolve to PEN")
+        if detect_currency(["Closing balance 100.00 USD"])["code"] != "USD":
+            failures.append("currency-pen: a plain statement must not spuriously resolve to PEN")
+        # "S/" is also serial/series shorthand; a bare integer after it is a
+        # document number, not soles, and must not confirm PEN.
+        serial = detect_currency(["Currency USD", "Closing balance 100.00 USD", "Reference S/ 0099887 processed"])
+        if serial["code"] != "USD" or "PEN" in serial["candidates"]:  # type: ignore[index]
+            failures.append(f"currency-pen: 'S/ 0099887' (a serial) must not confirm PEN, got {serial}")
+
+        # A numeric-only period range is detected even with no month or period word.
+        if not detect_periods(["Kontoauszug 01.01.2025 - 31.01.2025"]):
+            failures.append("numeric-period: a dd.mm.yyyy range must be detected as a period")
+        if not detect_periods(["01/01/2025 al 31/01/2025"]):
+            failures.append("numeric-period: a dd/mm/yyyy 'al' range must be detected as a period")
+        if detect_periods(["Ref 12/34 amount 56.00"]):
+            failures.append("numeric-period: a lone fraction-like token must not read as a period range")
 
         # CSV cells that begin with a formula lead are neutralized.
         if csv_safe("=HYPERLINK(\"http://x\")") != "'=HYPERLINK(\"http://x\")":
@@ -1349,7 +1747,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 22 preflight cases")
+    print("Self-test passed: 33 preflight cases")
     return 0
 
 
