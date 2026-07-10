@@ -58,7 +58,7 @@ Use `foreign-per-usd` when the rate means one U.S. dollar equals the foreign-cur
 
 For manual workpapers, do not run the script until the source clearly supports a year-end rate. A saved local proof file is strongly preferred; the script accepts `--proof-file` and copies/hashes it. If no proof file is available, the workpaper records that limitation.
 
-`--source-note` is required and must explain why the source supports year-end use. Pass either `--proof-file` or a specific `--no-proof-file-reason`; never omit both and never pass both. When no proof file is available, the script records the reason and prints one `Caveat:` line in its final output.
+`--source-note` is required and must explain why the source supports year-end use. `--source-url` must be a nonempty absolute `http://` or `https://` URL, and `--retrieved` cannot be later than today. Pass either `--proof-file` or a specific `--no-proof-file-reason` of at least 16 trimmed characters; never omit both and never pass both. When no proof file is available, the script records the reason and prints one `Caveat:` line in its final output.
 
 ## Treasury Map Maintenance
 

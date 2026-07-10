@@ -41,6 +41,17 @@ def main() -> None:
     original_today_date = fx.today_date
     fx.today_date = lambda: dt.date(2026, 7, 10)
     try:
+        assert fx.resolve_retrieval_date("2025-12-31") == "2025-12-31"
+        assert fx.resolve_retrieval_date("2026-07-10") == "2026-07-10"
+        assert fx.resolve_retrieval_date(None) == "2026-07-10"
+        try:
+            fx.resolve_retrieval_date("2026-07-11")
+        except fx.RateError as exc:
+            assert exc.code == 2
+            assert "cannot be later than today" in str(exc)
+        else:
+            raise AssertionError("future retrieval date should fail")
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             proof_file = root / "source.html"
@@ -86,6 +97,41 @@ def main() -> None:
             assert "has not occurred yet" in stderr
             assert not (root / "manual-proof").exists()
 
+            future_retrieved_root = root / "future-retrieved-manual-proof"
+            code, stdout, stderr = run_main(
+                [
+                    *manual_base,
+                    "--year",
+                    "2025",
+                    "--proof-file",
+                    str(proof_file),
+                    "--retrieved",
+                    "2099-01-01",
+                    "--output-root",
+                    str(future_retrieved_root),
+                ]
+            )
+            assert code == 2, (code, stdout, stderr)
+            assert "Retrieval date 2099-01-01 cannot be later than today" in stderr
+            assert not future_retrieved_root.exists()
+
+            valid_retrieved_root = root / "valid-retrieved-manual-proof"
+            code, stdout, stderr = run_main(
+                [
+                    *manual_base,
+                    "--year",
+                    "2025",
+                    "--proof-file",
+                    str(proof_file),
+                    "--retrieved",
+                    "2026-07-10",
+                    "--output-root",
+                    str(valid_retrieved_root),
+                ]
+            )
+            assert code == 0, (code, stdout, stderr)
+            assert valid_retrieved_root.exists()
+
             fixture = PACKAGE_ROOT / "tests" / "fixtures" / "treasury-2025-12-31.json"
             lookup_root = root / "lookup-proof"
             code, stdout, stderr = run_main(
@@ -105,6 +151,26 @@ def main() -> None:
             assert "2026-12-31" in stderr
             assert "has not occurred yet" in stderr
             assert not lookup_root.exists()
+
+            future_retrieved_lookup_root = root / "future-retrieved-lookup-proof"
+            code, stdout, stderr = run_main(
+                [
+                    "lookup",
+                    "--currency",
+                    "THB",
+                    "--year",
+                    "2025",
+                    "--api-file",
+                    str(fixture),
+                    "--retrieved",
+                    "2099-01-01",
+                    "--output-root",
+                    str(future_retrieved_lookup_root),
+                ]
+            )
+            assert code == 2, (code, stdout, stderr)
+            assert "Retrieval date 2099-01-01 cannot be later than today" in stderr
+            assert not future_retrieved_lookup_root.exists()
     finally:
         fx.today_date = original_today_date
 

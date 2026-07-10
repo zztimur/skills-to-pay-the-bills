@@ -18,7 +18,7 @@ from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
 from typing import Iterable
 from urllib.error import URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from _workpaper import (
@@ -367,6 +367,20 @@ def today_iso() -> str:
     return today_date().isoformat()
 
 
+def resolve_retrieval_date(retrieved: str | None, today: _dt.date | None = None) -> str:
+    """Return the effective retrieval date, refusing impossible future provenance."""
+    current_date = today or today_date()
+    value = retrieved or current_date.isoformat()
+    retrieval_date = _dt.date.fromisoformat(value)
+    if retrieval_date > current_date:
+        raise RateError(
+            f"Retrieval date {value} cannot be later than today ({current_date.isoformat()}). "
+            "Use the date the source was actually retrieved.",
+            2,
+        )
+    return value
+
+
 def ensure_year_end_has_occurred(year: int, today: _dt.date | None = None) -> str:
     year_end = _dt.date(year, 12, 31)
     current_date = today or today_date()
@@ -377,6 +391,23 @@ def ensure_year_end_has_occurred(year: int, today: _dt.date | None = None) -> st
             2,
         )
     return year_end.isoformat()
+
+
+def validate_manual_source_url(raw: str) -> str:
+    """Require a real web locator before recording a manual source as provenance."""
+    source_url = clean_text(raw)
+    parsed = urlparse(source_url)
+    if (
+        not source_url
+        or re.search(r"\s", source_url)
+        or parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+    ):
+        raise RateError(
+            "Manual --source-url must be a nonempty absolute http:// or https:// URL.",
+            2,
+        )
+    return source_url
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -682,6 +713,7 @@ def create_workpaper(
 def command_lookup(args: argparse.Namespace) -> int:
     code = normalize_currency(args.currency)
     ensure_year_end_has_occurred(args.year)
+    retrieval_date = resolve_retrieval_date(args.retrieved)
     query_url = treasury_query_url(code, args.year, args.api_url)
     json_text, source_ref, snapshot_origin = load_json_text(query_url, args.api_file)
     rate = find_treasury_rate(code, args.year, json_text, query_url)
@@ -710,7 +742,7 @@ def command_lookup(args: argparse.Namespace) -> int:
         rate_direction="foreign-per-usd",
         source_title=source_title,
         source_url=TREASURY_DATASET_URL,
-        retrieval_date=args.retrieved or today_iso(),
+        retrieval_date=retrieval_date,
         source_note=note,
         source_category="Treasury/Fiscal Data year-end reporting rate",
         saved_proofs=[json_path],
@@ -730,6 +762,7 @@ def command_lookup(args: argparse.Namespace) -> int:
 def command_manual(args: argparse.Namespace) -> int:
     code = normalize_currency(args.currency)
     year_end_date = ensure_year_end_has_occurred(args.year)
+    retrieval_date = resolve_retrieval_date(args.retrieved)
     if code not in KNOWN_CURRENCY_CODES and not args.allow_unknown_code:
         raise RateError(
             f"Currency code {code} is not in this skill's known Treasury/alias set. If it is a "
@@ -741,6 +774,7 @@ def command_manual(args: argparse.Namespace) -> int:
     source_note = clean_text(args.source_note)
     if not source_note:
         raise RateError("Pass a nonempty --source-note confirming why this source supports year-end use.", 2)
+    source_url = validate_manual_source_url(args.source_url)
     reject_average_language(args.source_title, source_note, args.source_category)
     proof_files = [Path(args.proof_file)] if args.proof_file else []
     no_proof_reason = clean_text(args.no_proof_file_reason)
@@ -748,6 +782,11 @@ def command_manual(args: argparse.Namespace) -> int:
         raise RateError("Pass either --proof-file or --no-proof-file-reason, not both.", 2)
     if not proof_files and not no_proof_reason:
         raise RateError("Pass --proof-file or explain its absence with --no-proof-file-reason.", 2)
+    if not proof_files and len(no_proof_reason) < 16:
+        raise RateError(
+            "--no-proof-file-reason must be a specific explanation of at least 16 characters.",
+            2,
+        )
     proof_limitations = []
     if not proof_files:
         proof_limitations.append(f"No saved source proof file was supplied. Reason: {no_proof_reason}")
@@ -759,8 +798,8 @@ def command_manual(args: argparse.Namespace) -> int:
         rate=parse_user_rate(args.rate),
         rate_direction=args.rate_direction,
         source_title=args.source_title,
-        source_url=args.source_url,
-        retrieval_date=args.retrieved or today_iso(),
+        source_url=source_url,
+        retrieval_date=retrieval_date,
         source_note=source_note,
         source_category=args.source_category,
         saved_proofs=proof_files,
@@ -945,6 +984,24 @@ def command_self_test(_args: argparse.Namespace) -> int:
             pass
         else:
             raise AssertionError(f"_iso_date_arg should reject {bad!r}")
+
+    assert resolve_retrieval_date("2026-07-09", _dt.date(2026, 7, 10)) == "2026-07-09"
+    assert resolve_retrieval_date(None, _dt.date(2026, 7, 10)) == "2026-07-10"
+    try:
+        resolve_retrieval_date("2026-07-11", _dt.date(2026, 7, 10))
+    except RateError as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("future retrieval date should fail")
+
+    assert validate_manual_source_url(" https://example.test/fx/2025 ") == "https://example.test/fx/2025"
+    for bad in ("", "example.test/fx/2025", "ftp://example.test/fx/2025", "file:///tmp/source.html"):
+        try:
+            validate_manual_source_url(bad)
+        except RateError as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError(f"manual source URL should reject {bad!r}")
 
     assert ensure_year_end_has_occurred(2025, _dt.date(2026, 1, 1)) == "2025-12-31"
     try:
@@ -1159,6 +1216,17 @@ def command_self_test(_args: argparse.Namespace) -> int:
         assert no_proof_data["proof"]["limitations"] == [
             "No saved source proof file was supplied. Reason: The source page could not be saved during retrieval."
         ]
+
+        short_no_proof_args = argparse.Namespace(
+            **{**no_proof_args.__dict__, "no_proof_file_reason": "x", "output_root": str(Path(tmp) / "manual-short-no-proof")}
+        )
+        try:
+            command_manual(short_no_proof_args)
+        except RateError as exc:
+            assert exc.code == 2
+            assert "at least 16 characters" in str(exc)
+        else:
+            raise AssertionError("trivial no-proof reason should fail")
 
         unknown_args = argparse.Namespace(
             **{
