@@ -564,6 +564,226 @@ check("SCALE-1 a 61-page statement completes <60s with detectors intact",
       f"elapsed={elapsed:.1f}s pages={d['profile']['total_page_count'] if d else '?'}")
 
 # --------------------------------------------------------------------------- #
+# Round-7 currency corroboration (F1/F2/F3): the wrong-currency flip and its fuel
+# --------------------------------------------------------------------------- #
+
+# CURR-1 (the High): a Swiss-format CHF statement -- trailing-minus debits (the
+# authentic Swiss convention), CHF never glued to an amount, and one routine
+# card-FX disclosure that mentions USD. USD must NOT be handed off as the
+# confirmed currency with no gate. Before the fix the bare "usd" alias flipped
+# code to USD ungated; now USD earns no confirmation and the set fails safe.
+p = make_pdf("swiss.pdf", [
+    "Beispielbank Zurich Kontoauszug",
+    "Konto 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period 01.01.2025 - 31.01.2025",
+    "Alle Betraege in CHF",
+    "Belastung 1'234.56-",
+    "Gutschrift 987.65-",
+    "Hinweis: Kartentransaktionen in USD werden umgerechnet",
+])
+proc, d = run("swiss", [str(p)])
+flipped_ungated = bool(d) and d["currency"]["code"] == "USD" and not any("currenc" in g for g in gates_of(d))
+check("CURR-1 Swiss CHF page + one USD disclosure word never hands off USD ungated",
+      d is not None and not flipped_ungated,
+      f"currency={d['currency'] if d else '?'} gates={gates_of(d)}")
+
+# CURR-2 (no cry-wolf): a clean EUR statement (euro sign) whose only USD mention
+# is a quoted exchange rate. It must stay single-currency EUR with no
+# mixed-currencies gate -- the fix must not trade the flip for a false alarm on
+# every European statement that prints an FX table.
+p = make_pdf("eur-rate.pdf", [
+    "Example Bank Europe Monthly Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Closing balance EUR 1.234,56",
+    "Exchange rate USD/EUR 1.0845 applied to card transactions",
+])
+proc, d = run("eur-rate", [str(p)])
+check("CURR-2 EUR statement quoting a USD/EUR rate stays single-currency EUR (no mixed gate)",
+      d and d["currency"]["code"] == "EUR" and "mixed-currencies" not in gates_of(d),
+      f"currency={d['currency'] if d else '?'} gates={gates_of(d)}")
+
+# CURR-3 (F2 negatives): a statement whose figures are all accounting-negative
+# parens must still confirm its currency from code-adjacency, not degrade to
+# unknown-currency.
+p = make_pdf("neg-paren.pdf", [
+    "Example Bank Monthly Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Service charge (12.34) EUR",
+    "Overdraft interest (1.234,56) EUR",
+])
+proc, d = run("neg-paren", [str(p)])
+check("CURR-3 accounting-negative '(1.234,56) EUR' figures confirm EUR (no unknown-currency)",
+      d and d["currency"]["code"] == "EUR" and "unknown-currency" not in gates_of(d),
+      f"currency={d['currency'] if d else '?'} gates={gates_of(d)}")
+
+# CURR-4 (F3 footnotes): every currency mention carries a superscript footnote
+# marker. The marker is stripped before NFKC, so the code still confirms instead
+# of folding to "USD1" and vanishing.
+p = make_pdf("footnote.pdf", [
+    "Example Bank Monthly Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Currency: USD¹",
+    "Closing balance 1,234.56 USD¹",
+])
+proc, d = run("footnote", [str(p)])
+check("CURR-4 footnoted 'USD¹' mentions confirm USD (no unknown-currency)",
+      d and d["currency"]["code"] == "USD" and "unknown-currency" not in gates_of(d),
+      f"currency={d['currency'] if d else '?'} gates={gates_of(d)}")
+
+# CURR-5 (F1b label path): a statement that names its currency only with the
+# German label "Währung" and never glues CHF to an amount. The label alone must
+# confirm the code (amount-adjacency cannot, by construction).
+p = make_pdf("de-label.pdf", [
+    "Example Bank Monthly Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Währung CHF",
+    "Saldo 1'234.56",
+    "Belastung 500.00-",
+])
+proc, d = run("de-label", [str(p)])
+check("CURR-5 German label 'Währung CHF' confirms CHF with no amount-adjacency",
+      d and d["currency"]["code"] == "CHF",
+      f"currency={d['currency'] if d else '?'} gates={gates_of(d)}")
+
+# --------------------------------------------------------------------------- #
+# Round-7 coverage (F4/F5/F6): temporal years, -bank brands, German/French labels
+# --------------------------------------------------------------------------- #
+
+# COV-1 (F4): a statement whose only year-bearing line phrases the period as
+# "since <ISO date>" must still yield year coverage, not a false
+# unknown-year-coverage stop from over-suppressing the year next to "since".
+p = make_pdf("since-iso.pdf", [
+    "Example Bank Monthly Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Portfolio value since 2025-04-01",
+    "Currency USD",
+    "Closing balance 1,234.56 USD",
+])
+proc, d = run("since-iso", [str(p)])
+check("COV-1 sole 'since 2025-04-01' line yields year coverage (no false unknown-year)",
+      d and 2025 in d["coverage_hints"]["detected_years"] and "unknown-year-coverage" not in gates_of(d),
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
+
+# COV-2 (F4 guard): a real out-of-year period still trips mixed-years even when
+# the same year also appears in a copyright footer -- suppression is per-token,
+# so the period-line year survives and the gate fires.
+p = make_pdf("mixed-year-footer.pdf", [
+    "Example Bank",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period March 1 2024 to March 31 2024",
+    "Currency USD",
+    "(c) 2024 Example Bancorp. All rights reserved.",
+])
+proc, d = run("mixed-year-footer", [str(p)])
+check("COV-2 a real 2024 period still trips mixed-years despite a 2024 footer",
+      d and "mixed-years" in gates_of(d),
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
+
+# COV-3 (F5+F6+F1b): a German Kontoauszug resolves institution, account, and
+# currency end-to-end, with no unknown-institution / unknown-account gate.
+p = make_pdf("kontoauszug.pdf", [
+    "Commerzbank Kontoauszug",
+    "Konto 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Währung EUR",
+    "Saldo 1.234,56",
+    "Belastung 500.00-",
+])
+proc, d = run("kontoauszug", [str(p)], scope="one-institution")
+gates = gates_of(d)
+check("COV-3 German Kontoauszug resolves institution+account+currency end-to-end",
+      d and d["account_hints"] == ["12345678"] and d["institution_hints"]
+      and d["currency"]["code"] == "EUR"
+      and "unknown-institution" not in gates and "unknown-account" not in gates,
+      f"acct={d['account_hints'] if d else '?'} inst={d['institution_hints'] if d else '?'} "
+      f"cur={d['currency']['code'] if d else '?'} gates={gates}")
+
+# COV-4 (F5): a Dutch -bank brand ("Rabobank") is recognized as the institution.
+p = make_pdf("rabobank.pdf", [
+    "Rabobank Account Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Currency EUR",
+    "Closing balance 1.234,56 EUR",
+])
+proc, d = run("rabobank", [str(p)], scope="one-institution")
+check("COV-4 Dutch '-bank' brand (Rabobank) is recognized as the institution",
+      d and d["institution_hints"] and "unknown-institution" not in gates_of(d),
+      f"inst={d['institution_hints'] if d else '?'} gates={gates_of(d)}")
+
+# --------------------------------------------------------------------------- #
+# Round-8 fixes: copyright/heritage year leaks, devise/valuta labels, -bank nouns
+# --------------------------------------------------------------------------- #
+
+# R8-1 (finding B): a clean 2025 statement carrying a "© May 2019" copyright
+# footer must NOT trip a false mixed-years gate -- the hard-copyright year is
+# suppressed even with an intervening month.
+p = make_pdf("copyright-month.pdf", [
+    "Example Bank Monthly Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Currency USD",
+    "Closing balance 1,234.56 USD",
+    "© May 2019 Example Bank. All rights reserved.",
+])
+proc, d = run("copyright-month", [str(p)])
+check("R8-1 a '© May 2019' footer does not trip mixed-years on a 2025 statement",
+      d and "mixed-years" not in gates_of(d) and d["coverage_hints"]["detected_years"] == [2025],
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
+
+# R8-2 (finding A): an advisory-prose line using the English verb "devise" near a
+# currency code must NOT flip an otherwise-USD statement to mixed-currencies.
+p = make_pdf("devise-verb.pdf", [
+    "Example Bank Wealth Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Currency USD",
+    "Closing balance 12,345.67 USD",
+    "Your advisor can devise a PLN allocation on request",
+])
+proc, d = run("devise-verb", [str(p)])
+check("R8-2 an advisory 'devise a PLN' line does not trip false mixed-currencies",
+      d and d["currency"]["code"] == "USD" and "mixed-currencies" not in gates_of(d),
+      f"currency={d['currency'] if d else '?'} gates={gates_of(d)}")
+
+# R8-3 (finding C): a '-bank' common noun in the header region ("Foodbank") with
+# no banking context is not mined as the institution; the real header bank wins.
+p = make_pdf("foodbank-noise.pdf", [
+    "Commerzbank Kontoauszug",
+    "Konto 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Währung EUR",
+    "Saldo 1.234,56",
+    "01.01.2025 Local Foodbank charity payment 25.00",
+])
+proc, d = run("foodbank-noise", [str(p)], scope="one-institution")
+insts = [h.casefold() for h in (d["institution_hints"] if d else [])]
+check("R8-3 a 'Foodbank' prose line does not pollute institution hints",
+      d and not any("foodbank" in h for h in insts)
+      and "possible-mixed-institutions" not in gates_of(d),
+      f"inst={d['institution_hints'] if d else '?'} gates={gates_of(d)}")
+
+# R9-1 (round-9 Z4): a comma-separated multi-year copyright footer is suppressed
+# in full (transitively), so it does not trip a false mixed-years on a clean 2025
+# statement -- the trailing year no longer leaks past the marker window.
+p = make_pdf("copyright-list.pdf", [
+    "Example Bank Monthly Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Currency USD",
+    "Closing balance 1,234.56 USD",
+    "© 2019, 2020, 2021 Example Corporation. All rights reserved.",
+])
+proc, d = run("copyright-list", [str(p)])
+check("R9-1 a '© 2019, 2020, 2021' copyright list does not trip mixed-years",
+      d and "mixed-years" not in gates_of(d) and d["coverage_hints"]["detected_years"] == [2025],
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
+
+# --------------------------------------------------------------------------- #
 # Report
 # --------------------------------------------------------------------------- #
 
