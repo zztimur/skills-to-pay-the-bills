@@ -650,6 +650,72 @@ check("CURR-5 German label 'Währung CHF' confirms CHF with no amount-adjacency"
       f"currency={d['currency'] if d else '?'} gates={gates_of(d)}")
 
 # --------------------------------------------------------------------------- #
+# Round-7 coverage (F4/F5/F6): temporal years, -bank brands, German/French labels
+# --------------------------------------------------------------------------- #
+
+# COV-1 (F4): a statement whose only year-bearing line phrases the period as
+# "since <ISO date>" must still yield year coverage, not a false
+# unknown-year-coverage stop from over-suppressing the year next to "since".
+p = make_pdf("since-iso.pdf", [
+    "Example Bank Monthly Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Portfolio value since 2025-04-01",
+    "Currency USD",
+    "Closing balance 1,234.56 USD",
+])
+proc, d = run("since-iso", [str(p)])
+check("COV-1 sole 'since 2025-04-01' line yields year coverage (no false unknown-year)",
+      d and 2025 in d["coverage_hints"]["detected_years"] and "unknown-year-coverage" not in gates_of(d),
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
+
+# COV-2 (F4 guard): a real out-of-year period still trips mixed-years even when
+# the same year also appears in a copyright footer -- suppression is per-token,
+# so the period-line year survives and the gate fires.
+p = make_pdf("mixed-year-footer.pdf", [
+    "Example Bank",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period March 1 2024 to March 31 2024",
+    "Currency USD",
+    "(c) 2024 Example Bancorp. All rights reserved.",
+])
+proc, d = run("mixed-year-footer", [str(p)])
+check("COV-2 a real 2024 period still trips mixed-years despite a 2024 footer",
+      d and "mixed-years" in gates_of(d),
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
+
+# COV-3 (F5+F6+F1b): a German Kontoauszug resolves institution, account, and
+# currency end-to-end, with no unknown-institution / unknown-account gate.
+p = make_pdf("kontoauszug.pdf", [
+    "Commerzbank Kontoauszug",
+    "Konto 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Währung EUR",
+    "Saldo 1.234,56",
+    "Belastung 500.00-",
+])
+proc, d = run("kontoauszug", [str(p)], scope="one-institution")
+gates = gates_of(d)
+check("COV-3 German Kontoauszug resolves institution+account+currency end-to-end",
+      d and d["account_hints"] == ["12345678"] and d["institution_hints"]
+      and d["currency"]["code"] == "EUR"
+      and "unknown-institution" not in gates and "unknown-account" not in gates,
+      f"acct={d['account_hints'] if d else '?'} inst={d['institution_hints'] if d else '?'} "
+      f"cur={d['currency']['code'] if d else '?'} gates={gates}")
+
+# COV-4 (F5): a Dutch -bank brand ("Rabobank") is recognized as the institution.
+p = make_pdf("rabobank.pdf", [
+    "Rabobank Account Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Currency EUR",
+    "Closing balance 1.234,56 EUR",
+])
+proc, d = run("rabobank", [str(p)], scope="one-institution")
+check("COV-4 Dutch '-bank' brand (Rabobank) is recognized as the institution",
+      d and d["institution_hints"] and "unknown-institution" not in gates_of(d),
+      f"inst={d['institution_hints'] if d else '?'} gates={gates_of(d)}")
+
+# --------------------------------------------------------------------------- #
 # Report
 # --------------------------------------------------------------------------- #
 

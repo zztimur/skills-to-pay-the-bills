@@ -125,11 +125,14 @@ ACCOUNT_LABEL_RE = re.compile(
     re.I,
 )
 # Bare designation immediately followed by a digit/masked identifier
-# ("Account 12345678", "Cuenta 001234"). The capture must START with a digit or
+# ("Account 12345678", "Cuenta 001234", German "Konto 12345678" / "Kontonummer
+# 12345678", French "Compte 12345678"). The capture must START with a digit or
 # masking char, so a following word ("Account Summary", "Account holder JUAN")
-# cannot match at all.
+# cannot match at all. "kontonummer" precedes "konto" so the longer German label
+# is consumed whole rather than leaving a stray "nummer".
 ACCOUNT_BARE_RE = re.compile(
-    r"\b(?:account|acct|a/c|cuenta|n[uú]mero de cuenta)\b[\s:#-]*([*Xx0-9][*Xx0-9.\- ]{3,33})",
+    r"\b(?:account|acct|a/c|cuenta|n[uú]mero de cuenta|"
+    r"kontonummer|konto|compte|num[eé]ro de compte)\b[\s:#-]*([*Xx0-9][*Xx0-9.\- ]{3,33})",
     re.I,
 )
 ACCOUNT_IBAN_RE = re.compile(r"\bIBAN\b[\s:#-]*([A-Z]{2}\d{2}[A-Z0-9 ]{6,40})", re.I)
@@ -165,6 +168,8 @@ INSTITUTION_TERMS = (
     "bank",
     "banco",
     "banque",
+    "sparkasse",
+    "sparkassen",
     "credit union",
     "brokerage",
     "financial",
@@ -218,6 +223,26 @@ INSTITUTION_STEM_STOPWORDS = {
     "bancos",
     "bancomat",
 }
+# A one-token brand can also END in "bank" ("Commerzbank", "Postbank",
+# "Rabobank"), which the start-anchored prefix stem above cannot see (there is no
+# word boundary before "bank" inside "Commerzbank"). Match a token that ends in
+# "bank" and exclude the common nouns/place-names that share the suffix but are
+# not institutions. "banking"/"embankment" etc. do not end in "bank", so the
+# trailing \b already keeps them out; the stopword set covers the words that do.
+INSTITUTION_STEM_SUFFIX_RE = re.compile(r"\b\w*bank\b", re.I)
+INSTITUTION_STEM_SUFFIX_STOPWORDS = {
+    "bank",  # the bare word is already an INSTITUTION_TERM, matched earlier
+    "riverbank",
+    "databank",
+    "interbank",
+    "nonbank",
+    "sandbank",
+    "fogbank",
+    "piggybank",
+    "mountebank",
+    "burbank",
+    "wordbank",
+}
 
 
 def line_names_institution(line: str) -> bool:
@@ -234,9 +259,17 @@ def line_names_institution(line: str) -> bool:
         # "Lloyds Banking Group" counts but "our banking group rewards" does not.
         if match.group("lead")[:1].isupper():
             return True
-    return any(
+    if any(
         match.group(0).casefold() not in INSTITUTION_STEM_STOPWORDS
         for match in INSTITUTION_STEM_RE.finditer(line)
+    ):
+        return True
+    # Suffix brand stems: a token ending in "bank" ("Commerzbank", "Postbank",
+    # "Rabobank") that the start-anchored prefix stem cannot reach, minus the
+    # common -bank words that are not institutions.
+    return any(
+        match.group(0).casefold() not in INSTITUTION_STEM_SUFFIX_STOPWORDS
+        for match in INSTITUTION_STEM_SUFFIX_RE.finditer(line)
     )
 
 # A customer mailing address that happens to sit on a street with a bank-like
@@ -573,19 +606,41 @@ def file_profile(
     }
 
 
+# Date context that proves a year is a real period year, not copyright/heritage.
+# ISO_DATE_TAIL_RE matches the "-MM-DD" that FOLLOWS a year heading a numeric
+# date ("2025-04-01"); the tail form ("01.01.2025") is caught by the preceding
+# separator instead. MONTH_ADJ_RE finds a month name (English or Spanish) so a
+# year beside one ("since March 2025", "marzo de 2025") is kept. The month
+# window allows the Spanish "<month> de <year>" gap, not just a single space.
+ISO_DATE_TAIL_RE = re.compile(r"[-/.]\d{1,2}[-/.]\d{1,2}")
+MONTH_ADJ_RE = re.compile(r"\b(?:" + "|".join(MONTH_NAMES) + r")\b", re.I)
+MONTH_YEAR_WINDOW = 5
+
+
 def detect_years(lines: Iterable[str]) -> list[int]:
     years: set[int] = set()
     for line in lines:
         marker_spans = [match.span() for match in BOILERPLATE_YEAR_MARKER_RE.finditer(line)]
+        month_spans = [match.span() for match in MONTH_ADJ_RE.finditer(line)]
         for match in YEAR_RE.finditer(line):
             # A copyright/heritage year sits as a bare year within a few
             # characters of its marker ("© 2019", "since 1904"); drop it so it
-            # cannot masquerade as a statement-period year. But "since" is also
-            # temporal ("activity since 01.01.2025"): a year that is the tail of
-            # a numeric date (preceded by . / -) is a real period year, never a
-            # heritage year, so it is kept even next to a marker.
-            in_numeric_date = match.start() > 0 and line[match.start() - 1] in "./-"
-            if not in_numeric_date and any(
+            # cannot masquerade as a statement-period year. But those markers are
+            # dual-use -- "since"/"established" also head real dates -- so a year
+            # that carries date context is kept even next to a marker: the tail of
+            # a numeric date ("...since 01.01.2025"), the head of one ("since
+            # 2025-04-01"), or a year beside a month name ("since March 2025").
+            # Only a truly bare year next to a marker is suppressed. (Trade: a rare
+            # "Established March 1901" is kept; mixed-years is a fail-safe review
+            # gate, so a spurious keep only prompts a human, never corrupts data.)
+            in_numeric_date = (
+                (match.start() > 0 and line[match.start() - 1] in "./-")
+                or ISO_DATE_TAIL_RE.match(line, match.end()) is not None
+            )
+            near_month = any(
+                _span_gap(span, match.span()) <= MONTH_YEAR_WINDOW for span in month_spans
+            )
+            if not (in_numeric_date or near_month) and any(
                 _span_gap(span, match.span()) <= YEAR_CONTEXT_WINDOW for span in marker_spans
             ):
                 continue
@@ -1390,6 +1445,60 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if detect_currency([clean_line("Closing balance 1.234,56 EUR¹")])["code"] != "EUR":  # type: ignore[index]
             failures.append("currency-footnote: a footnoted 'EUR¹' beside an amount must confirm EUR")
 
+        # --- Round-7 coverage (F4/F5/F6) ---
+        # F4: a year with date context survives beside a dual-use marker. The
+        # head of an ISO date ("since 2025-04-01") and a month-adjacent year
+        # ("since March 2025") are kept; a bare heritage/copyright year is still
+        # suppressed; a year range is not mistaken for a single ISO date.
+        if 2025 not in detect_years(["Portfolio value since 2025-04-01"]):
+            failures.append("year-iso-head: 'since 2025-04-01' must keep the temporal year")
+        if 2025 not in detect_years(["Interest earned since March 2025"]):
+            failures.append("year-month-adj: 'since March 2025' must keep the temporal year")
+        if 1904 in detect_years(["Serving our community since 1904"]):
+            failures.append("year-heritage: bare 'since 1904' must stay suppressed")
+        if 2019 in detect_years(["(c) 2019 Example Bancorp. All rights reserved."]):
+            failures.append("year-copyright: a bare copyright year must stay suppressed")
+        if detect_years(["Comparative 2024-2025 summary"]) != [2024, 2025]:
+            failures.append("year-range: a year range must keep both years, not be read as one ISO date")
+        # F5: a one-token brand ending in "bank" is recognized, as is a German
+        # savings bank; common -bank nouns/place-names are not institutions.
+        if not line_names_institution("Commerzbank Kontoauszug"):
+            failures.append("inst-suffix: 'Commerzbank' must be recognized as an institution")
+        if not line_names_institution("Rabobank Account Statement"):
+            failures.append("inst-suffix: 'Rabobank' must be recognized as an institution")
+        if not line_names_institution("Sparkasse Berlin"):
+            failures.append("inst-sparkasse: 'Sparkasse' must be recognized as an institution")
+        if line_names_institution("Our riverbank picnic area is open"):
+            failures.append("inst-guard: 'riverbank' must not be an institution")
+        if line_names_institution("See our nonbank lender disclosure"):
+            failures.append("inst-guard: 'nonbank' must not be an institution")
+        # F6: German/French bare account labels yield the account number.
+        if detect_account_hints(["Konto 12345678"]) != ["12345678"]:
+            failures.append("acct-konto: German 'Konto 12345678' must yield the account")
+        if "12345678" not in detect_account_hints(["Kontonummer: 12345678"]):
+            failures.append("acct-kontonummer: 'Kontonummer: 12345678' must yield the account")
+        if "12345678" not in detect_account_hints(["Compte 12345678"]):
+            failures.append("acct-compte: French 'Compte 12345678' must yield the account")
+        # F5+F6+F1b end-to-end: a German statement resolves institution, account,
+        # and currency, and draws no unknown-institution / unknown-account gate.
+        de_stmt = build_preflight(
+            [
+                synthetic_file(
+                    "kontoauszug.pdf",
+                    "Commerzbank Kontoauszug\nKonto 12345678\nStatement period January 1 2025 to January 31 2025\nWährung EUR\nSaldo 1.234,56",
+                )
+            ],
+            2025,
+            "one-institution",
+            root / "kontoauszug.json",
+            root / "kontoauszug-review.csv",
+        )
+        de_gates = {gate.get("code") for gate in de_stmt["review_gates"]}  # type: ignore[index]
+        if de_stmt["account_hints"] != ["12345678"]:  # type: ignore[index]
+            failures.append(f"de-e2e: expected account ['12345678'], got {de_stmt['account_hints']}")
+        if not de_stmt["institution_hints"] or "unknown-institution" in de_gates:  # type: ignore[index]
+            failures.append(f"de-e2e: expected a German institution hint, got {de_stmt['institution_hints']} gates={de_gates}")
+
         accounts = build_preflight(
             [synthetic_file("accounts.pdf", "Example Bank\nAccount 11112222\nAccount 33334444\nStatement period January 2025\nCurrency USD")],
             2025,
@@ -1814,7 +1923,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 36 preflight cases")
+    print("Self-test passed: 39 preflight cases")
     return 0
 
 
