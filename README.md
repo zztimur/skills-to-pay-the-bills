@@ -29,7 +29,7 @@ The pattern is boring on purpose: one clear `SKILL.md`, thin platform adapters, 
 | Skill | Use it when | Output |
 | --- | --- | --- |
 | [`get-yearly-fx-rate/`](get-yearly-fx-rate/) | You need a published yearly average FX rate for one currency and one year. | Cited rate, reciprocal, saved source proof, `workpaper.json`, Markdown, and PDF. |
-| [`get-year-end-fx-rate/`](get-year-end-fx-rate/) | You need a year-end or `YYYY-12-31` FX rate for FBAR-style conversion proof. | Treasury/Fiscal Data first, then a verified manual fallback: retained source JSON/provenance or an explicit no-proof caveat, plus `workpaper.json`, Markdown, and PDF. |
+| [`get-year-end-fx-rate/`](get-year-end-fx-rate/) | You need a year-end or `YYYY-12-31` FX rate for FBAR-style conversion proof. | Treasury/Fiscal Data first for completed year-ends, then a verified manual fallback: retained source JSON/provenance or an explicit no-proof caveat, plus `workpaper.json`, Markdown, and PDF. |
 | [`statement-intake-preflight/`](statement-intake-preflight/) | You need to preflight machine-readable statement PDFs before FBAR or interest extraction. | Shared intake JSON/CSV with text-layer, scope, currency, account, institution, and review-gate checks. |
 | [`fbar-threshold-check/`](fbar-threshold-check/) | You need to check whether foreign accounts crossed the FBAR threshold for a calendar year. | Account ledgers, daily aggregate threshold view, FinCEN maximum-value view, CSV, JSON, and PDF summary. |
 | [`statements-to-interest/`](statements-to-interest/) | You need to extract interest income from one institution's text PDF statements for one tax year. | IRS-oriented interest support packet with JSON/CSV review artifacts and FX confirmation gates. |
