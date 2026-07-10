@@ -20,9 +20,19 @@ except ImportError:  # pragma: no cover - exercised by users without deps.
     pdfplumber = None
 
 
+# Handoff-contract version, distinct from the package version in plugin.json.
+# Downstream skills (fbar-threshold-check, statements-to-interest) pin the set of
+# schema versions they accept, so bump this only on a breaking JSON change and
+# update those consumers in lockstep.
 SCHEMA_VERSION = "1.0"
 MIN_TEXT_CHARS = 40
+MIN_TAX_YEAR = 1970
+MAX_TAX_YEAR = 2100
 SUPPORTED_SCOPES = {"one-account", "one-institution"}
+# Exit code returned for a review-required result only when the caller opts in
+# with --exit-nonzero-on-review; the default exit stays 0 so the agent workflow
+# (which reads the JSON) is unchanged.
+REVIEW_EXIT_CODE = 3
 
 CURRENCY_CODES = {
     "AED",
@@ -81,12 +91,26 @@ CURRENCY_ALIASES = {
     "usd": "USD",
 }
 
-ACCOUNT_PATTERNS = (
-    re.compile(r"\b(?:account|acct|a/c)\s*(?:number|no\.?|#|id)?\s*[:#-]?\s*([A-Z0-9*Xx.\- ]{4,32})", re.I),
-    re.compile(r"\b(?:cuenta|n[uú]mero de cuenta)\s*[:#-]?\s*([A-Z0-9*Xx.\- ]{4,32})", re.I),
-    re.compile(r"\bIBAN\s*[:#-]?\s*([A-Z]{2}[A-Z0-9 ]{8,34})", re.I),
-    re.compile(r"\b(?:ending in|ends in|termina en)\s*([0-9*Xx]{2,8})", re.I),
+# Explicit designation word ("Account Number", "A/C No.", "Cuenta Nro."):
+# consumes the label so the capture starts at the identifier. The capture is
+# still validated by account_token(), which rejects word-only matches such as
+# "Account Number Summary".
+ACCOUNT_LABEL_RE = re.compile(
+    r"\b(?:account|acct|a/c|cuenta)\s*"
+    r"(?:numbers?|no\.?|nbr\.?|nros?\.?|n[uú]ms?\.?|id)\b"
+    r"[\s:#-]*([*Xx0-9A-Za-z][*Xx0-9A-Za-z.\- ]{2,33})",
+    re.I,
 )
+# Bare designation immediately followed by a digit/masked identifier
+# ("Account 12345678", "Cuenta 001234"). The capture must START with a digit or
+# masking char, so a following word ("Account Summary", "Account holder JUAN")
+# cannot match at all.
+ACCOUNT_BARE_RE = re.compile(
+    r"\b(?:account|acct|a/c|cuenta|n[uú]mero de cuenta)\b[\s:#-]*([*Xx0-9][*Xx0-9.\- ]{3,33})",
+    re.I,
+)
+ACCOUNT_IBAN_RE = re.compile(r"\bIBAN\b[\s:#-]*([A-Z]{2}[A-Z0-9 ]{8,34})", re.I)
+ACCOUNT_ENDING_RE = re.compile(r"\b(?:ending in|ends in|termina en)\s*([*Xx0-9]{2,8})", re.I)
 
 TITLE_TERMS = (
     "statement",
@@ -111,6 +135,14 @@ INSTITUTION_TERMS = (
     "global66",
     "wise",
     "revolut",
+)
+
+# Match institution terms only at word boundaries. Substring matching wrongly
+# fired on "otherwi(se)", "like(wise)", and "(trust)ed"; a boundary match keeps
+# the fintech brands ("Wise", "Revolut") while ignoring those common words.
+INSTITUTION_TERM_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(term) for term in INSTITUTION_TERMS) + r")\b",
+    re.I,
 )
 
 MONTH_NAMES = (
@@ -140,8 +172,54 @@ MONTH_NAMES = (
     "diciembre",
 )
 
+# Structural statement words stripped before comparing two institution hints, so
+# that the same bank across months ("Example Bank January Statement" vs
+# "... February Statement") collapses to one signature instead of looking like
+# two institutions.
+INSTITUTION_NOISE = {
+    "statement",
+    "statements",
+    "account",
+    "accounts",
+    "monthly",
+    "quarterly",
+    "annual",
+    "period",
+    "periodo",
+    "summary",
+    "resumen",
+    "extracto",
+    "movimientos",
+    "cuenta",
+    "page",
+    "date",
+    "the",
+    "of",
+    "for",
+    "and",
+    "de",
+    "del",
+    "la",
+    "el",
+} | set(MONTH_NAMES)
+
 YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 ISO_CURRENCY_RE = re.compile(r"\b[A-Z]{3}\b")
+
+# A three-letter ISO token is only trusted as a currency when it is corroborated:
+# either its line carries a currency-label word, or the code sits directly beside
+# an amount. This keeps all-caps prose ("PLEASE TRY OUR APP") and merchant names
+# out of the confirmed set while still surfacing them as weak candidates.
+CURRENCY_LABEL_RE = re.compile(
+    r"\b(?:currenc(?:y|ies)|monedas?|divisas?|denominat(?:ed|ion)|iso\s*4217)\b",
+    re.I,
+)
+_CURRENCY_CODE_ALT = "|".join(sorted(CURRENCY_CODES))
+_AMOUNT = r"[-+(]?\s*[$€£¥]?\s*\d[\d.,]*"
+CURRENCY_AMOUNT_RE = re.compile(
+    rf"\b(?P<pre>{_CURRENCY_CODE_ALT})\b\s*{_AMOUNT}"
+    rf"|{_AMOUNT}\s*\b(?P<post>{_CURRENCY_CODE_ALT})\b"
+)
 
 
 class PreflightError(Exception):
@@ -266,67 +344,127 @@ def detect_periods(lines: Iterable[str]) -> list[str]:
     return stable_unique(periods, limit=20)
 
 
+def account_token(raw: str) -> str | None:
+    """Reduce a captured account match to its identifier, or reject free text.
+
+    Keeps the leading run of digits/masking (allowing a short alpha prefix like
+    "ABX" and internal separators), dropping any trailing words the greedy
+    capture pulled in, and rejects captures that are not identifier-shaped --
+    e.g. a holder name or "Summary for January".
+    """
+    cleaned = clean_line(raw)
+    match = re.match(r"[A-Za-z]{0,4}[*Xx0-9](?:[*Xx0-9]|[ .\-](?=[*Xx0-9]))*", cleaned)
+    if not match:
+        return None
+    token = match.group(0).strip(" .-")
+    compact = re.sub(r"[ .\-]", "", token)
+    digits = sum(char.isdigit() for char in compact)
+    masks = sum(char in "*Xx" for char in compact)
+    if digits + masks < 2:
+        return None
+    return token
+
+
 def detect_account_hints(lines: Iterable[str]) -> list[str]:
     hints: list[str] = []
     for line in lines:
-        for pattern in ACCOUNT_PATTERNS:
+        for pattern in (ACCOUNT_LABEL_RE, ACCOUNT_BARE_RE):
             for match in pattern.finditer(line):
-                hint = clean_line(match.group(1))
-                hint = re.sub(r"\s{2,}", " ", hint)
-                if hint and len(hint) >= 2:
-                    hints.append(hint)
+                token = account_token(match.group(1))
+                if token:
+                    hints.append(token)
+        for match in ACCOUNT_IBAN_RE.finditer(line):
+            iban = clean_line(match.group(1))
+            if len(re.sub(r"\s", "", iban)) >= 10:
+                hints.append(iban)
+        for match in ACCOUNT_ENDING_RE.finditer(line):
+            hints.append(clean_line(match.group(1)))
     return stable_unique(hints, limit=20)
 
 
 def detect_institution_hints(lines: Iterable[str]) -> list[str]:
     hints: list[str] = []
     for line in list(lines)[:80]:
-        low = line.casefold()
-        if any(term in low for term in INSTITUTION_TERMS):
-            if not any(skip in low for skip in ("statement", "extracto", "account number", "cuenta no")):
-                hints.append(line)
+        # A statement's institution name lives in the header. Keep any early line
+        # that names an institution term at a word boundary; do not drop it just
+        # because it also says "statement" ("Alpha Bank Statement",
+        # "Wise Account Statement" are exactly the headers we want).
+        if INSTITUTION_TERM_RE.search(line):
+            hints.append(line)
     return stable_unique(hints, limit=12)
 
 
+def institution_signature(hint: str) -> str:
+    """Normalize an institution hint for equality comparison.
+
+    Strips digits, punctuation, single letters (e.g. the "N A" in "N.A."), and
+    structural statement words so cosmetic per-statement differences do not read
+    as different institutions.
+    """
+    lowered = re.sub(r"[^a-z ]+", " ", hint.casefold())
+    tokens = [token for token in lowered.split() if len(token) > 1 and token not in INSTITUTION_NOISE]
+    return " ".join(tokens)
+
+
 def detect_currency(lines: Iterable[str]) -> dict[str, object]:
-    codes: list[str] = []
+    lines = list(lines)
+    joined = "\n".join(lines)
+    confirmed: list[str] = []
+    weak: list[str] = []
     symbol_markers: set[str] = set()
     alias_evidence: list[str] = []
-    joined = "\n".join(lines)
-    for match in ISO_CURRENCY_RE.finditer(joined):
-        token = match.group(0).upper()
-        if token in CURRENCY_CODES:
-            codes.append(token)
+
+    for line in lines:
+        has_label = bool(CURRENCY_LABEL_RE.search(line))
+        adjacent = {
+            (match.group("pre") or match.group("post")).upper()
+            for match in CURRENCY_AMOUNT_RE.finditer(line)
+            if (match.group("pre") or match.group("post"))
+        }
+        for match in ISO_CURRENCY_RE.finditer(line):
+            token = match.group(0).upper()
+            if token not in CURRENCY_CODES:
+                continue
+            if has_label or token in adjacent:
+                confirmed.append(token)
+            else:
+                weak.append(token)
+
     low = joined.casefold()
     for alias, code in CURRENCY_ALIASES.items():
         if alias in low:
-            codes.append(code)
+            confirmed.append(code)
             alias_evidence.append(alias)
     if "$" in joined:
         symbol_markers.add("$")
-    for symbol, code in (("\\u20ac", "EUR"), ("\\u00a3", "GBP"), ("\\u00a5", "JPY")):
-        if symbol.encode("utf-8").decode("unicode_escape") in joined:
+    for symbol, code in (("€", "EUR"), ("£", "GBP"), ("¥", "JPY")):
+        if symbol in joined:
             symbol_markers.add(symbol)
-            codes.append(code)
-    unique_codes = sorted(set(codes))
-    if len(unique_codes) == 1:
-        code = unique_codes[0]
-    elif len(unique_codes) > 1:
+            confirmed.append(code)
+
+    confirmed_codes = sorted(set(confirmed))
+    weak_candidates = sorted(set(weak) - set(confirmed_codes))
+    if len(confirmed_codes) == 1:
+        code = confirmed_codes[0]
+    elif len(confirmed_codes) > 1:
         code = "MIXED"
     else:
         code = "UNKNOWN"
     return {
         "code": code,
-        "candidates": unique_codes,
+        "candidates": confirmed_codes,
+        "weak_candidates": weak_candidates,
         "symbol_markers": sorted(symbol_markers),
         "alias_evidence": stable_unique(alias_evidence),
-        "ambiguous_dollar": "$" in symbol_markers and not unique_codes,
+        "ambiguous_dollar": "$" in symbol_markers and not confirmed_codes,
     }
 
 
 def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, out_path: Path, csv_path: Path) -> dict[str, object]:
     if scope not in SUPPORTED_SCOPES:
         raise PreflightError(f"Unsupported scope {scope!r}. Use one-account or one-institution.")
+    if not (MIN_TAX_YEAR <= tax_year <= MAX_TAX_YEAR):
+        raise PreflightError(f"tax_year {tax_year} is outside the supported range {MIN_TAX_YEAR}-{MAX_TAX_YEAR}.")
 
     warnings: list[str] = []
     gates: list[dict[str, str]] = []
@@ -372,6 +510,15 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
             }
         )
 
+    resolved_counts: Counter[str] = Counter(
+        str(item.get("resolved_file") or item.get("file") or "") for item in statement_files
+    )
+    duplicate_inputs = sorted(path for path, count in resolved_counts.items() if path and count > 1)
+    if duplicate_inputs:
+        message = f"The same statement file was supplied more than once: {', '.join(Path(path).name for path in duplicate_inputs)}."
+        warnings.append(message)
+        add_gate(gates, "duplicate-input", message)
+
     detected_years = sorted({year for item in statement_files for year in item.get("detected_years", [])})
     outside_years = [year for year in detected_years if year != tax_year]
     if outside_years:
@@ -406,9 +553,23 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
         warnings.append(message)
         add_gate(gates, "unknown-account", message)
 
-    institution_hints = detect_institution_hints(all_lines)
-    normalized_institutions = {re.sub(r"[^a-z0-9]+", " ", hint.casefold()).strip() for hint in institution_hints}
-    if scope == "one-institution" and len(normalized_institutions) > 1:
+    # Compare institutions from the union of per-file hints, not a re-scan of the
+    # first 80 lines of every file concatenated: a long first statement used to
+    # push later files out of view, hiding a second bank entirely. Compare one
+    # representative header signature per file so two banks are caught while the
+    # same bank across months is not falsely split.
+    institution_hints = stable_unique(
+        hint for item in statement_files for hint in item.get("institution_hints", [])
+    )
+    per_file_institution_signatures: set[str] = set()
+    for item in statement_files:
+        file_hints = [str(hint) for hint in item.get("institution_hints", []) if str(hint).strip()]
+        if not file_hints:
+            continue
+        signature = institution_signature(file_hints[0])
+        if signature:
+            per_file_institution_signatures.add(signature)
+    if scope == "one-institution" and len(per_file_institution_signatures) > 1:
         message = f"Multiple institution hints found; verify this is one institution: {', '.join(institution_hints[:6])}."
         warnings.append(message)
         add_gate(gates, "possible-mixed-institutions", message)
@@ -484,6 +645,20 @@ def write_json(path: Path, data: dict[str, object]) -> None:
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def csv_safe(value: object) -> str:
+    """Neutralize spreadsheet formula injection in a review-CSV cell.
+
+    A statement is untrusted input: a cell beginning with =, +, -, @, or a
+    leading control character can execute as a formula when the CSV is opened in
+    Excel or Sheets. Prefix such values with an apostrophe so they render as
+    literal text (CWE-1236).
+    """
+    text = "" if value is None else str(value)
+    if text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + text
+    return text
+
+
 def write_review_csv(path: Path, data: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
@@ -507,27 +682,49 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
             if not isinstance(item, dict):
                 continue
             currency = item.get("currency") if isinstance(item.get("currency"), dict) else {}
-            writer.writerow(
-                {
-                    "file": item.get("file"),
-                    "is_pdf": item.get("is_pdf"),
-                    "page_count": item.get("page_count"),
-                    "character_count": item.get("character_count"),
-                    "detected_years": "; ".join(str(year) for year in item.get("detected_years", [])),
-                    "detected_periods": "; ".join(str(period) for period in item.get("detected_periods", [])),
-                    "statement_titles": "; ".join(str(title) for title in item.get("statement_titles", [])),
-                    "currency_code": currency.get("code") if isinstance(currency, dict) else "",
-                    "currency_candidates": "; ".join(str(code) for code in currency.get("candidates", []) if isinstance(currency, dict)),
-                    "account_hints": "; ".join(str(hint) for hint in item.get("account_hints", [])),
-                    "institution_hints": "; ".join(str(hint) for hint in item.get("institution_hints", [])),
-                    "warnings": "; ".join(str(warning) for warning in item.get("warnings", [])),
-                }
-            )
+            row = {
+                "file": item.get("file"),
+                "is_pdf": item.get("is_pdf"),
+                "page_count": item.get("page_count"),
+                "character_count": item.get("character_count"),
+                "detected_years": "; ".join(str(year) for year in item.get("detected_years", [])),
+                "detected_periods": "; ".join(str(period) for period in item.get("detected_periods", [])),
+                "statement_titles": "; ".join(str(title) for title in item.get("statement_titles", [])),
+                "currency_code": currency.get("code") if isinstance(currency, dict) else "",
+                "currency_candidates": "; ".join(str(code) for code in currency.get("candidates", []) if isinstance(currency, dict)),
+                "account_hints": "; ".join(str(hint) for hint in item.get("account_hints", [])),
+                "institution_hints": "; ".join(str(hint) for hint in item.get("institution_hints", [])),
+                "warnings": "; ".join(str(warning) for warning in item.get("warnings", [])),
+            }
+            writer.writerow({key: csv_safe(value) for key, value in row.items()})
+
+
+def check_output_paths(out_path: Path, csv_path: Path, pdf_paths: list[str]) -> None:
+    """Refuse output paths that would clobber each other or an input PDF.
+
+    Writing the CSV over the JSON (or over a source statement) silently destroys
+    data, so fail fast with a clear message instead.
+    """
+    out_resolved = normalize_path(out_path)
+    csv_resolved = normalize_path(csv_path)
+    if out_resolved == csv_resolved:
+        raise PreflightError(f"--out and --csv resolve to the same path ({out_path}); choose distinct files.")
+    inputs = {normalize_path(pdf): pdf for pdf in pdf_paths}
+    for label, resolved, original in (("--out", out_resolved, out_path), ("--csv", csv_resolved, csv_path)):
+        if resolved in inputs:
+            raise PreflightError(f"{label} ({original}) would overwrite an input PDF ({inputs[resolved]}); choose another path.")
+
+
+def review_exit_code(status: str, exit_nonzero_on_review: bool) -> int:
+    if exit_nonzero_on_review and status == "review-required":
+        return REVIEW_EXIT_CODE
+    return 0
 
 
 def command_preflight(args: argparse.Namespace) -> int:
     out_path = Path(args.out)
     csv_path = Path(args.csv) if args.csv else review_csv_path(out_path)
+    check_output_paths(out_path, csv_path, args.pdf)
     files = load_pdf_files(args.pdf)
     data = build_preflight(files, int(args.tax_year), args.scope, out_path, csv_path)
     write_json(out_path, data)
@@ -541,7 +738,7 @@ def command_preflight(args: argparse.Namespace) -> int:
         for gate in gates:
             if isinstance(gate, dict):
                 print(f"- {gate.get('code')}: {gate.get('message')}")
-    return 0
+    return review_exit_code(str(data["status"]), args.exit_nonzero_on_review)
 
 
 def command_dependency_check(_args: argparse.Namespace) -> int:
@@ -569,7 +766,7 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
 
         doc = canvas.Canvas(str(pdf_path))
         doc.drawString(72, 740, "Example Bank Monthly Statement")
-        doc.drawString(72, 720, "Account number ACCT")
+        doc.drawString(72, 720, "Account 12345678")
         doc.drawString(72, 700, "Statement period January 1 2025 to January 31 2025")
         doc.drawString(72, 680, "Currency EUR")
         doc.drawString(72, 660, "Closing balance 100.00 EUR")
@@ -583,8 +780,8 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
             failures.append(f"status: expected ready, got {data['status']}")
         if data["currency"]["code"] != "EUR":  # type: ignore[index]
             failures.append(f"currency: expected EUR, got {data['currency']}")
-        if data["account_hints"] != ["ACCT"]:  # type: ignore[index]
-            failures.append(f"account: expected account hint ACCT, got {data['account_hints']}")
+        if data["account_hints"] != ["12345678"]:  # type: ignore[index]
+            failures.append(f"account: expected account hint 12345678, got {data['account_hints']}")
         if not out_path.exists():
             failures.append("json: expected smoke JSON to be written")
         if not csv_path.exists():
@@ -610,7 +807,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             [
                 synthetic_file(
                     "clean.pdf",
-                    "Example Bank\nAccount number ACCT\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00",
+                    "Example Bank\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00",
                 )
             ],
             2025,
@@ -622,11 +819,11 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append(f"clean-status: expected ready, got {clean['status']}")
         if clean["currency"]["code"] != "USD":  # type: ignore[index]
             failures.append(f"clean-currency: expected USD, got {clean['currency']}")
-        if clean["account_hints"] != ["ACCT"]:  # type: ignore[index]
-            failures.append(f"clean-account: expected account hint ACCT, got {clean['account_hints']}")
+        if clean["account_hints"] != ["12345678"]:  # type: ignore[index]
+            failures.append(f"clean-account: expected account hint 12345678, got {clean['account_hints']}")
 
         mixed_year = build_preflight(
-            [synthetic_file("mixed-year.pdf", "Example Bank\nAccount number ACCT\nStatement period December 2024 to January 2025\nCurrency USD")],
+            [synthetic_file("mixed-year.pdf", "Example Bank\nAccount 12345678\nStatement period December 2024 to January 2025\nCurrency USD")],
             2025,
             "one-account",
             root / "mixed-year.json",
@@ -636,7 +833,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("mixed-year: expected mixed-years gate")
 
         mixed_currency = build_preflight(
-            [synthetic_file("mixed-currency.pdf", "Example Bank\nAccount number ACCT\nStatement period January 2025\nCurrency USD\nCurrency COP")],
+            [synthetic_file("mixed-currency.pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nCurrency USD\nCurrency COP")],
             2025,
             "one-account",
             root / "mixed-currency.json",
@@ -646,7 +843,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("mixed-currency: expected mixed-currencies gate")
 
         dollar = build_preflight(
-            [synthetic_file("dollar.pdf", "Example Bank\nAccount number ACCT\nStatement period January 2025\nClosing balance $100.00")],
+            [synthetic_file("dollar.pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nClosing balance $100.00")],
             2025,
             "one-account",
             root / "dollar.json",
@@ -655,8 +852,41 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if not any(gate.get("code") == "ambiguous-dollar" for gate in dollar["review_gates"]):  # type: ignore[index]
             failures.append("dollar: expected ambiguous-dollar gate")
 
+        # Marketing prose that merely contains a code word ("TRY") must not be
+        # confirmed as a currency: the account stays single-currency USD, and the
+        # prose token is surfaced only as a weak candidate.
+        marketing = build_preflight(
+            [
+                synthetic_file(
+                    "marketing.pdf",
+                    "Example Bank\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00 USD\nPLEASE TRY OUR NEW MOBILE APP TODAY",
+                )
+            ],
+            2025,
+            "one-account",
+            root / "marketing.json",
+            root / "marketing-review.csv",
+        )
+        if marketing["currency"]["code"] != "USD":  # type: ignore[index]
+            failures.append(f"marketing: expected USD, got {marketing['currency']}")
+        if any(gate.get("code") == "mixed-currencies" for gate in marketing["review_gates"]):  # type: ignore[index]
+            failures.append("marketing: all-caps prose 'TRY' must not trip mixed-currencies")
+        if "TRY" not in marketing["currency"]["weak_candidates"]:  # type: ignore[index]
+            failures.append(f"marketing: expected TRY as a weak candidate, got {marketing['currency']}")
+
+        # An amount adjacent to a code confirms it even with no 'currency' label.
+        adjacency = build_preflight(
+            [synthetic_file("adjacency.pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nEnding balance 1,234.56 GBP")],
+            2025,
+            "one-account",
+            root / "adjacency.json",
+            root / "adjacency-review.csv",
+        )
+        if adjacency["currency"]["code"] != "GBP":  # type: ignore[index]
+            failures.append(f"adjacency: expected GBP from amount adjacency, got {adjacency['currency']}")
+
         accounts = build_preflight(
-            [synthetic_file("accounts.pdf", "Example Bank\nAccount number ACCT\nAccount number OTHR\nStatement period January 2025\nCurrency USD")],
+            [synthetic_file("accounts.pdf", "Example Bank\nAccount 11112222\nAccount 33334444\nStatement period January 2025\nCurrency USD")],
             2025,
             "one-account",
             root / "accounts.json",
@@ -664,6 +894,26 @@ def command_self_test(_args: argparse.Namespace) -> int:
         )
         if not any(gate.get("code") == "possible-mixed-accounts" for gate in accounts["review_gates"]):  # type: ignore[index]
             failures.append("accounts: expected possible-mixed-accounts gate")
+
+        # A realistic single-account statement: only the real number is a hint.
+        # "Account Summary" and the holder name must not be captured (they used
+        # to trip a false possible-mixed-accounts gate and leak PII downstream).
+        one_account = build_preflight(
+            [
+                synthetic_file(
+                    "one-account.pdf",
+                    "Example Bank\nMonthly Account Statement\nAccount Summary\nAccount holder JUAN PEREZ GARCIA\nAccount ID 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD",
+                )
+            ],
+            2025,
+            "one-account",
+            root / "one-account.json",
+            root / "one-account-review.csv",
+        )
+        if one_account["account_hints"] != ["12345678"]:  # type: ignore[index]
+            failures.append(f"one-account: expected only ['12345678'], got {one_account['account_hints']}")
+        if any(gate.get("code") == "possible-mixed-accounts" for gate in one_account["review_gates"]):  # type: ignore[index]
+            failures.append("one-account: a single account must not trip possible-mixed-accounts")
 
         low_text = build_preflight(
             [synthetic_file("scan.pdf", "", [], is_pdf=True)],
@@ -675,6 +925,124 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if not any(gate.get("code") == "low-text-pdf" for gate in low_text["review_gates"]):  # type: ignore[index]
             failures.append("low-text: expected low-text-pdf gate")
 
+        # Two banks where the first statement is long enough (>80 lines) to have
+        # hidden the second bank from the old combined-line scan.
+        long_alpha = "Alpha Bank N.A.\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\n" + "\n".join(
+            f"01/{(day % 28) + 1:02d}/2025 card purchase ref {day:04d} 10.00 balance 90.00" for day in range(1, 90)
+        )
+        mixed_institutions = build_preflight(
+            [
+                synthetic_file("alpha.pdf", long_alpha),
+                synthetic_file("beta.pdf", "Beta Banco S.A.\nAccount 12345678\nStatement period February 1 2025 to February 28 2025\nCurrency USD"),
+            ],
+            2025,
+            "one-institution",
+            root / "mixed-institutions.json",
+            root / "mixed-institutions-review.csv",
+        )
+        if not any(gate.get("code") == "possible-mixed-institutions" for gate in mixed_institutions["review_gates"]):  # type: ignore[index]
+            failures.append("mixed-institutions: expected possible-mixed-institutions gate across files")
+
+        # The same bank across two months must not read as two institutions.
+        same_institution = build_preflight(
+            [
+                synthetic_file("jan.pdf", "Example Bank Monthly Statement January 2025\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD"),
+                synthetic_file("feb.pdf", "Example Bank Monthly Statement February 2025\nAccount 12345678\nStatement period February 1 2025 to February 28 2025\nCurrency USD"),
+            ],
+            2025,
+            "one-institution",
+            root / "same-institution.json",
+            root / "same-institution-review.csv",
+        )
+        if any(gate.get("code") == "possible-mixed-institutions" for gate in same_institution["review_gates"]):  # type: ignore[index]
+            failures.append("same-institution: same bank across months must not trip possible-mixed-institutions")
+
+        # Common words that merely contain a term substring are not institutions.
+        substring_noise = build_preflight(
+            [
+                synthetic_file(
+                    "substring.pdf",
+                    "Example Bank Monthly Statement\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nOtherwise please contact the branch\nWe value your trusted partnership likewise",
+                )
+            ],
+            2025,
+            "one-institution",
+            root / "substring.json",
+            root / "substring-review.csv",
+        )
+        substring_hints = substring_noise["institution_hints"]  # type: ignore[index]
+        if any("Otherwise" in hint or "likewise" in hint for hint in substring_hints):
+            failures.append(f"substring: word-boundary match should exclude Otherwise/likewise, got {substring_hints}")
+        if any(gate.get("code") == "possible-mixed-institutions" for gate in substring_noise["review_gates"]):  # type: ignore[index]
+            failures.append("substring: single real institution must not trip possible-mixed-institutions")
+
+        # A fintech header ("Wise Account Statement") must still be recognized as
+        # an institution even though the line also says "Statement".
+        fintech = build_preflight(
+            [synthetic_file("wise.pdf", "Wise Account Statement\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency EUR\nClosing balance 100.00 EUR")],
+            2025,
+            "one-institution",
+            root / "wise.json",
+            root / "wise-review.csv",
+        )
+        if not fintech["institution_hints"]:  # type: ignore[index]
+            failures.append("fintech: expected an institution hint from a 'Wise Account Statement' header")
+        if any(gate.get("code") == "unknown-institution" for gate in fintech["review_gates"]):  # type: ignore[index]
+            failures.append("fintech: 'Wise Account Statement' should satisfy the institution check")
+
+        # The same statement supplied twice is flagged, not silently double-counted.
+        duplicate = build_preflight(
+            [
+                synthetic_file("dup.pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nCurrency USD"),
+                synthetic_file("dup.pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nCurrency USD"),
+            ],
+            2025,
+            "one-account",
+            root / "dup.json",
+            root / "dup-review.csv",
+        )
+        if not any(gate.get("code") == "duplicate-input" for gate in duplicate["review_gates"]):  # type: ignore[index]
+            failures.append("duplicate: expected duplicate-input gate")
+
+        # CSV cells that begin with a formula lead are neutralized.
+        if csv_safe("=HYPERLINK(\"http://x\")") != "'=HYPERLINK(\"http://x\")":
+            failures.append("csv_safe: expected leading '=' to be quoted")
+        if csv_safe("@SUM(A1:A9)") != "'@SUM(A1:A9)":
+            failures.append("csv_safe: expected leading '@' to be quoted")
+        if csv_safe("Example Bank") != "Example Bank":
+            failures.append("csv_safe: ordinary text must be unchanged")
+
+        # Output paths that collide are rejected before anything is written.
+        for label, out_arg, csv_arg, pdfs in (
+            ("out==csv", root / "same.json", root / "same.json", []),
+            ("out over input", root / "in.pdf", root / "other.csv", [str(root / "in.pdf")]),
+        ):
+            try:
+                check_output_paths(out_arg, csv_arg, [str(p) for p in pdfs])
+                failures.append(f"paths: expected {label} collision to be rejected")
+            except PreflightError:
+                pass
+
+        # The tax year is bounded at both layers.
+        try:
+            _year_arg("20025")
+            failures.append("year: expected _year_arg to reject 20025")
+        except argparse.ArgumentTypeError:
+            pass
+        try:
+            build_preflight([synthetic_file("y.pdf", "Example Bank\nCurrency USD")], 3000, "one-account", root / "y.json", root / "y-review.csv")
+            failures.append("year: expected build_preflight to reject year 3000")
+        except PreflightError:
+            pass
+
+        # Exit code stays 0 by default; opt-in flag makes review-required nonzero.
+        if review_exit_code("review-required", False) != 0:
+            failures.append("exit-code: default must stay 0 on review-required")
+        if review_exit_code("review-required", True) != REVIEW_EXIT_CODE:
+            failures.append(f"exit-code: opt-in must return {REVIEW_EXIT_CODE} on review-required")
+        if review_exit_code("ready-for-domain-extraction", True) != 0:
+            failures.append("exit-code: a ready result must exit 0 even with the opt-in flag")
+
         write_json(root / "clean.json", clean)
         write_review_csv(root / "clean-review.csv", clean)
         if not (root / "clean-review.csv").exists():
@@ -684,8 +1052,18 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 7 preflight cases")
+    print("Self-test passed: 15 preflight cases")
     return 0
+
+
+def _year_arg(raw: str) -> int:
+    try:
+        year = int(raw)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"year {raw!r} is not an integer") from None
+    if not (MIN_TAX_YEAR <= year <= MAX_TAX_YEAR):
+        raise argparse.ArgumentTypeError(f"year {year} is outside the supported range {MIN_TAX_YEAR}-{MAX_TAX_YEAR}")
+    return year
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -694,10 +1072,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     preflight = subparsers.add_parser("preflight", help="Preflight one statement PDF set.")
     preflight.add_argument("--pdf", nargs="+", required=True, help="Statement PDFs for one tax year and one scope.")
-    preflight.add_argument("--tax-year", type=int, required=True, help="Calendar/tax year to verify.")
+    preflight.add_argument("--tax-year", type=_year_arg, required=True, help=f"Calendar/tax year to verify ({MIN_TAX_YEAR}-{MAX_TAX_YEAR}).")
     preflight.add_argument("--scope", choices=sorted(SUPPORTED_SCOPES), required=True, help="Expected downstream scope.")
     preflight.add_argument("--out", required=True, help="Output preflight JSON path.")
     preflight.add_argument("--csv", help="Optional review CSV path.")
+    preflight.add_argument(
+        "--exit-nonzero-on-review",
+        action="store_true",
+        help=f"Exit {REVIEW_EXIT_CODE} (instead of 0) when the result is review-required, for scripted callers.",
+    )
     preflight.set_defaults(func=command_preflight)
 
     dependency = subparsers.add_parser("dependency-check", help="Check extraction dependency availability.")
