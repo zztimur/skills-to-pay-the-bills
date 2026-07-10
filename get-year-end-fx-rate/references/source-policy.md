@@ -77,6 +77,8 @@ In the printable PDF, identify saved source proof artifacts by filename or packe
 
 The proof packet supports later review. It is not automatically attached to an FBAR or tax return.
 
+For a manual source with no local proof artifact, require a specific written reason. Record that reason in the packet and repeat it as one concise caveat in the final answer. Do not present the generated workpaper PDF itself as source proof.
+
 ## Failure Rules
 
 Ask for clarification when:
@@ -90,5 +92,6 @@ Stop instead of answering when:
 - No Treasury or verifiable manual year-end source can be found.
 - Only averages are available.
 - A manual source has not been explicitly confirmed as year-end support.
+- A manual source has neither a saved local proof artifact nor a specific reason for its absence.
 - Rate direction cannot be determined.
 - The result would require legal or tax advice beyond identifying and documenting a published rate.
