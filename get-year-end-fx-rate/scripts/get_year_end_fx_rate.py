@@ -42,33 +42,190 @@ TREASURY_API_URL = (
 
 TREASURY_ROWS_BY_CODE = {
     "AED": {"country": "United Arab Emirates", "currency": "Dirham"},
+    "AFN": {"country": "Afghanistan", "currency": "Afghani"},
+    "ALL": {"country": "Albania", "currency": "Lek"},
+    "AMD": {"country": "Armenia", "currency": "Dram"},
+    "AOA": {"country": "Angola", "currency": "Kwanza"},
     "ARS": {"country": "Argentina", "currency": "Peso"},
     "AUD": {"country": "Australia", "currency": "Dollar"},
+    "AZN": {"country": "Azerbaijan", "currency": "Manat"},
+    "BAM": {"country": "Bosnia", "currency": "Marka"},
+    "BBD": {"country": "Barbados", "currency": "Dollar"},
+    "BDT": {"country": "Bangladesh", "currency": "Taka"},
+    "BGN": {"country": "Bulgaria", "currency": "Lev New"},
+    "BHD": {"country": "Bahrain", "currency": "Dinar"},
+    "BIF": {"country": "Burundi", "currency": "Franc"},
+    "BMD": {"country": "Bermuda", "currency": "Dollar"},
+    "BND": {"country": "Brunei", "currency": "Dollar"},
+    "BOB": {"country": "Bolivia", "currency": "Boliviano"},
     "BRL": {"country": "Brazil", "currency": "Real"},
+    "BSD": {"country": "Bahamas", "currency": "Dollar"},
+    "BWP": {"country": "Botswana", "currency": "Pula"},
+    "BZD": {"country": "Belize", "currency": "Dollar"},
     "CAD": {"country": "Canada", "currency": "Dollar"},
+    "CDF": {"country": "Dem. Rep. of Congo", "currency": "Congolese Franc"},
     "CHF": {"country": "Switzerland", "currency": "Franc"},
     "CLP": {"country": "Chile", "currency": "Peso"},
     "CNY": {"country": "China", "currency": "Renminbi"},
     "COP": {"country": "Colombia", "currency": "Peso"},
+    "CRC": {"country": "Costa Rica", "currency": "Colon"},
+    "CUP": {"country": "Cuba", "currency": "Peso"},
+    "CVE": {"country": "Cape Verde", "currency": "Escudo"},
+    "CZK": {"country": "Czech Republic", "currency": "Koruna"},
+    "DJF": {"country": "Djibouti", "currency": "Franc"},
     "DKK": {"country": "Denmark", "currency": "Krone"},
-    "EUR": {"country": None, "currency": "Euro"},
+    "DOP": {"country": "Dominican Republic", "currency": "Peso"},
+    "DZD": {"country": "Algeria", "currency": "Dinar"},
+    "EGP": {"country": "Egypt", "currency": "Pound"},
+    "ERN": {"country": "Eritrea", "currency": "Nakfa"},
+    "ETB": {"country": "Ethiopia", "currency": "Birr"},
+    "EUR": {"country": "Euro Zone", "currency": "Euro"},
+    "FJD": {"country": "Fiji", "currency": "Dollar"},
     "GBP": {"country": "United Kingdom", "currency": "Pound"},
+    "GEL": {"country": "Georgia", "currency": "Lari"},
+    "GHS": {"country": "Ghana", "currency": "Cedi"},
+    "GMD": {"country": "Gambia", "currency": "Dalasi"},
+    "GNF": {"country": "Guinea", "currency": "Franc"},
+    "GTQ": {"country": "Guatemala", "currency": "Quentzal"},
+    "GYD": {"country": "Guyana", "currency": "Dollar"},
     "HKD": {"country": "Hong Kong", "currency": "Dollar"},
+    "HNL": {"country": "Honduras", "currency": "Lempira"},
+    "HTG": {"country": "Haiti", "currency": "Gourde"},
+    "HUF": {"country": "Hungary", "currency": "Forint"},
+    "IDR": {"country": "Indonesia", "currency": "Rupiah"},
     "ILS": {"country": "Israel", "currency": "Shekel"},
     "INR": {"country": "India", "currency": "Rupee"},
+    "IQD": {"country": "Iraq", "currency": "Dinar"},
+    "IRR": {"country": "Iran", "currency": "Rial"},
+    "ISK": {"country": "Iceland", "currency": "Krona"},
+    "JMD": {"country": "Jamaica", "currency": "Dollar"},
+    "JOD": {"country": "Jordan", "currency": "Dinar"},
     "JPY": {"country": "Japan", "currency": "Yen"},
+    "KES": {"country": "Kenya", "currency": "Shilling"},
+    "KGS": {"country": "Kyrgyzstan", "currency": "Som"},
+    "KHR": {"country": "Cambodia", "currency": "Riel"},
+    "KMF": {"country": "Comoros", "currency": "Franc"},
     "KRW": {"country": "Korea", "currency": "Won"},
+    "KWD": {"country": "Kuwait", "currency": "Dinar"},
+    "KYD": {"country": "Cayman Islands", "currency": "Dollar"},
+    "KZT": {"country": "Kazakhstan", "currency": "Tenge"},
+    "LAK": {"country": "Laos", "currency": "Kip"},
+    "LBP": {"country": "Lebanon", "currency": "Pound"},
+    "LKR": {"country": "Sri Lanka", "currency": "Rupee"},
+    "LRD": {"country": "Liberia", "currency": "Dollar"},
+    "LSL": {"country": "Lesotho", "currency": "Maloti"},
+    "LYD": {"country": "Libya", "currency": "Dinar"},
+    "MAD": {"country": "Morocco", "currency": "Dirham"},
+    "MDL": {"country": "Moldova", "currency": "LEU"},
+    "MGA": {"country": "Madagascar", "currency": "Ariary"},
+    "MKD": {"country": "Rep. of N. Macedonia", "currency": "Denar"},
+    "MMK": {"country": "Myanmar", "currency": "Kyat"},
+    "MNT": {"country": "Mongolia", "currency": "Tugrik"},
+    "MRU": {"country": "Mauritania", "currency": "Ouguiya"},
+    "MUR": {"country": "Mauritius", "currency": "Rupee"},
+    "MVR": {"country": "Maldives", "currency": "Rufiyaa"},
+    "MWK": {"country": "Malawi", "currency": "Kwacha"},
     "MXN": {"country": "Mexico", "currency": "Peso"},
+    "MYR": {"country": "Malaysia", "currency": "Ringgit"},
+    "MZN": {"country": "Mozambique", "currency": "Metical"},
+    "NAD": {"country": "Nambia", "currency": "Dollar"},
+    "NGN": {"country": "Nigeria", "currency": "Naira"},
+    "NIO": {"country": "Nicaragua", "currency": "Cordoba"},
     "NOK": {"country": "Norway", "currency": "Krone"},
+    "NPR": {"country": "Nepal", "currency": "Rupee"},
     "NZD": {"country": "New Zealand", "currency": "Dollar"},
+    "OMR": {"country": "Oman", "currency": "Rial"},
     "PEN": {"country": "Peru", "currency": "Sol"},
+    "PGK": {"country": "Papua New Guinea", "currency": "Kina"},
+    "PHP": {"country": "Philippines", "currency": "Peso"},
+    "PKR": {"country": "Pakistan", "currency": "Rupee"},
+    "PLN": {"country": "Poland", "currency": "Zloty"},
+    "PYG": {"country": "Paraguay", "currency": "Guarani"},
+    "QAR": {"country": "Qatar", "currency": "Riyal"},
+    "RON": {"country": "Romania", "currency": "New Leu"},
+    "RSD": {"country": "Serbia", "currency": "Dinar"},
     "RUB": {"country": "Russia", "currency": "Ruble"},
+    "RWF": {"country": "Rwanda", "currency": "Franc"},
+    "SAR": {"country": "Saudi Arabia", "currency": "Riyal"},
+    "SBD": {"country": "Solomon Islands", "currency": "Dollar"},
+    "SCR": {"country": "Seychelles", "currency": "Rupee"},
+    "SDG": {"country": "Sudan", "currency": "Pound"},
     "SEK": {"country": "Sweden", "currency": "Krona"},
     "SGD": {"country": "Singapore", "currency": "Dollar"},
-    "TRY": {"country": "Turkey", "currency": "Lira"},
+    "SLE": {"country": "Sierra Leone", "currency": "Leone"},
+    "SOS": {"country": "Somali", "currency": "Shilling"},
+    "SRD": {"country": "Suriname", "currency": "Dollar"},
+    "SSP": {"country": "South Sudan", "currency": "Sudanese Pound"},
+    "STN": {"country": "Sao Tome & Principe", "currency": "New Dobras"},
+    "SYP": {"country": "Syria", "currency": "Pound"},
+    "SZL": {"country": "Eswatini", "currency": "Lilangeni"},
+    "THB": {"country": "Thailand", "currency": "Baht"},
+    "TJS": {"country": "Tajikistan", "currency": "Somoni"},
+    "TMT": {"country": "Turkmenistan", "currency": "New Manat"},
+    "TND": {"country": "Tunisia", "currency": "Dinar"},
+    "TOP": {"country": "Tonga", "currency": "Pa'anga"},
+    "TRY": {"country": "Turkey", "currency": "New Lira"},
+    "TTD": {"country": "Trinidad & Tobago", "currency": "Dollar"},
     "TWD": {"country": "Taiwan", "currency": "Dollar"},
+    "TZS": {"country": "Tanzania", "currency": "Shilling"},
+    "UAH": {"country": "Ukraine", "currency": "Hryvnia"},
+    "UGX": {"country": "Uganda", "currency": "Shilling"},
     "UYU": {"country": "Uruguay", "currency": "Peso"},
+    "UZS": {"country": "Uzbekistan", "currency": "Som"},
+    "VES": {"country": "Venezuela", "currency": "Bolivar Soberano"},
+    "VND": {"country": "Vietnam", "currency": "Dong"},
+    "VUV": {"country": "Vanuatu", "currency": "Vatu"},
+    "WST": {"country": "Western Samoa", "currency": "Tala"},
+    "XAF": {"country": "Cameroon", "currency": "CFA Franc"},
+    "XCD": {"country": "Antigua & Barbuda", "currency": "E. Caribbean Dollar"},
+    "XCG": {"country": "Curacao", "currency": "Caribbean Guilder"},
+    "XOF": {"country": "Benin", "currency": "CFA Franc"},
+    "YER": {"country": "Yemen", "currency": "Rial"},
     "ZAR": {"country": "South Africa", "currency": "Rand"},
+    "ZMW": {"country": "Zambia", "currency": "New Kwacha"},
+    "ZWG": {"country": "Zimbabwe", "currency": "Gold"},
+}
+
+# The Fiscal Data table has several country rows for one current ISO currency.
+# Lookups use each code's canonical row above; map-check still classifies every
+# equivalent live row as mapped instead of treating it as an unsupported gap.
+TREASURY_ROW_ALTERNATES_BY_CODE = {
+    "EUR": ({"country": "Cyprus", "currency": "Euro"},),
+    "XAF": (
+        {"country": "Central African Rep.", "currency": "CFA Franc"},
+        {"country": "Chad", "currency": "CFA Franc"},
+        {"country": "Congo", "currency": "CFA Franc"},
+        {"country": "Equatorial Guinea", "currency": "CFA Franc"},
+        {"country": "Gabon", "currency": "CFA Franc"},
+    ),
+    "XCD": (
+        {"country": "Grenada", "currency": "E.Caribbean Dollar"},
+        {"country": "St. Lucia", "currency": "E. Caribbean Dollar"},
+    ),
+    "XOF": (
+        {"country": "Burkina Faso", "currency": "CFA Franc"},
+        {"country": "Cote D'ivoire", "currency": "CFA Franc"},
+        {"country": "Guinea Bissau", "currency": "CFA Franc"},
+        {"country": "Mali", "currency": "CFA Franc"},
+        {"country": "Niger", "currency": "CFA Franc"},
+        {"country": "Senegal", "currency": "CFA Franc"},
+        {"country": "Togo", "currency": "CFA Franc"},
+    ),
+}
+
+# These rows are deliberately not lookup targets. Each must stay explicit so a
+# strict full-table map check distinguishes a known exclusion from a stale map.
+TREASURY_ROW_EXCEPTIONS = {
+    ("Cuba", "Chavito"): "legacy CUC-style unit; not a current ISO 4217 lookup target",
+    ("Ecuador", "Dolares"): "USD-denominated row",
+    ("El Salvador", "Dollar"): "USD-denominated row",
+    ("Liberia", "Dollar"): "USD-denominated row",
+    ("Marshall Islands", "U.S. Dollar"): "USD-denominated row",
+    ("Micronesia", "U.S. Dollar"): "USD-denominated row",
+    ("Palau", "Dollar"): "USD-denominated row",
+    ("Panama", "Dolares"): "USD-denominated row",
+    ("Timor", "Leste-Dili"): "legacy local unit; Timor-Leste uses USD",
+    ("Venezuela", "Fuerte (OLD)"): "obsolete VEF currency",
 }
 
 ALIASES = {
@@ -207,7 +364,7 @@ def today_iso() -> str:
 def treasury_query_url(code: str, year: int, api_url: str) -> str:
     if code not in TREASURY_ROWS_BY_CODE:
         raise RateError(
-            f"No Treasury/Fiscal Data row mapping is known for {code}. Use a verified manual year-end source.",
+            f"No Treasury/Fiscal Data row mapping is known for {code}. This is a map-maintenance issue, not evidence that Treasury lacks a rate; update the map and rerun map-check.",
             4,
         )
 
@@ -215,9 +372,8 @@ def treasury_query_url(code: str, year: int, api_url: str) -> str:
     filters = [
         f"record_date:eq:{year}-12-31",
         f"currency:eq:{mapping['currency']}",
+        f"country:eq:{mapping['country']}",
     ]
-    if mapping.get("country"):
-        filters.append(f"country:eq:{mapping['country']}")
     params = {
         "fields": ",".join(
             [
@@ -298,25 +454,97 @@ def treasury_row_pair(record: dict[str, object]) -> tuple[str, str]:
     return (clean_text(record.get("country")).lower(), clean_text(record.get("currency")).lower())
 
 
-def mapped_treasury_pairs() -> set[tuple[str, str]]:
-    pairs = set()
-    for mapping in TREASURY_ROWS_BY_CODE.values():
-        country = mapping.get("country")
-        currency = mapping.get("currency")
-        if country and currency:
-            pairs.add((clean_text(country).lower(), clean_text(currency).lower()))
-    return pairs
+_LABEL_TOKEN_NORMALIZATIONS = {
+    "dem": "democratic",
+    "n": "north",
+    "nambia": "namibia",
+    "rep": "republic",
+    "st": "saint",
+    "turkey": "turkiye",
+}
+
+
+def _label_tokens(value: object) -> list[str]:
+    text = re.sub(r"\(.*?\)", " ", clean_text(value).casefold())
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return [_LABEL_TOKEN_NORMALIZATIONS.get(token, token) for token in text.split() if token]
+
+
+def labels_match(expected: object, candidate: object) -> bool:
+    """Match Treasury labels through small wording changes without guessing.
+
+    Country and currency are matched independently. Prefix tolerance covers
+    stable Treasury variations such as ``Rep.``/``Republic`` and
+    ``New Lira``/``Lira``; it does not collapse genuinely distinct labels such
+    as ``Rial`` and ``Riyal``.
+    """
+    expected_tokens = _label_tokens(expected)
+    candidate_tokens = _label_tokens(candidate)
+    if not expected_tokens or not candidate_tokens:
+        return False
+    # Treasury sometimes drops ``New`` (for example New Lira/Lira). Do not
+    # permit a broader subset match: it would confuse Guinea with Equatorial
+    # Guinea, Franc with CFA Franc, and Sudan with South Sudan.
+    expected_tokens = [token for token in expected_tokens if token != "new"]
+    candidate_tokens = [token for token in candidate_tokens if token != "new"]
+    if len(expected_tokens) != len(candidate_tokens):
+        return False
+    used = [False] * len(candidate_tokens)
+    for expected_token in expected_tokens:
+        matched = False
+        for index, candidate_token in enumerate(candidate_tokens):
+            if used[index]:
+                continue
+            if expected_token == candidate_token or (
+                len(expected_token) >= 3
+                and len(candidate_token) >= 3
+                and (
+                    expected_token.startswith(candidate_token)
+                    or candidate_token.startswith(expected_token)
+                )
+            ):
+                used[index] = True
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
+
+
+def mappings_for_code(code: str) -> tuple[dict[str, str], ...]:
+    if code not in TREASURY_ROWS_BY_CODE:
+        return ()
+    return (TREASURY_ROWS_BY_CODE[code], *TREASURY_ROW_ALTERNATES_BY_CODE.get(code, ()))
+
+
+def treasury_mapping_matches(mapping: dict[str, str], record: dict[str, object]) -> bool:
+    return labels_match(mapping["country"], record.get("country")) and labels_match(
+        mapping["currency"], record.get("currency")
+    )
+
+
+def mapped_treasury_code(record: dict[str, object]) -> str | None:
+    for code in TREASURY_ROWS_BY_CODE:
+        if any(treasury_mapping_matches(mapping, record) for mapping in mappings_for_code(code)):
+            return code
+    return None
+
+
+def treasury_exception_reason(record: dict[str, object]) -> str | None:
+    for (country, currency), reason in TREASURY_ROW_EXCEPTIONS.items():
+        if labels_match(country, record.get("country")) and labels_match(currency, record.get("currency")):
+            return reason
+    return None
 
 
 def find_treasury_rate(currency_raw: str, year: int, json_text: str, query_url: str) -> TreasuryRate:
     code = normalize_currency(currency_raw)
     if code not in TREASURY_ROWS_BY_CODE:
         raise RateError(
-            f"No Treasury/Fiscal Data row mapping is known for {code}. Use a verified manual year-end source.",
+            f"No Treasury/Fiscal Data row mapping is known for {code}. This is a map-maintenance issue, not evidence that Treasury lacks a rate; update the map and rerun map-check.",
             4,
         )
 
-    mapping = TREASURY_ROWS_BY_CODE[code]
     records = treasury_records_from_payload(json_text)
 
     year_end_date = f"{year}-12-31"
@@ -326,18 +554,15 @@ def find_treasury_rate(currency_raw: str, year: int, json_text: str, query_url: 
             continue
         if clean_text(record.get("record_date")) != year_end_date:
             continue
-        if clean_text(record.get("currency")).lower() != clean_text(mapping["currency"]).lower():
-            continue
-        if mapping.get("country") and clean_text(record.get("country")).lower() != clean_text(mapping["country"]).lower():
+        if not any(treasury_mapping_matches(mapping, record) for mapping in mappings_for_code(code)):
             continue
         matches.append(record)
 
     if not matches:
-        label = mapping["currency"]
-        country = mapping.get("country")
-        mapped_name = f"{country} {label}" if country else str(label)
+        mapping = TREASURY_ROWS_BY_CODE[code]
+        mapped_name = f"{mapping['country']} {mapping['currency']}"
         raise RateError(
-            f"Treasury/Fiscal Data did not list a {year_end_date} year-end rate for {code} ({mapped_name}). Use a verified manual year-end source.",
+            f"Treasury/Fiscal Data did not match the current {code} mapping ({mapped_name}) for {year_end_date}. Treat this as a map-maintenance issue and rerun map-check before concluding Treasury lacks a rate.",
             4,
         )
 
@@ -522,36 +747,47 @@ def command_map_check(args: argparse.Namespace) -> int:
 
     if code:
         if code not in TREASURY_ROWS_BY_CODE:
-            raise RateError(f"No Treasury/Fiscal Data row mapping is known for {code}.", 4)
-        mapping = TREASURY_ROWS_BY_CODE[code]
-        expected_pair = (clean_text(mapping.get("country")).lower(), clean_text(mapping.get("currency")).lower())
-        matches = [record for record in rows if treasury_row_pair(record) == expected_pair]
+            raise RateError(
+                f"No Treasury/Fiscal Data row mapping is known for {code}. This is a map-maintenance issue; update the map before treating Treasury as unavailable.",
+                4,
+            )
+        matches = [
+            record
+            for record in rows
+            if any(treasury_mapping_matches(mapping, record) for mapping in mappings_for_code(code))
+        ]
         print(f"Parsed Treasury/Fiscal Data rows for {year_end_date}: {len(rows)} from {source_ref}")
         if matches:
-            desc = clean_text(matches[0].get("country_currency_desc")) or f"{mapping.get('country')}-{mapping.get('currency')}"
+            desc = clean_text(matches[0].get("country_currency_desc")) or f"{matches[0].get('country')}-{matches[0].get('currency')}"
             print(f"{code} mapped row found: {desc}")
             return 0
-        print(f"{code} mapped row not found in Treasury/Fiscal Data for {year_end_date}.")
+        print(f"{code} mapping did not match a Treasury/Fiscal Data row for {year_end_date}; map maintenance is required.")
         return 4 if args.strict else 0
 
-    mapped_pairs = mapped_treasury_pairs()
-    unmapped = []
+    mapped_count = 0
+    exception_count = 0
+    unexplained = []
     for record in rows:
-        pair = treasury_row_pair(record)
-        if pair not in mapped_pairs:
-            desc = clean_text(record.get("country_currency_desc")) or f"{record.get('country')}-{record.get('currency')}"
-            unmapped.append(clean_text(desc))
+        if mapped_treasury_code(record):
+            mapped_count += 1
+            continue
+        if treasury_exception_reason(record):
+            exception_count += 1
+            continue
+        desc = clean_text(record.get("country_currency_desc")) or f"{record.get('country')}-{record.get('currency')}"
+        unexplained.append(clean_text(desc))
 
     print(f"Parsed Treasury/Fiscal Data rows for {year_end_date}: {len(rows)} from {source_ref}")
-    print(f"Mapped rows: {len(rows) - len(unmapped)}")
-    if unmapped:
-        print("Unmapped rows:")
-        for item in sorted(set(unmapped)):
+    print(f"Mapped rows: {mapped_count}")
+    print(f"Classified exceptions: {exception_count}")
+    if unexplained:
+        print("Unexplained rows (map maintenance required):")
+        for item in sorted(set(unexplained)):
             print(f"- {item}")
         if args.strict:
             return 4
     else:
-        print("All parsed rows are represented in TREASURY_ROWS_BY_CODE.")
+        print("All parsed rows are mapped or explicitly classified.")
     return 0
 
 
@@ -602,6 +838,11 @@ def command_self_test(_args: argparse.Namespace) -> int:
     aed_rate = find_treasury_rate("AED", 2025, json_text, treasury_query_url("AED", 2025, TREASURY_API_URL))
     assert aed_rate.rate == Decimal("3.672")
     assert normalize_currency("uae dirham") == "AED"
+    assert labels_match("Rep. of N. Macedonia", "Republic of North Macedonia")
+    assert labels_match("New Lira", "Lira")
+    assert not labels_match("Guinea", "Equatorial Guinea")
+    assert not labels_match("Franc", "CFA Franc")
+    assert not labels_match("Rial", "Riyal")
 
     try:
         normalize_currency("peso")
@@ -744,6 +985,20 @@ def command_self_test(_args: argparse.Namespace) -> int:
         )
         with contextlib.redirect_stdout(io.StringIO()):
             assert command_map_check(unmapped_args) == 4
+
+        fixture_path = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "treasury-2025-12-31.json"
+        fixture_args = argparse.Namespace(
+            year=2025,
+            currency=None,
+            api_url=TREASURY_API_URL,
+            api_file=str(fixture_path),
+            strict=True,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert command_map_check(fixture_args) == 0
+        fixture_text = fixture_path.read_text(encoding="utf-8")
+        thb_rate = find_treasury_rate("THB", 2025, fixture_text, treasury_query_url("THB", 2025, TREASURY_API_URL))
+        assert thb_rate.rate == Decimal("31.66")
 
         proof_file = Path(tmp) / "manual-source.html"
         proof_file.write_text("<p>2025-12-31 rate</p>", encoding="utf-8")

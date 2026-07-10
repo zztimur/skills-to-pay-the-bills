@@ -32,7 +32,7 @@ Do not use:
 
 Treasury Reporting Rates are quarterly U.S. government reporting rates. For this skill, use the December 31 record date as year-end support when it exists for the requested currency/year. If the Treasury dataset does not list the currency/year, keep that caveat and use a manual year-end source only after explicit confirmation.
 
-If Fiscal Data has a row for the requested currency/year but the helper says the ISO code is unmapped, treat that as a script map-maintenance issue, not as Treasury unavailability. Update `TREASURY_ROWS_BY_CODE` and rerun `map-check`.
+If Fiscal Data has a row for the requested currency/year but the helper says the ISO code is unmapped, treat that as a script map-maintenance issue, not as Treasury unavailability. Update `TREASURY_ROWS_BY_CODE`, a documented alternate mapping, or the explicit exception registry, then rerun strict `map-check`. The frozen `tests/fixtures/treasury-2025-12-31.json` fixture must have no unexplained rows.
 
 ## Rate Direction
 

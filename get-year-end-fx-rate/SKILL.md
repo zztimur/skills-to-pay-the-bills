@@ -58,7 +58,7 @@ For manual workpapers, do not run the script until the source clearly supports a
 
 ## Treasury Map Maintenance
 
-The helper uses a Treasury row-to-ISO map because Fiscal Data rows use country/currency labels, not ISO codes. When a valid Treasury-supported currency is rejected as unmapped, update `TREASURY_ROWS_BY_CODE` and any unambiguous aliases in `scripts/get_year_end_fx_rate.py`, then run:
+The helper uses a Treasury row-to-ISO map because Fiscal Data rows use country/currency labels, not ISO codes. The package carries a frozen `tests/fixtures/treasury-2025-12-31.json` response so map validation remains deterministic. When `map-check --strict` reports an unexplained row, update `TREASURY_ROWS_BY_CODE`, an alternate row mapping, or the explicit exception registry; do not treat an unmapped code as Treasury unavailability.
 
 ```bash
 python3 "<package-root>/scripts/get_year_end_fx_rate.py" map-check \
