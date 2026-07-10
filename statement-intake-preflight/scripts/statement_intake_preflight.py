@@ -175,6 +175,18 @@ INSTITUTION_TERM_RE = re.compile(
     re.I,
 )
 
+# A customer mailing address that happens to sit on a street with a bank-like
+# name (a number followed by "<Bank-word> Street") is not the statement's
+# institution. Drop lines that begin with a street number and carry a street
+# suffix, so an address printed above the masthead cannot become the file's
+# institution signature.
+STREET_ADDRESS_RE = re.compile(
+    r"^\s*\d{1,6}\s+.*\b(?:st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|"
+    r"ln|lane|ct|court|way|pl|place|plaza|sq|square|suite|ste|"
+    r"calle|avenida|carrera|rua|stra(?:ss|ß)e)\b",
+    re.I,
+)
+
 MONTH_NAMES = (
     "january",
     "february",
@@ -244,6 +256,7 @@ INSTITUTION_LEGAL_SUFFIXES = {
     "ag",
     "plc",
     "ltd",
+    "ltda",
     "llc",
     "inc",
     "corp",
@@ -255,6 +268,12 @@ INSTITUTION_LEGAL_SUFFIXES = {
     "bv",
     "oyj",
     "asa",
+    # Latin-American entity forms: "S.A. de C.V." -> cv, "S.A.B." -> sab,
+    # "S.A.P.I." -> sapi, "S. de R.L." -> rl.
+    "cv",
+    "sab",
+    "sapi",
+    "rl",
 }
 
 YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
@@ -499,7 +518,7 @@ def detect_institution_hints(lines: Iterable[str]) -> list[str]:
         # that names an institution term at a word boundary; do not drop it just
         # because it also says "statement" ("Alpha Bank Statement",
         # "Wise Account Statement" are exactly the headers we want).
-        if INSTITUTION_TERM_RE.search(line):
+        if INSTITUTION_TERM_RE.search(line) and not STREET_ADDRESS_RE.search(line):
             hints.append(line)
     return stable_unique(hints, limit=12)
 
@@ -784,8 +803,12 @@ def review_csv_path(out_path: Path) -> Path:
 
 
 def write_json(path: Path, data: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError as exc:
+        # e.g. --out points beneath an existing file, or an unwritable directory.
+        raise PreflightError(f"Could not write {path}: {exc}") from exc
 
 
 def csv_safe(value: object) -> str:
@@ -803,7 +826,6 @@ def csv_safe(value: object) -> str:
 
 
 def write_review_csv(path: Path, data: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "file",
         "is_pdf",
@@ -818,7 +840,13 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
         "institution_hints",
         "warnings",
     ]
-    with path.open("w", newline="", encoding="utf-8") as handle:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("w", newline="", encoding="utf-8")
+    except OSError as exc:
+        # e.g. --out points beneath an existing file, or an unwritable directory.
+        raise PreflightError(f"Could not write {path}: {exc}") from exc
+    with handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for item in data.get("statement_files", []):
@@ -1168,6 +1196,16 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("institution-signature: 'N.A.' and 'NA' must match")
         if institution_signature("Example Bank N.A.") != institution_signature("Example Bank"):
             failures.append("institution-signature: a legal suffix must not split the same bank")
+        # Latin-American entity forms must not split the same institution.
+        if institution_signature("Banco Ejemplo S.A. de C.V.") != institution_signature("Banco Ejemplo"):
+            failures.append("institution-signature: 'S.A. de C.V.' must not split the same bank")
+        if institution_signature("Empresa Grande S.A.P.I. de C.V.") != institution_signature("Empresa Grande"):
+            failures.append("institution-signature: 'S.A.P.I. de C.V.' must not split the same institution")
+        # A customer street address is not an institution hint (it used to become
+        # the file's masthead signature and trip a false mixed gate).
+        address_hints = detect_institution_hints(["12 Bank Street", "Example Bank N.A."])  # privacy-gate: allow (synthetic address)
+        if address_hints != ["Example Bank N.A."]:
+            failures.append(f"address: a street address must not be an institution hint, got {address_hints}")
 
         short_name_banks = build_preflight(
             [
@@ -1272,6 +1310,16 @@ def command_self_test(_args: argparse.Namespace) -> int:
             except PreflightError:
                 pass
 
+        # A filesystem error on write (e.g. --out beneath an existing file)
+        # degrades to a clean PreflightError, not a raw traceback.
+        blocker_file = root / "blocker-file"
+        blocker_file.write_text("i am a file, not a directory")
+        try:
+            write_json(blocker_file / "out.json", {"x": 1})
+            failures.append("write: expected a filesystem error to become PreflightError")
+        except PreflightError:
+            pass
+
         # The tax year is bounded at both layers.
         try:
             _year_arg("20025")
@@ -1301,7 +1349,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 21 preflight cases")
+    print("Self-test passed: 22 preflight cases")
     return 0
 
 
