@@ -12,6 +12,8 @@ The point is not to make an agent feel clever. The point is to get a published a
 
 One currency. One calendar/tax year. A published yearly average rate.
 
+This is for yearly averages, not year-end conversion or FBAR work.
+
 Use the IRS yearly-average table first when it lists the currency and year. If the IRS does not list it, use a published annual average from a government, tax authority, central bank, bank, or reputable FX provider.
 
 Do not calculate an annual average from daily, monthly, quarterly, or intraday data. If only raw time-series data exists, stop and ask for a published annual source or a custom preparer-approved rate/source.

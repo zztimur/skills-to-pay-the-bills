@@ -1,6 +1,6 @@
 ---
 name: get-yearly-fx-rate
-description: Find and cite a published yearly average FX rate for one currency/year, with proof workpaper. Use for IRS yearly average table lookups, annual USD exchange rates, tax support, and rate-source proof.
+description: Find and cite a published yearly-average USD FX rate with a proof workpaper for tax support. Use for IRS annual-average exchange-rate lookups, not year-end or FBAR conversion rates.
 ---
 
 # Get Yearly FX Rate
