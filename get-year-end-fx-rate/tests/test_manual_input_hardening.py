@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
+import json
 import sys
 import tempfile
 from decimal import Decimal
@@ -85,6 +87,51 @@ def main() -> None:
         code, stdout, stderr = run_main([*args, "--allow-unknown-code"])
         assert code == 0, (code, stdout, stderr)
         assert "Rate: 1 USD = 3900 XQZ year-end (2025-12-31)" in stdout
+        packet = next((Path(tmp) / "proof").glob("xqz-2025-*/"))
+        for filename in ("workpaper.md", "workpaper.json", "workpaper.pdf", "source-proof-1.html"):
+            assert (packet / filename).is_file(), f"missing artifact: {filename}"
+        copied_proof = packet / "source-proof-1.html"
+        assert copied_proof.read_text(encoding="utf-8") == proof_file.read_text(encoding="utf-8")
+        data = json.loads((packet / "workpaper.json").read_text(encoding="utf-8"))
+        assert data["proof"]["saved_files"][0]["filename"] == "source-proof-1.html"
+        assert data["proof"]["saved_files"][0]["sha256"] == hashlib.sha256(proof_file.read_bytes()).hexdigest()
+
+        proof_dir = Path(tmp) / "proof-dir"
+        proof_dir.mkdir()
+        missing_proof = Path(tmp) / "missing-source.html"
+        broken_link = Path(tmp) / "broken-source.html"
+        broken_link.symlink_to(Path(tmp) / "not-there.html")
+        for label, invalid_proof in (
+            ("directory", proof_dir),
+            ("missing", missing_proof),
+            ("broken-link", broken_link),
+        ):
+            output_root = Path(tmp) / f"{label}-proof"
+            code, stdout, stderr = run_main(
+                [
+                    "manual",
+                    "--currency",
+                    "COP",
+                    "--year",
+                    "2025",
+                    "--rate",
+                    "3900.00",
+                    "--source-title",
+                    "Example Central Bank Year-End Rate",
+                    "--source-url",
+                    "https://example.test/year-end",
+                    "--source-note",
+                    "Source labels this as the 2025-12-31 rate.",
+                    "--year-end-confirmed",
+                    "--proof-file",
+                    str(invalid_proof),
+                    "--output-root",
+                    str(output_root),
+                ]
+            )
+            assert code == 2, (label, code, stdout, stderr)
+            assert f"Proof file does not exist or is not a regular file: {invalid_proof}" in stderr
+            assert not output_root.exists(), f"{label} proof should not create a packet folder"
 
     print("manual-input hardening passed")
 

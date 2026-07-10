@@ -795,6 +795,9 @@ def command_manual(args: argparse.Namespace) -> int:
             "--no-proof-file-reason must be a specific explanation of at least 16 characters.",
             2,
         )
+    for proof_file in proof_files:
+        if not proof_file.is_file():
+            raise RateError(f"Proof file does not exist or is not a regular file: {proof_file}", 2)
     proof_limitations = []
     if not proof_files:
         proof_limitations.append(f"No saved source proof file was supplied. Reason: {no_proof_reason}")
