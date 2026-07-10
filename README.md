@@ -29,7 +29,7 @@ The pattern is boring on purpose: one clear `SKILL.md`, thin platform adapters, 
 | Skill | Use it when | Output |
 | --- | --- | --- |
 | [`get-yearly-fx-rate/`](get-yearly-fx-rate/) | You need a published yearly average FX rate for one currency and one year. | Cited rate, reciprocal, saved source proof, `workpaper.json`, Markdown, and PDF. |
-| [`get-year-end-fx-rate/`](get-year-end-fx-rate/) | You need a year-end or `YYYY-12-31` FX rate for FBAR-style conversion proof. | Treasury/Fiscal Data or verified manual source proof, `workpaper.json`, Markdown, and PDF. |
+| [`get-year-end-fx-rate/`](get-year-end-fx-rate/) | You need a year-end or `YYYY-12-31` FX rate for FBAR-style conversion proof. | Treasury/Fiscal Data first, then a verified manual fallback: retained source JSON/provenance or an explicit no-proof caveat, plus `workpaper.json`, Markdown, and PDF. |
 | [`statement-intake-preflight/`](statement-intake-preflight/) | You need to preflight machine-readable statement PDFs before FBAR or interest extraction. | Shared intake JSON/CSV with text-layer, scope, currency, account, institution, and review-gate checks. |
 | [`fbar-threshold-check/`](fbar-threshold-check/) | You need to check whether foreign accounts crossed the FBAR threshold for a calendar year. | Account ledgers, daily aggregate threshold view, FinCEN maximum-value view, CSV, JSON, and PDF summary. |
 | [`statements-to-interest/`](statements-to-interest/) | You need to extract interest income from one institution's text PDF statements for one tax year. | IRS-oriented interest support packet with JSON/CSV review artifacts and FX confirmation gates. |
@@ -37,6 +37,8 @@ The pattern is boring on purpose: one clear `SKILL.md`, thin platform adapters, 
 ### Shared Internals
 
 The two FX skills share their workpaper/proof-packet engine — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — through [`workpaper-kit/`](workpaper-kit/). It is internal plumbing, not a skill: no `SKILL.md`, no command, nothing an agent invokes. You edit one canonical file, `workpaper-kit/workpaper.py`; each skill carries a vendored, auto-synced copy (`scripts/_workpaper.py`) so it still installs standalone. Details in [`workpaper-kit/README.md`](workpaper-kit/README.md).
+
+The FX skills deliberately do different jobs. `get-yearly-fx-rate` documents a published yearly average for income-tax support. `get-year-end-fx-rate` documents a `YYYY-12-31` rate for FBAR-style conversion. They share proof mechanics; they do not swap sources or quietly relabel one rate as the other.
 
 ## Which Skill Do I Need?
 
