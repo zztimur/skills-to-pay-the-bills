@@ -209,6 +209,16 @@ check("CUR-10 distant disclosure boilerplate does not confirm COP/MXN",
       d and d["currency"]["code"] == "USD" and "mixed-currencies" not in gates_of(d),
       f"currency={d['currency'] if d else '?'} gates={gates_of(d)}")
 
+p = make_pdf("cur-serial.pdf", [
+    "Example Bank", "Account 55556666",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 2025", "Currency USD", "Closing balance 1,234.56 USD",
+    "Reference S/ 0099887 processed on 01/15",
+])
+proc, d = run("cur-serial", [str(p)])
+check("CUR-11 'S/ 0099887' serial does not falsely confirm PEN",
+      d and d["currency"]["code"] == "USD" and "mixed-currencies" not in gates_of(d),
+      f"currency={d['currency'] if d else '?'} gates={gates_of(d)}")
+
 # --------------------------------------------------------------------------- #
 # Account detection -- identifiers only, aliases collapse, counterparty skipped
 # --------------------------------------------------------------------------- #
@@ -368,6 +378,13 @@ proc, d = run("inst-accent", [str(a), str(b)], scope="one-institution")
 check("INST-8 accent drift ('Bogota' vs 'Bogotá') does not split one bank",
       d and "possible-mixed-institutions" not in gates_of(d), f"gates={gates_of(d)}")
 
+p = make_pdf("inst-banking-corp.pdf", ["First Banking Corporation", "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+             "Statement period January 1 2025 to January 31 2025", "Currency USD", "Closing balance 100.00 USD"])
+proc, d = run("inst-banking-corp", [str(p)], scope="one-institution")
+check("INST-9 'Banking Corporation' entity name is recognized as an institution",
+      d and d["institution_hints"] and "unknown-institution" not in gates_of(d),
+      f"hints={d['institution_hints'] if d else '?'} gates={gates_of(d)}")
+
 # --------------------------------------------------------------------------- #
 # Year detection -- boilerplate years excluded, real out-of-year gates
 # --------------------------------------------------------------------------- #
@@ -397,6 +414,15 @@ p = make_pdf("yr-mixed.pdf", [
 proc, d = run("yr-mixed", [str(p)])
 check("YR-3 a genuine out-of-year period still trips mixed-years",
       d and "mixed-years" in gates_of(d), f"gates={gates_of(d)} years={d['coverage_hints']['detected_years'] if d else '?'}")
+
+p = make_pdf("yr-since-date.pdf", [
+    "Example Bank Monthly Statement", "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Account activity since 01.01.2025 through 31.01.2025", "Currency USD", "Closing balance 1,234.56 USD",
+])
+proc, d = run("yr-since-date", [str(p)])
+check("YR-4 temporal 'since 01.01.2025' keeps the year (not heritage-suppressed)",
+      d and 2025 in d["coverage_hints"]["detected_years"] and "unknown-year-coverage" not in gates_of(d),
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
 
 # --------------------------------------------------------------------------- #
 # Period detection -- numeric ranges with no month name

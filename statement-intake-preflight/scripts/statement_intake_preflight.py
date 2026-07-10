@@ -184,6 +184,19 @@ INSTITUTION_TERM_RE = re.compile(
 # common words that share the stem, so marketing prose ("Mobile banking made
 # easy", "avoid bankruptcy") cannot become a header institution hint.
 INSTITUTION_STEM_RE = re.compile(r"\b(?:banco|bank)\w+", re.I)
+# A stem stopword like "banking" is excluded on its own (marketing prose), but
+# a corporate entity name built on it IS a real institution ("Lloyds Banking
+# Group", "First Banking Corporation", "Meridian Bank Holdings"). Match a
+# capitalized/all-caps proper-noun lead word + "bank(ing)" + a corporate
+# designator: the lead requirement is what separates the name "Lloyds Banking
+# Group" from the marketing line "our banking group rewards today" (a lowercase
+# function word before the phrase). The lead's case is verified in
+# line_names_institution, since re.I would make an inline [A-Z] case-blind.
+INSTITUTION_BANKING_ENTITY_RE = re.compile(
+    r"(?P<lead>\w[\w&.\-]*)\s+bank(?:ing)?\s+"
+    r"(?:corp(?:oration)?|company|co|group|holdings?|association|trust|union)\b",
+    re.I,
+)
 INSTITUTION_STEM_STOPWORDS = {
     "banking",
     "banked",
@@ -205,10 +218,16 @@ def line_names_institution(line: str) -> bool:
     """Whether a line names a financial institution.
 
     Word-boundary term match, plus a "banco"/"bank" stem so a one-token brand
-    is recognized while common stem-sharing words are excluded.
+    is recognized while common stem-sharing words are excluded -- except when a
+    stopword like "banking" heads a corporate entity name led by a proper noun.
     """
     if INSTITUTION_TERM_RE.search(line):
         return True
+    for match in INSTITUTION_BANKING_ENTITY_RE.finditer(line):
+        # Require the lead word to be a proper noun (capitalized/all-caps), so
+        # "Lloyds Banking Group" counts but "our banking group rewards" does not.
+        if match.group("lead")[:1].isupper():
+            return True
     return any(
         match.group(0).casefold() not in INSTITUTION_STEM_STOPWORDS
         for match in INSTITUTION_STEM_RE.finditer(line)
@@ -362,12 +381,13 @@ CURRENCY_LABEL_WINDOW = 16
 # A currency symbol glued to a country/currency prefix resolves an otherwise
 # ambiguous sign: "US$"/"U$S"/"US $" -> USD, "R$" -> BRL (Brazil), "S/." or "S/"
 # -> PEN (Peru). Each requires the disambiguating prefix, so a bare "$" is still
-# flagged ambiguous. The sol pattern requires a following digit so "S/N" (sin
-# número) or a stray slash cannot resolve to a currency.
+# flagged ambiguous. The sol pattern additionally requires a *monetary* amount
+# (a decimal-cents figure) right after it, because "S/" is also serial/series
+# shorthand -- "Reference S/ 0099887" is a document number, not 9,887 soles.
 SYMBOL_CURRENCY_RULES = (
     (re.compile(r"\bUS ?\$|\bU\$S\b", re.I), "USD", "US$"),
     (re.compile(r"\bR\$", re.I), "BRL", "R$"),
-    (re.compile(r"\bS/\.?(?=\s*\d)", re.I), "PEN", "S/"),
+    (re.compile(r"\bS/\.?\s?\d[\d.,]*[.,]\d{2}\b", re.I), "PEN", "S/"),
 )
 _CURRENCY_CODE_ALT = "|".join(sorted(CURRENCY_CODES))
 # An "amount" must look monetary, not just be a digit run: a currency symbol, a
@@ -526,10 +546,16 @@ def detect_years(lines: Iterable[str]) -> list[int]:
     for line in lines:
         marker_spans = [match.span() for match in BOILERPLATE_YEAR_MARKER_RE.finditer(line)]
         for match in YEAR_RE.finditer(line):
-            # A copyright/heritage year sits within a few characters of its
-            # marker ("© 2019", "since 1904"); drop it so it cannot masquerade
-            # as a statement-period year and trip the mixed-years gate.
-            if any(_span_gap(span, match.span()) <= YEAR_CONTEXT_WINDOW for span in marker_spans):
+            # A copyright/heritage year sits as a bare year within a few
+            # characters of its marker ("© 2019", "since 1904"); drop it so it
+            # cannot masquerade as a statement-period year. But "since" is also
+            # temporal ("activity since 01.01.2025"): a year that is the tail of
+            # a numeric date (preceded by . / -) is a real period year, never a
+            # heritage year, so it is kept even next to a marker.
+            in_numeric_date = match.start() > 0 and line[match.start() - 1] in "./-"
+            if not in_numeric_date and any(
+                _span_gap(span, match.span()) <= YEAR_CONTEXT_WINDOW for span in marker_spans
+            ):
                 continue
             years.add(int(match.group(1)))
     return sorted(years)
@@ -1432,6 +1458,21 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("institution-stem: a 'banking' marketing line must not name an institution")
         if line_names_institution("Please avoid bankruptcy fees"):
             failures.append("institution-stem: 'bankruptcy' must not name an institution")
+        # "banking" is a stopword on its own, but a corporate entity name led by
+        # a proper noun ("First Banking Corporation", "Lloyds Banking Group") is
+        # a real institution.
+        if not line_names_institution("First Banking Corporation"):
+            failures.append("institution-stem: 'Banking Corporation' entity name must name an institution")
+        if not line_names_institution("Lloyds Banking Group"):
+            failures.append("institution-stem: 'Lloyds Banking Group' must name an institution")
+        if not detect_institution_hints(["First Banking Corporation"]):
+            failures.append("institution-stem: a 'Banking Corporation' header must yield an institution hint")
+        if line_names_institution("Enjoy online banking anywhere"):
+            failures.append("institution-stem: bare 'online banking' marketing must stay excluded")
+        # A lowercase function word before the entity phrase marks marketing
+        # prose ("our banking group rewards"), not a name; it must stay excluded.
+        if line_names_institution("Join our banking group rewards today and save"):
+            failures.append("institution-stem: a lowercase-led 'banking group' marketing line must stay excluded")
 
         # Accent drift between two text layers must not split one bank, and a
         # ligature in the extracted text must not hide an institution term.
@@ -1532,6 +1573,15 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("account-alias: two distinct full numbers sharing a suffix must not merge")
         if not _same_account("****6666", True, "6666", True):
             failures.append("account-alias: a masked token and its 'ending in' suffix must merge")
+        # Documented tradeoff: a masked token DOES absorb into a full number
+        # sharing its revealed digits, because on a real statement the mask is
+        # almost always the same account shown redacted. This can hide the rare
+        # case of two different accounts sharing a last-4 when one is masked; the
+        # alternative (never merging masked->full) re-opens a false mixed gate on
+        # every statement that prints its own number masked, which is far more
+        # common. Kept intentional here so a future edit does not flip it blindly.
+        if not _same_account("****6666", True, "12346666", False):
+            failures.append("account-alias: a masked token is intentionally absorbed by a full number sharing its tail")
 
         aliased = build_preflight(
             [
@@ -1556,6 +1606,16 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("boilerplate-year: a heritage 'since 1904' year must not count as a statement year")
         if detect_years(["Statement period January 1 2025 to January 31 2025"]) != [2025]:
             failures.append("boilerplate-year: a real period year must still be detected")
+        # "since" is dual-use: heritage ("since 1904") suppresses, but temporal
+        # ("since 01.01.2025", a date tail) must keep the real period year.
+        if detect_years(["Account activity since 01.01.2025"]) != [2025]:
+            failures.append("boilerplate-year: a date-form year after 'since' must be kept, not suppressed")
+        if detect_years(["Serving customers since 1904"]) != []:
+            failures.append("boilerplate-year: a bare heritage 'since 1904' must still be suppressed")
+        # Suppression is per-token: a real out-of-year period must still gate
+        # even when the same year also appears in a footer.
+        if 2024 not in detect_years(["Statement period March 1 2024 to March 31 2024", "(c) 2024 Example Bancorp."]):
+            failures.append("boilerplate-year: a real period year must survive a same-year footer")
         boilerplate = build_preflight(
             [
                 synthetic_file(
@@ -1612,9 +1672,14 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if brl["code"] != "BRL" or brl["ambiguous_dollar"]:  # type: ignore[index]
             failures.append(f"currency-brl: 'R$' must resolve to BRL, got {brl}")
         if detect_currency(["Saldo S/. 1,234.56"])["code"] != "PEN":
-            failures.append("currency-pen: 'S/.' must resolve to PEN")
+            failures.append("currency-pen: 'S/.' before a monetary amount must resolve to PEN")
         if detect_currency(["Closing balance 100.00 USD"])["code"] != "USD":
             failures.append("currency-pen: a plain statement must not spuriously resolve to PEN")
+        # "S/" is also serial/series shorthand; a bare integer after it is a
+        # document number, not soles, and must not confirm PEN.
+        serial = detect_currency(["Currency USD", "Closing balance 100.00 USD", "Reference S/ 0099887 processed"])
+        if serial["code"] != "USD" or "PEN" in serial["candidates"]:  # type: ignore[index]
+            failures.append(f"currency-pen: 'S/ 0099887' (a serial) must not confirm PEN, got {serial}")
 
         # A numeric-only period range is detected even with no month or period word.
         if not detect_periods(["Kontoauszug 01.01.2025 - 31.01.2025"]):
@@ -1682,7 +1747,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 30 preflight cases")
+    print("Self-test passed: 33 preflight cases")
     return 0
 
 
