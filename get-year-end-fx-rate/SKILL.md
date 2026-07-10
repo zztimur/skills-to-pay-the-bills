@@ -19,11 +19,15 @@ Collect or infer:
 
 Ask for clarification when the currency is ambiguous, for example `peso`, `dollar`, `pound`, or `ruble` without country/ISO code.
 
+Do not answer or create a workpaper for a year-end date that has not occurred yet. The CLI enforces this for both `lookup` and `manual`; `--retrieved`, `--proof-file`, and `--year-end-confirmed` are not override switches.
+
 ## Source Search
 
 Follow the source priority in `references/source-policy.md`: the Treasury Reporting Rates of Exchange dataset on Fiscal Data for the `YYYY-12-31` record date first, then another verifiable year-end government, central-bank, or bank source, then a user/preparer-supplied year-end rate. Never calculate averages and never reuse a yearly-average rate from `get-yearly-fx-rate`. If no verifiable year-end source is found, stop and ask the user or preparer for a custom year-end rate/source.
 
 Use `scripts/get_year_end_fx_rate.py` for deterministic Treasury lookup and workpaper generation.
+
+Before running either workflow, make sure the requested `YYYY-12-31` date has passed. If it has not, stop and tell the user the year-end rate cannot exist yet.
 
 Treasury/Fiscal Data lookup:
 

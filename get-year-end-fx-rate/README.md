@@ -14,6 +14,8 @@ One currency. One calendar year. A year-end rate.
 
 Use Treasury/Fiscal Data first when it has the `YYYY-12-31` row for that currency. If Treasury does not list the currency/year, use another verifiable source that clearly supports a year-end or `YYYY-12-31` rate.
 
+The date has to exist. If today is before the requested December 31, stop. A screenshot, a source note, or a confident preparer does not make a future year-end rate real.
+
 "Treasury first" has to be true in practice, not just in a sentence. The maintained map covers Treasury's usable ISO rows; strict map-check makes every frozen-source row either resolve or carry an explicit exception. A published `Thailand-Baht` row should produce `THB`, not a mysterious jump to manual fallback.
 
 Do not calculate averages. Do not quietly borrow the yearly-average skill. Do not use monthly, quarterly, daily-series, or annual-average rates and pretend they are year-end rates. That is how a neat spreadsheet becomes a small tax archaeology project.
@@ -84,6 +86,8 @@ python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py lookup \
   --output-root work/fbar-fx-rate-proof
 ```
 
+`lookup` refuses a year whose `YYYY-12-31` date has not happened yet, before it fetches Treasury or writes a packet.
+
 Manual workpaper for a verified year-end source:
 
 ```bash
@@ -104,6 +108,8 @@ python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py manual \
 
 For manual sources, save the source page as PDF/HTML, take a screenshot, or download the source data when possible. The script copies that proof into the workpaper folder and hashes it. `--source-note` is required. Pass either `--proof-file` or a specific `--no-proof-file-reason`; the no-proof path records that reason and prints one caveat instead of pretending the generated workpaper PDF is source evidence.
 
+The manual path has the same calendar guard as Treasury lookup. `--year-end-confirmed` confirms source wording; it is not permission to create a workpaper for a year-end date that has not occurred.
+
 No-proof is an explicit exception, not a shortcut. Use it only when the source itself is verified but its artifact genuinely cannot be retained:
 
 ```bash
@@ -115,6 +121,7 @@ No-proof is an explicit exception, not a shortcut. Use it only when the source i
 The skill should stop instead of getting cute when:
 
 - The currency is ambiguous, like `peso`, `dollar`, `pound`, `franc`, or `ruble`.
+- The requested `YYYY-12-31` date has not happened yet.
 - Treasury/Fiscal Data has no `YYYY-12-31` row and no manual year-end source is available.
 - The source gives averages instead of a year-end rate.
 - Rate direction is unclear.
