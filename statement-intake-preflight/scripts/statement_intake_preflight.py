@@ -244,7 +244,18 @@ CURRENCY_LABEL_RE = re.compile(
     re.I,
 )
 _CURRENCY_CODE_ALT = "|".join(sorted(CURRENCY_CODES))
-_AMOUNT = r"[-+(]?\s*[$€£¥]?\s*\d[\d.,]*"
+# An "amount" must look monetary, not just be a digit run: a currency symbol, a
+# decimal-cents figure, a thousands-grouped figure, or a long (>=5 digit) number.
+# A bare 1-4 digit integer no longer counts, so a year ("2025 TRY") or a clock
+# fragment ("TRY 24/7") can no longer corroborate a currency code.
+_AMOUNT = (
+    r"[-+(]?\s*(?:"
+    r"[$€£¥]\s?\d[\d.,]*"
+    r"|\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?"
+    r"|\d+[.,]\d{2}"
+    r"|\d{5,}"
+    r")"
+)
 CURRENCY_AMOUNT_RE = re.compile(
     rf"\b(?P<pre>{_CURRENCY_CODE_ALT})\b\s*{_AMOUNT}"
     rf"|{_AMOUNT}\s*\b(?P<post>{_CURRENCY_CODE_ALT})\b"
@@ -389,7 +400,10 @@ def account_token(raw: str) -> str | None:
     compact = re.sub(r"[ .\-]", "", token)
     digits = sum(char.isdigit() for char in compact)
     masks = sum(char in "*Xx" for char in compact)
-    if digits + masks < 2:
+    # Require at least four digit/mask characters. A real account identifier has
+    # them; a one-or-two-digit run captured after a label (a page count or table
+    # index such as "12 of 34") is not an account.
+    if digits + masks < 4:
         return None
     return token
 
@@ -957,6 +971,15 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if adjacency["currency"]["code"] != "GBP":  # type: ignore[index]
             failures.append(f"adjacency: expected GBP from amount adjacency, got {adjacency['currency']}")
 
+        # A code next to a bare year or a clock fragment is not adjacent to an
+        # amount and must not confirm; a real monetary figure still does.
+        if detect_currency(["Currency USD", "Closing balance 100.00 USD", "PLEASE TRY 24/7 ONLINE BANKING"])["code"] != "USD":
+            failures.append("currency-amount: 'TRY 24/7' must not confirm a second currency")
+        if detect_currency(["Currency USD", "IN 2025 TRY OUR NEW APP"])["code"] != "USD":
+            failures.append("currency-amount: a bare year beside 'TRY' must not confirm it")
+        if detect_currency(["Ending balance 9.999,99 GBP"])["code"] != "GBP":
+            failures.append("currency-amount: a monetary figure adjacent to a code must still confirm")
+
         accounts = build_preflight(
             [synthetic_file("accounts.pdf", "Example Bank\nAccount 11112222\nAccount 33334444\nStatement period January 2025\nCurrency USD")],
             2025,
@@ -1115,6 +1138,8 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("account-label: a dot-label account plus a bare account must yield two hints")
         if detect_account_hints(["Account No. Statement of activity"]):
             failures.append("account-label: a label followed by a word must not yield a hint")
+        if detect_account_hints(["Account No. 12 of 34 pages"]):
+            failures.append("account-label: a short number embedded in text after a label must not be captured as an account")
 
         # IBAN captures trim a trailing holder name to the checksum-valid IBAN,
         # and grouped vs compact spellings collapse to one hint.
@@ -1189,7 +1214,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 17 preflight cases")
+    print("Self-test passed: 18 preflight cases")
     return 0
 
 
