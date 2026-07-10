@@ -14,6 +14,8 @@ One currency. One calendar year. A year-end rate.
 
 Use Treasury/Fiscal Data first when it has the `YYYY-12-31` row for that currency. If Treasury does not list the currency/year, use another verifiable source that clearly supports a year-end or `YYYY-12-31` rate.
 
+"Treasury first" has to be true in practice, not just in a sentence. The maintained map covers Treasury's usable ISO rows; strict map-check makes every frozen-source row either resolve or carry an explicit exception. A published `Thailand-Baht` row should produce `THB`, not a mysterious jump to manual fallback.
+
 Do not calculate averages. Do not quietly borrow the yearly-average skill. Do not use monthly, quarterly, daily-series, or annual-average rates and pretend they are year-end rates. That is how a neat spreadsheet becomes a small tax archaeology project.
 
 Also: this is support documentation, not legal advice and not an official IRS, FinCEN, or Treasury blessing. It gives the user a rate, source, and retained proof.
@@ -42,6 +44,8 @@ It includes:
 - `workpaper.md` for a human-readable note.
 - `workpaper.pdf` for printable review.
 - A saved source artifact, usually the Treasury/Fiscal Data API JSON response for lookup runs.
+
+For a Treasury packet, the source note also says whether that JSON was fetched live or supplied locally, and records its SHA-256. That is enough provenance to understand what happened without reverse-engineering a terminal session.
 
 ## When Treasury Is Offline
 
@@ -100,6 +104,12 @@ python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py manual \
 
 For manual sources, save the source page as PDF/HTML, take a screenshot, or download the source data when possible. The script copies that proof into the workpaper folder and hashes it. `--source-note` is required. Pass either `--proof-file` or a specific `--no-proof-file-reason`; the no-proof path records that reason and prints one caveat instead of pretending the generated workpaper PDF is source evidence.
 
+No-proof is an explicit exception, not a shortcut. Use it only when the source itself is verified but its artifact genuinely cannot be retained:
+
+```bash
+--no-proof-file-reason "The preparer verified the 2025-12-31 source, but the source artifact could not be retained."
+```
+
 ## Failure Modes
 
 The skill should stop instead of getting cute when:
@@ -123,6 +133,8 @@ python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py map-check --year 20
 ```
 
 The script keeps a Treasury row-to-ISO map because Fiscal Data uses labels like `United Arab Emirates-Dirham`, not ISO codes like `AED`. Use targeted `map-check --currency <ISO>` when adding a currency. Untargeted strict `map-check` must classify every row as mapped or explicitly excepted; an unexplained row is a map-maintenance failure, not proof that Treasury lacks a rate. The frozen 2025 Treasury response in `tests/fixtures/` keeps that test deterministic.
+
+Run the regression scripts in `tests/` before a release as well. They protect the boring, expensive mistakes: locale-looking manual numbers, bad dates, invented codes, annual-average wording, missing proof caveats, offline replay, and unmapped Treasury rows.
 
 The workpaper machinery — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — lives in [`workpaper-kit`](../workpaper-kit/), vendored here as `scripts/_workpaper.py` and shared with `get-yearly-fx-rate` so both proof packets look the same. Edit the canonical `workpaper-kit/workpaper.py`, never the generated copy; the pre-commit hook re-syncs it (or run `workpaper-kit/sync.sh`). The Treasury lookup, the `reject_average_language` rule, and currency handling stay here in the skill.
 
