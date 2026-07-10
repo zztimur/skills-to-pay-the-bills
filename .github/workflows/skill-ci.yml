@@ -43,6 +43,7 @@ jobs:
           python3 privacy-gate/scripts/test_privacy_gate.py
           python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py self-test
           python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py self-test
+          python3 get-year-end-fx-rate/tests/run_regressions.py
           python3 statement-intake-preflight/scripts/statement_intake_preflight.py self-test
           python3 fbar-threshold-check/scripts/fbar_threshold_check.py self-test
           python3 statements-to-interest/scripts/statements_to_interest.py self-test
