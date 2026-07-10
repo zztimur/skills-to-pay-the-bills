@@ -9,6 +9,7 @@ import json
 import re
 import sys
 import tempfile
+import unicodedata
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -175,6 +176,43 @@ INSTITUTION_TERM_RE = re.compile(
     re.I,
 )
 
+# "Banco"/"Bank" also head one-token brand names ("Bancolombia", "Bancomer",
+# "Bankia", "Bankinter") that a word-boundary match misses. Match them as a stem
+# -- but only "banco"/"bank" (not the bare "banc" stem, which would also catch
+# the Spanish adjective "bancario" and "bancarrota"), and reject the handful of
+# common words that share the stem, so marketing prose ("Mobile banking made
+# easy", "avoid bankruptcy") cannot become a header institution hint.
+INSTITUTION_STEM_RE = re.compile(r"\b(?:banco|bank)\w+", re.I)
+INSTITUTION_STEM_STOPWORDS = {
+    "banking",
+    "banked",
+    "banks",
+    "banker",
+    "bankers",
+    "bankable",
+    "bankrupt",
+    "bankruptcy",
+    "banknote",
+    "banknotes",
+    "bankroll",
+    "bancos",
+    "bancomat",
+}
+
+
+def line_names_institution(line: str) -> bool:
+    """Whether a line names a financial institution.
+
+    Word-boundary term match, plus a "banco"/"bank" stem so a one-token brand
+    is recognized while common stem-sharing words are excluded.
+    """
+    if INSTITUTION_TERM_RE.search(line):
+        return True
+    return any(
+        match.group(0).casefold() not in INSTITUTION_STEM_STOPWORDS
+        for match in INSTITUTION_STEM_RE.finditer(line)
+    )
+
 # A customer mailing address that happens to sit on a street with a bank-like
 # name (a number followed by "<Bank-word> Street") is not the statement's
 # institution. Drop lines that begin with a street number and carry a street
@@ -338,7 +376,19 @@ class PreflightError(Exception):
 
 
 def clean_line(value: str) -> str:
-    return re.sub(r"\s+", " ", value).strip()
+    # NFKC at ingestion folds compatibility characters that a PDF text layer
+    # routinely emits -- ligatures ("ﬁnancial" -> "financial"), full-width
+    # digits, the numero sign -- so detectors see canonical ASCII-ish text
+    # instead of missing a term spelled with a ligature. Accents are preserved
+    # here (NFKC keeps precomposed "á"); they are folded only for institution
+    # signature comparison, so displayed hints keep their diacritics.
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", value)).strip()
+
+
+def fold_accents(text: str) -> str:
+    """Drop combining diacritics so 'Bogotá' and 'Bogota' compare equal."""
+    decomposed = unicodedata.normalize("NFD", text)
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
 
 
 def stable_unique(values: Iterable[str], limit: int | None = None) -> list[str]:
@@ -610,10 +660,10 @@ def detect_institution_hints(lines: Iterable[str]) -> list[str]:
     hints: list[str] = []
     for line in list(lines)[:80]:
         # A statement's institution name lives in the header. Keep any early line
-        # that names an institution term at a word boundary; do not drop it just
-        # because it also says "statement" ("Alpha Bank Statement",
+        # that names an institution term or a "banco"/"bank" brand stem; do not
+        # drop it just because it also says "statement" ("Alpha Bank Statement",
         # "Wise Account Statement" are exactly the headers we want).
-        if INSTITUTION_TERM_RE.search(line) and not STREET_ADDRESS_RE.search(line):
+        if line_names_institution(line) and not STREET_ADDRESS_RE.search(line):
             hints.append(line)
     return stable_unique(hints, limit=12)
 
@@ -626,7 +676,10 @@ def institution_signature(hint: str) -> str:
     word, then strips structural statement words and legal-entity suffixes so
     cosmetic per-statement differences do not read as different institutions.
     """
-    lowered = re.sub(r"[^a-z ]+", " ", hint.casefold())
+    # Fold accents first: otherwise "[^a-z ]" would turn "bogotá" into "bogot "
+    # (accent -> space, truncating the word) while "bogota" stays intact, so the
+    # same bank across two text layers would read as two institutions.
+    lowered = re.sub(r"[^a-z ]+", " ", fold_accents(hint.casefold()))
     merged: list[str] = []
     letters = ""
     for token in lowered.split():
@@ -1302,6 +1355,27 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if address_hints != ["Example Bank N.A."]:
             failures.append(f"address: a street address must not be an institution hint, got {address_hints}")
 
+        # A one-token brand ("Bancolombia") heads a name the word-boundary match
+        # misses; the stem catches it, but a marketing line sharing the stem
+        # ("Personal banking made easy") must not become an institution hint.
+        if not detect_institution_hints(["Bancolombia S.A."]):
+            failures.append("institution-stem: 'Bancolombia S.A.' must be recognized as an institution")
+        if not line_names_institution("Bankinter"):
+            failures.append("institution-stem: 'Bankinter' must be recognized as an institution")
+        if line_names_institution("Personal banking made easy"):
+            failures.append("institution-stem: a 'banking' marketing line must not name an institution")
+        if line_names_institution("Please avoid bankruptcy fees"):
+            failures.append("institution-stem: 'bankruptcy' must not name an institution")
+
+        # Accent drift between two text layers must not split one bank, and a
+        # ligature in the extracted text must not hide an institution term.
+        if institution_signature("Banco Bogotá Ejemplo") != institution_signature("Banco Bogota Ejemplo"):
+            failures.append("unicode: accented and unaccented spellings of one bank must share a signature")
+        if clean_line("Example ﬁnancial Group") != "Example financial Group":
+            failures.append("unicode: an NFKC ligature must fold to ASCII at ingestion")
+        if not detect_institution_hints([clean_line("Example ﬁnancial Group Statement")]):
+            failures.append("unicode: a ligatured 'financial' must still name an institution after NFKC")
+
         short_name_banks = build_preflight(
             [
                 synthetic_file("usbank.pdf", "U.S. Bank\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00 USD"),
@@ -1505,7 +1579,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 24 preflight cases")
+    print("Self-test passed: 26 preflight cases")
     return 0
 
 
