@@ -63,6 +63,8 @@ The command file is only an adapter. The root `SKILL.md`, references, and script
 
 ## Run The Script Manually
 
+Requires Python 3.11 or newer with `pdfplumber`.
+
 Preflight for FBAR account-ledger extraction:
 
 ```bash
