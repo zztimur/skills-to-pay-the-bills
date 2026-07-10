@@ -78,6 +78,8 @@ Record:
 - Any caveat, such as Treasury/Fiscal Data unavailable or a manual proof artifact not retained.
 - Hashes for saved proof files when available.
 
+For a manual packet, use a nonempty absolute `http://` or `https://` source URL. The retrieval date must be the actual date the source was retrieved, never a future date. If a proof artifact genuinely cannot be retained, the no-proof explanation must be a specific, trimmed sentence of at least 16 characters.
+
 In the printable PDF, identify saved source proof artifacts by filename or packet-relative path plus hash. Do not rely on absolute local computer paths as evidence because external reviewers cannot access them. Absolute paths are acceptable in `workpaper.json` and chat artifact links for local navigation.
 
 The proof packet supports later review. It is not automatically attached to an FBAR or tax return.
