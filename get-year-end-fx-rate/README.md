@@ -94,7 +94,7 @@ python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py manual \
 
 `foreign-per-usd` means `1 USD = <rate> foreign currency`. Use `usd-per-foreign` only when the source is quoted as `1 foreign currency = <rate> USD`.
 
-For manual sources, save the source page as PDF/HTML, take a screenshot, or download the source data when possible. The script copies that proof into the workpaper folder and hashes it. If no proof file is supplied, the workpaper says so plainly instead of pretending the evidence is better than it is.
+For manual sources, save the source page as PDF/HTML, take a screenshot, or download the source data when possible. The script copies that proof into the workpaper folder and hashes it. `--source-note` is required. Pass either `--proof-file` or a specific `--no-proof-file-reason`; the no-proof path records that reason and prints one caveat instead of pretending the generated workpaper PDF is source evidence.
 
 ## Failure Modes
 
