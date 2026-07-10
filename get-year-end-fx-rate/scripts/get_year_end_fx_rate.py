@@ -471,7 +471,15 @@ def treasury_rows_url(year: int, api_url: str) -> str:
 def load_json_text(query_url: str, api_file: str | None) -> tuple[str, str, str]:
     if api_file:
         path = Path(api_file)
-        return path.read_text(encoding="utf-8"), as_abs(path), "supplied local JSON file"
+        source_ref = as_abs(path)
+        try:
+            json_text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise RateError(
+                f"Could not read supplied local JSON file {source_ref}: {exc}",
+                2,
+            ) from exc
+        return json_text, source_ref, "supplied local JSON file"
 
     request = Request(
         query_url,
