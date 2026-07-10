@@ -136,12 +136,13 @@ After script changes:
 
 ```bash
 python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py self-test
+python3 get-year-end-fx-rate/tests/run_regressions.py
 python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py map-check --year 2025 --currency AED --strict
 ```
 
 The script keeps a Treasury row-to-ISO map because Fiscal Data uses labels like `United Arab Emirates-Dirham`, not ISO codes like `AED`. Use targeted `map-check --currency <ISO>` when adding a currency. Untargeted strict `map-check` must classify every row as mapped or explicitly excepted; an unexplained row is a map-maintenance failure, not proof that Treasury lacks a rate. The frozen 2025 Treasury response in `tests/fixtures/` keeps that test deterministic.
 
-Run the regression scripts in `tests/` before a release as well. They protect the boring, expensive mistakes: locale-looking manual numbers, bad dates, invented codes, annual-average wording, missing proof caveats, offline replay, and unmapped Treasury rows.
+Run `tests/run_regressions.py` before a release. It executes the script-style regression checks directly, so release review does not depend on `unittest discover` finding tests that were never written as unittest classes. The checks protect the boring, expensive mistakes: locale-looking manual numbers, bad dates, unopened year-end dates, invented codes, annual-average wording, missing proof caveats, offline replay, and unmapped Treasury rows.
 
 The workpaper machinery — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — lives in [`workpaper-kit`](../workpaper-kit/), vendored here as `scripts/_workpaper.py` and shared with `get-yearly-fx-rate` so both proof packets look the same. Edit the canonical `workpaper-kit/workpaper.py`, never the generated copy; the pre-commit hook re-syncs it (or run `workpaper-kit/sync.sh`). The Treasury lookup, the `reject_average_language` rule, and currency handling stay here in the skill.
 
