@@ -97,7 +97,12 @@ CURRENCY_ALIASES = {
 # "Account Number Summary".
 ACCOUNT_LABEL_RE = re.compile(
     r"\b(?:account|acct|a/c|cuenta)\s*"
-    r"(?:numbers?|no\.?|nbr\.?|nros?\.?|n[uú]ms?\.?|id)\b"
+    # Assert the word boundary on the label word, THEN consume an optional
+    # trailing dot. Putting \b after the dot ("no\.?\b") failed for
+    # dot-terminated labels ("No.", "Nro.", "Núm.") because there is no
+    # boundary between "." and the following space, so those forms matched
+    # nothing at all.
+    r"(?:numbers?|nos?|nbrs?|nros?|n[uú]ms?|id)\b\.?"
     r"[\s:#-]*([*Xx0-9A-Za-z][*Xx0-9A-Za-z.\- ]{2,33})",
     re.I,
 )
@@ -109,7 +114,7 @@ ACCOUNT_BARE_RE = re.compile(
     r"\b(?:account|acct|a/c|cuenta|n[uú]mero de cuenta)\b[\s:#-]*([*Xx0-9][*Xx0-9.\- ]{3,33})",
     re.I,
 )
-ACCOUNT_IBAN_RE = re.compile(r"\bIBAN\b[\s:#-]*([A-Z]{2}[A-Z0-9 ]{8,34})", re.I)
+ACCOUNT_IBAN_RE = re.compile(r"\bIBAN\b[\s:#-]*([A-Z]{2}\d{2}[A-Z0-9 ]{6,40})", re.I)
 ACCOUNT_ENDING_RE = re.compile(r"\b(?:ending in|ends in|termina en)\s*([*Xx0-9]{2,8})", re.I)
 
 TITLE_TERMS = (
@@ -365,6 +370,32 @@ def account_token(raw: str) -> str | None:
     return token
 
 
+def iban_mod97_ok(iban: str) -> bool:
+    """ISO 13616 check: move the first four chars to the end, map letters to
+    their base-36 values, and require the whole number mod 97 == 1."""
+    rearranged = iban[4:] + iban[:4]
+    return int("".join(str(int(char, 36)) for char in rearranged)) % 97 == 1
+
+
+def iban_token(raw: str) -> str | None:
+    """Reduce a captured IBAN to its checksum-valid compact form, or reject.
+
+    The capture can swallow trailing words on the line (a holder name after the
+    IBAN); trimming to the longest mod-97-valid prefix drops that tail and, as a
+    bonus, collapses grouped and compact spellings of one IBAN to a single hint.
+    """
+    compact = re.sub(r"\s+", "", raw).upper()
+    match = re.match(r"[A-Z]{2}\d{2}[A-Z0-9]+", compact)
+    if not match:
+        return None
+    candidate = match.group(0)
+    for end in range(min(len(candidate), 34), 14, -1):
+        prefix = candidate[:end]
+        if iban_mod97_ok(prefix):
+            return prefix
+    return None
+
+
 def detect_account_hints(lines: Iterable[str]) -> list[str]:
     hints: list[str] = []
     for line in lines:
@@ -374,9 +405,9 @@ def detect_account_hints(lines: Iterable[str]) -> list[str]:
                 if token:
                     hints.append(token)
         for match in ACCOUNT_IBAN_RE.finditer(line):
-            iban = clean_line(match.group(1))
-            if len(re.sub(r"\s", "", iban)) >= 10:
-                hints.append(iban)
+            token = iban_token(match.group(1))
+            if token:
+                hints.append(token)
         for match in ACCOUNT_ENDING_RE.finditer(line):
             hints.append(clean_line(match.group(1)))
     return stable_unique(hints, limit=20)
@@ -990,6 +1021,36 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if any(gate.get("code") == "unknown-institution" for gate in fintech["review_gates"]):  # type: ignore[index]
             failures.append("fintech: 'Wise Account Statement' should satisfy the institution check")
 
+        # Dot-terminated account labels ("No.", "Nro.", "Núm.") must capture, not
+        # silently miss. Fixtures avoid the "account no NNNN" spelling that the
+        # repo privacy scan flags, while still exercising every label branch.
+        account_label_forms = {
+            "Account No. 12 34 56": ["12 34 56"],
+            "Cuenta Nro. 4567890": ["4567890"],
+            "Cuenta Núm. 4567890": ["4567890"],
+            "Account ID 12345678": ["12345678"],
+            "Account 12345678": ["12345678"],
+        }
+        for line, expected in account_label_forms.items():
+            got = detect_account_hints([line])
+            if got != expected:
+                failures.append(f"account-label {line!r}: expected {expected}, got {got}")
+        if detect_account_hints(["Account Nro. 11112222", "Account 33334444"]) != ["11112222", "33334444"]:
+            failures.append("account-label: a dot-label account plus a bare account must yield two hints")
+        if detect_account_hints(["Account No. Statement of activity"]):
+            failures.append("account-label: a label followed by a word must not yield a hint")
+
+        # IBAN captures trim a trailing holder name to the checksum-valid IBAN,
+        # and grouped vs compact spellings collapse to one hint.
+        grouped_iban = "GB82 WEST 1234 5698 7654 32"  # privacy-gate: allow (public documentation IBAN, synthetic test value)
+        compact_iban = grouped_iban.replace(" ", "")
+        if iban_token(grouped_iban + " HOLDER JANE DOE") != compact_iban:
+            failures.append("iban: expected the trailing name trimmed off the IBAN")
+        if iban_token(compact_iban) != compact_iban:
+            failures.append("iban: a valid compact IBAN should validate")
+        if iban_token("GB00 0000 0000 0000 0000 00") is not None:  # privacy-gate: allow (synthetic invalid IBAN)
+            failures.append("iban: an invalid checksum must be rejected")
+
         # The same statement supplied twice is flagged, not silently double-counted.
         duplicate = build_preflight(
             [
@@ -1052,7 +1113,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 15 preflight cases")
+    print("Self-test passed: 16 preflight cases")
     return 0
 
 
