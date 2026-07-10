@@ -29,8 +29,11 @@ Do not use:
 - A rate from `get-yearly-fx-rate`.
 - Unsourced search snippets, model memory, or a page that does not expose the actual year-end date/rate.
 - A manual source whose rate direction cannot be determined.
+- A claimed year-end rate for a `YYYY-12-31` date that has not occurred yet.
 
 Treasury Reporting Rates are quarterly U.S. government reporting rates. For this skill, use the December 31 record date as year-end support when it exists for the requested currency/year. If the Treasury dataset does not list the currency/year, keep that caveat and use a manual year-end source only after explicit confirmation.
+
+The requested year-end date must exist before a packet is created. If today is before the requested `YYYY-12-31`, stop. A retrieval date, saved proof file, source note, or `--year-end-confirmed` flag cannot override the calendar.
 
 If the Treasury API call fails with exit code 5, retain the raw JSON response for the exact query URL in the error and rerun the same lookup with `--api-file`. Treat that local JSON as source proof, not as a substitute rate: do not use search snippets, screenshots, or copied values. Record whether the response was fetched live or supplied locally.
 
@@ -86,11 +89,11 @@ For a manual source with no local proof artifact, require a specific written rea
 Ask for clarification when:
 
 - The currency term is ambiguous: `peso`, `dollar`, `pound`, `franc`, `ruble`, `krone/krona`, etc.
-- The requested year-end date is not published yet.
 - The source provides multiple rates for the same currency/year and the correct year-end rate is unclear.
 
 Stop instead of answering when:
 
+- The requested year-end date has not occurred yet.
 - No Treasury or verifiable manual year-end source can be found.
 - Only averages are available.
 - A manual source has not been explicitly confirmed as year-end support.
