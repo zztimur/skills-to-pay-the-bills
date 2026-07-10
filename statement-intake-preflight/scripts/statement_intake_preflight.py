@@ -664,24 +664,55 @@ def _marker_reaches_year(marker_spans: list, yspan: tuple, month_spans: list) ->
     )
 
 
+def _hard_suppressed_years(hard_spans: list, month_spans: list, year_spans: list) -> set:
+    """Indices of ``year_spans`` a hard copyright marker suppresses, transitively.
+
+    Two stages, on purpose:
+      1. Seed -- a year the marker reaches directly or via one month name
+         ("© 2019", "© May 2019", "Copyright January 2020").
+      2. Extend -- absorb any year DIRECTLY adjacent (within the window, with NO
+         month hop) to an already-suppressed year, which closes over a
+         comma/space-separated copyright list ("© 2019, 2020, 2021").
+
+    The extend step is deliberately month-free: a month hop there would let
+    suppression chain backward through a period phrase whose years are separated
+    by a month word ("January 2025 to January 2025 ... © 2010"), wrongly dropping
+    the period year. Direct-only extension stops at the first prose gap wider than
+    the window, so a real period year sharing the line is untouched.
+    """
+    suppressed = {
+        i for i, yspan in enumerate(year_spans)
+        if _marker_reaches_year(hard_spans, yspan, month_spans)
+    }
+    changed = True
+    while changed:
+        changed = False
+        for i, yspan in enumerate(year_spans):
+            if i not in suppressed and any(
+                _span_gap(year_spans[j], yspan) <= YEAR_CONTEXT_WINDOW for j in suppressed
+            ):
+                suppressed.add(i)
+                changed = True
+    return suppressed
+
+
 def detect_years(lines: Iterable[str]) -> list[int]:
     years: set[int] = set()
     for line in lines:
         hard_spans = [match.span() for match in HARD_COPYRIGHT_MARKER_RE.finditer(line)]
         dual_spans = [match.span() for match in DUAL_USE_MARKER_RE.finditer(line)]
         month_spans = [match.span() for match in MONTH_ADJ_RE.finditer(line)]
-        for match in YEAR_RE.finditer(line):
-            yspan = match.span()
+        year_matches = list(YEAR_RE.finditer(line))
+        year_spans = [match.span() for match in year_matches]
+        hard_suppressed = _hard_suppressed_years(hard_spans, month_spans, year_spans)
+        for i, match in enumerate(year_matches):
             # Hard copyright/legal marker: a year in its clause is never a
-            # statement period. Drop it whether it abuts the marker directly
-            # ("© 2019", each end of a "© 2019-2024" range) or through a month
-            # name ("© May 2019", "Copyright January 2020").
-            # Known limitation (low, fail-safe): a rare comma-separated multi-year
-            # copyright list ("© 2019, 2020, 2021") can leak a trailing year past
-            # the window; transitive year-run suppression is deliberately not added
-            # for so uncommon a footer. Worst case is a mixed-years review prompt,
-            # never a wrong result -- and copyright *ranges* are fully covered.
-            if _marker_reaches_year(hard_spans, yspan, month_spans):
+            # statement period. Suppressed directly ("© 2019", each end of a
+            # "© 2019-2024" range), through a month ("© May 2019", "Copyright
+            # January 2020"), or transitively down a comma/space-separated year
+            # list ("© 2019, 2020, 2021"). The run stops at the first prose gap, so
+            # a real period year sharing the line (far from the marker) survives.
+            if i in hard_suppressed:
                 continue
             # Dual-use marker ("since"/"established"/...): keep a year that carries
             # a NUMERIC date -- the tail of one ("...since 01.01.2025") or the head
@@ -693,7 +724,7 @@ def detect_years(lines: Iterable[str]) -> list[int]:
                 (match.start() > 0 and line[match.start() - 1] in "./-")
                 or ISO_DATE_TAIL_RE.match(line, match.end()) is not None
             )
-            if not numeric_date and _marker_reaches_year(dual_spans, yspan, month_spans):
+            if not numeric_date and _marker_reaches_year(dual_spans, match.span(), month_spans):
                 continue
             years.add(int(match.group(1)))
     return sorted(years)
@@ -1520,9 +1551,20 @@ def command_self_test(_args: argparse.Namespace) -> int:
             (2019, "© May 2019 Example Bank. All rights reserved."),
             (2020, "Copyright January 2020 Example Bancorp"),
             (2024, "© 2019-2024 Example Bank"),
+            # Round-9 Z4: a comma-separated copyright list is suppressed all the
+            # way down, transitively (2021 is well past the marker window).
+            (2021, "© 2019, 2020, 2021 Example Corporation. All rights reserved."),
         ]:
             if leak in detect_years([line]):
                 failures.append(f"year-hard-copyright: {leak} must stay suppressed in {line!r}")
+        # Round-9 guards: the transitive run must not over-reach. A hard-copyright
+        # year and a real numeric date can share a line ("© 2019 ... since
+        # 2020-01-01" keeps 2020), and a period year survives a distant footer
+        # marker ("January 2025 ... © 2010" keeps 2025).
+        if detect_years(["© 2019 Example Bank -- serving you since 2020-01-01"]) != [2020]:
+            failures.append("year-run-guard: a numeric 'since 2020-01-01' must survive a '© 2019' on the same line")
+        if 2025 not in detect_years(["Statement period January 2025 to January 2025    © 2010 Example"]):
+            failures.append("year-run-guard: a period year must survive a distant '© 2010' footer on the same line")
         if detect_years(["Comparative 2024-2025 summary"]) != [2024, 2025]:
             failures.append("year-range: a bare year range (no marker) must keep both years")
         # F5: a one-token brand ending in "bank" (with banking context on the
@@ -1994,7 +2036,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 42 preflight cases")
+    print("Self-test passed: 43 preflight cases")
     return 0
 
 

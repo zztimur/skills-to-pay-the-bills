@@ -71,7 +71,7 @@ Complete gate catalog:
 | `low-text-pdf` | stop | Machine-readable text is below threshold (scanned/image-only; out of scope for v1). |
 | `duplicate-input` | review | The same statement file (same resolved path) was supplied more than once. |
 | `duplicate-content` | review | Byte-identical statements were supplied under different names. |
-| `mixed-years` | review | A detected statement year falls outside the requested tax year. Copyright/legal years are excluded even with an intervening month or a range (`© 2019`, `© May 2019`, `© 2019-2024`), as are bare or month-only heritage/account-open years (`since 1904`, `Customer since March 2015`); a period year carrying a numeric date (`since 2025-04-01`) is kept. |
+| `mixed-years` | review | A detected statement year falls outside the requested tax year. Copyright/legal years are excluded even with an intervening month, a range, or a comma/space-separated list (`© 2019`, `© May 2019`, `© 2019-2024`, `© 2019, 2020, 2021`), as are bare or month-only heritage/account-open years (`since 1904`, `Customer since March 2015`); a period year carrying a numeric date (`since 2025-04-01`) is kept. |
 | `unknown-year-coverage` | review | No statement year was detected; verify the periods manually. |
 | `ambiguous-dollar` | review | `$` appears with no unambiguous ISO code or currency name. |
 | `unknown-currency` | review | No account currency marker was found. |

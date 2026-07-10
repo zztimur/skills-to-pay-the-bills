@@ -767,6 +767,22 @@ check("R8-3 a 'Foodbank' prose line does not pollute institution hints",
       and "possible-mixed-institutions" not in gates_of(d),
       f"inst={d['institution_hints'] if d else '?'} gates={gates_of(d)}")
 
+# R9-1 (round-9 Z4): a comma-separated multi-year copyright footer is suppressed
+# in full (transitively), so it does not trip a false mixed-years on a clean 2025
+# statement -- the trailing year no longer leaks past the marker window.
+p = make_pdf("copyright-list.pdf", [
+    "Example Bank Monthly Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Currency USD",
+    "Closing balance 1,234.56 USD",
+    "© 2019, 2020, 2021 Example Corporation. All rights reserved.",
+])
+proc, d = run("copyright-list", [str(p)])
+check("R9-1 a '© 2019, 2020, 2021' copyright list does not trip mixed-years",
+      d and "mixed-years" not in gates_of(d) and d["coverage_hints"]["detected_years"] == [2025],
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
+
 # --------------------------------------------------------------------------- #
 # Report
 # --------------------------------------------------------------------------- #
