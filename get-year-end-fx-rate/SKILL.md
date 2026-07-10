@@ -67,7 +67,7 @@ python3 "<package-root>/scripts/get_year_end_fx_rate.py" map-check \
   --strict
 ```
 
-Use `--api-file` with a saved Fiscal Data JSON response when network access is unavailable.
+If `lookup` or `map-check` exits 5, fetch the exact API query URL shown in the error with an available web tool, save the **raw JSON response** locally, then rerun the same command with `--api-file <saved.json>`. Do not substitute a search snippet, screenshot, or manually copied rate. The packet records whether its JSON came from a live API fetch or a supplied local file.
 
 ## Proof Packet
 

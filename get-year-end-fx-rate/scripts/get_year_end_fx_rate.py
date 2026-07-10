@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as _dt
+import hashlib
+import http.client
 import io
 import json
 import re
@@ -361,6 +363,10 @@ def today_iso() -> str:
     return _dt.date.today().isoformat()
 
 
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def treasury_query_url(code: str, year: int, api_url: str) -> str:
     if code not in TREASURY_ROWS_BY_CODE:
         raise RateError(
@@ -415,10 +421,10 @@ def treasury_rows_url(year: int, api_url: str) -> str:
     return api_url + "?" + urlencode(params)
 
 
-def load_json_text(query_url: str, api_file: str | None) -> tuple[str, str]:
+def load_json_text(query_url: str, api_file: str | None) -> tuple[str, str, str]:
     if api_file:
         path = Path(api_file)
-        return path.read_text(encoding="utf-8"), as_abs(path)
+        return path.read_text(encoding="utf-8"), as_abs(path), "supplied local JSON file"
 
     request = Request(
         query_url,
@@ -427,9 +433,12 @@ def load_json_text(query_url: str, api_file: str | None) -> tuple[str, str]:
     try:
         with urlopen(request, timeout=30) as response:
             charset = response.headers.get_content_charset() or "utf-8"
-            return response.read().decode(charset, errors="replace"), query_url
-    except URLError as exc:
-        raise RateError(f"Could not fetch Treasury/Fiscal Data API: {exc}", 5) from exc
+            return response.read().decode(charset, errors="replace"), query_url, "live Treasury/Fiscal Data API fetch"
+    except (URLError, OSError, http.client.HTTPException) as exc:
+        raise RateError(
+            f"Could not fetch Treasury/Fiscal Data API: {exc}. Save the raw JSON response for this exact query and rerun with --api-file: {query_url}",
+            5,
+        ) from exc
 
 
 def parse_json_payload(json_text: str) -> dict[str, object]:
@@ -657,18 +666,20 @@ def create_workpaper(
 def command_lookup(args: argparse.Namespace) -> int:
     code = normalize_currency(args.currency)
     query_url = treasury_query_url(code, args.year, args.api_url)
-    json_text, _source_ref = load_json_text(query_url, args.api_file)
+    json_text, source_ref, snapshot_origin = load_json_text(query_url, args.api_file)
     rate = find_treasury_rate(code, args.year, json_text, query_url)
 
     source_title = "Treasury Reporting Rates of Exchange - Fiscal Data"
     folder = workpaper_folder(args.output_root, code, args.year, source_title)
     folder.mkdir(parents=True, exist_ok=True)
     json_path = folder / "treasury-fiscal-data-response.json"
-    json_path.write_text(rate.source_json, encoding="utf-8")
+    json_bytes = rate.source_json.encode("utf-8")
+    json_path.write_bytes(json_bytes)
 
     note = (
         f"Treasury/Fiscal Data record date {rate.year_end_date}; row {rate.country_currency_desc or rate.country + '-' + rate.currency}; "
-        f"exchange_rate {fmt_decimal(rate.rate)}. API query URL is retained in workpaper.json."
+        f"exchange_rate {fmt_decimal(rate.rate)}. Snapshot origin: {snapshot_origin}; retained API JSON sha256 {sha256_bytes(json_bytes)}. "
+        f"API query URL is retained in workpaper.json."
     )
     if rate.duplicate_rows:
         note += f" Additional rows with the same rate were returned: {rate.duplicate_rows}."
@@ -687,7 +698,13 @@ def command_lookup(args: argparse.Namespace) -> int:
         source_category="Treasury/Fiscal Data year-end reporting rate",
         saved_proofs=[json_path],
         proof_limitations=[],
-        treasury_record={**rate.record, "api_query_url": rate.query_url, "dataset_url": TREASURY_DATASET_URL},
+        treasury_record={
+            **rate.record,
+            "api_query_url": rate.query_url,
+            "dataset_url": TREASURY_DATASET_URL,
+            "snapshot_origin": snapshot_origin,
+            "source_response_reference": source_ref,
+        },
     )
     print(final_text(workpaper))
     return 0
@@ -740,7 +757,7 @@ def command_manual(args: argparse.Namespace) -> int:
 def command_map_check(args: argparse.Namespace) -> int:
     code = normalize_currency(args.currency) if args.currency else None
     query_url = treasury_rows_url(args.year, args.api_url)
-    json_text, source_ref = load_json_text(query_url, args.api_file)
+    json_text, source_ref, _snapshot_origin = load_json_text(query_url, args.api_file)
     records = treasury_records_from_payload(json_text)
     year_end_date = f"{args.year}-12-31"
     rows = [record for record in records if clean_text(record.get("record_date")) == year_end_date]
@@ -865,6 +882,22 @@ def command_self_test(_args: argparse.Namespace) -> int:
         else:
             raise AssertionError(f"average source should fail: {average_source}")
 
+    original_urlopen = urlopen
+    try:
+        def closed_connection(*_args: object, **_kwargs: object) -> object:
+            raise http.client.RemoteDisconnected("Treasury closed the connection")
+
+        globals()["urlopen"] = closed_connection
+        load_json_text(query_url, None)
+    except RateError as exc:
+        assert exc.code == 5
+        assert "--api-file" in str(exc)
+        assert query_url in str(exc)
+    else:
+        raise AssertionError("RemoteDisconnected should become an offline-retry RateError")
+    finally:
+        globals()["urlopen"] = original_urlopen
+
     assert parse_user_rate("3900") == Decimal("3900")
     assert parse_user_rate("3900.00") == Decimal("3900.00")
     assert parse_user_rate("0.00025") == Decimal("0.00025")
@@ -921,6 +954,10 @@ def command_self_test(_args: argparse.Namespace) -> int:
         assert data["year_end_date"] == "2025-12-31"
         assert data["source"]["year_end_confirmed"] is True
         assert data["proof"]["saved_files"][0]["filename"] == "treasury-fiscal-data-response.json"
+        assert "Snapshot origin: supplied local JSON file" in data["source"]["note"]
+        assert sha256_bytes(json_text.encode("utf-8")) in data["source"]["note"]
+        assert data["treasury_record"]["snapshot_origin"] == "supplied local JSON file"
+        assert data["treasury_record"]["source_response_reference"] == str(api_file.resolve())
         assert "average" not in json.dumps(data["source"]).lower()
         # PDF now uses the kit (yearly) engine; assert the generalized layout and
         # that year-end never renders average language.

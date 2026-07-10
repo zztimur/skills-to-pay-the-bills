@@ -43,6 +43,10 @@ It includes:
 - `workpaper.pdf` for printable review.
 - A saved source artifact, usually the Treasury/Fiscal Data API JSON response for lookup runs.
 
+## When Treasury Is Offline
+
+If the lookup exits 5, use the exact API query URL printed in the error, save its raw JSON response, and rerun the same lookup with `--api-file /path/to/response.json`. Do not replace the response with a search snippet, screenshot, or copied number. The resulting workpaper states whether the JSON was fetched live or supplied from a local file and retains its SHA-256.
+
 The JSON is the source of truth for machines. The PDF is for humans. The chat answer links everything because a plain path in chat is technically information and practically annoying.
 
 ## Use It In Codex
