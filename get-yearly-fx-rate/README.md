@@ -100,7 +100,7 @@ python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py manual \
 
 `foreign-per-usd` means `1 USD = <rate> foreign currency`. Use `usd-per-foreign` only when the source is quoted as `1 foreign currency = <rate> USD`.
 
-For non-IRS manual sources, the proof file is required. Save the source page as PDF/HTML, take a screenshot, or download the source data first. The script copies that proof into the workpaper folder and hashes it.
+For non-IRS manual sources, the proof file is required. Save the source page as PDF/HTML, take a screenshot, or download the source data first. A folder, broken link, or missing path is not proof; the command stops before it creates a packet. The script copies a valid proof into the workpaper folder and hashes it.
 
 Pass `--rate` as a plain number with no thousands separators (`4200` or `4200.00`, never `4,200`); an ambiguous value is rejected rather than silently rescaled into a workpaper. For a real ISO 4217 code the skill does not already know (outside the IRS table and its aliases), add `--allow-unknown-code` to confirm it is not a typo.
 
