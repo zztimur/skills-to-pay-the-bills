@@ -20,11 +20,19 @@ except ImportError:  # pragma: no cover - exercised by users without deps.
     pdfplumber = None
 
 
+# Handoff-contract version, distinct from the package version in plugin.json.
+# Downstream skills (fbar-threshold-check, statements-to-interest) pin the set of
+# schema versions they accept, so bump this only on a breaking JSON change and
+# update those consumers in lockstep.
 SCHEMA_VERSION = "1.0"
 MIN_TEXT_CHARS = 40
 MIN_TAX_YEAR = 1970
 MAX_TAX_YEAR = 2100
 SUPPORTED_SCOPES = {"one-account", "one-institution"}
+# Exit code returned for a review-required result only when the caller opts in
+# with --exit-nonzero-on-review; the default exit stays 0 so the agent workflow
+# (which reads the JSON) is unchanged.
+REVIEW_EXIT_CODE = 3
 
 CURRENCY_CODES = {
     "AED",
@@ -707,6 +715,12 @@ def check_output_paths(out_path: Path, csv_path: Path, pdf_paths: list[str]) -> 
             raise PreflightError(f"{label} ({original}) would overwrite an input PDF ({inputs[resolved]}); choose another path.")
 
 
+def review_exit_code(status: str, exit_nonzero_on_review: bool) -> int:
+    if exit_nonzero_on_review and status == "review-required":
+        return REVIEW_EXIT_CODE
+    return 0
+
+
 def command_preflight(args: argparse.Namespace) -> int:
     out_path = Path(args.out)
     csv_path = Path(args.csv) if args.csv else review_csv_path(out_path)
@@ -724,7 +738,7 @@ def command_preflight(args: argparse.Namespace) -> int:
         for gate in gates:
             if isinstance(gate, dict):
                 print(f"- {gate.get('code')}: {gate.get('message')}")
-    return 0
+    return review_exit_code(str(data["status"]), args.exit_nonzero_on_review)
 
 
 def command_dependency_check(_args: argparse.Namespace) -> int:
@@ -752,7 +766,7 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
 
         doc = canvas.Canvas(str(pdf_path))
         doc.drawString(72, 740, "Example Bank Monthly Statement")
-        doc.drawString(72, 720, "Account number 12345678")
+        doc.drawString(72, 720, "Account 12345678")
         doc.drawString(72, 700, "Statement period January 1 2025 to January 31 2025")
         doc.drawString(72, 680, "Currency EUR")
         doc.drawString(72, 660, "Closing balance 100.00 EUR")
@@ -793,7 +807,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             [
                 synthetic_file(
                     "clean.pdf",
-                    "Example Bank\nAccount number 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00",
+                    "Example Bank\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00",
                 )
             ],
             2025,
@@ -809,7 +823,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append(f"clean-account: expected account hint 12345678, got {clean['account_hints']}")
 
         mixed_year = build_preflight(
-            [synthetic_file("mixed-year.pdf", "Example Bank\nAccount number 12345678\nStatement period December 2024 to January 2025\nCurrency USD")],
+            [synthetic_file("mixed-year.pdf", "Example Bank\nAccount 12345678\nStatement period December 2024 to January 2025\nCurrency USD")],
             2025,
             "one-account",
             root / "mixed-year.json",
@@ -819,7 +833,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("mixed-year: expected mixed-years gate")
 
         mixed_currency = build_preflight(
-            [synthetic_file("mixed-currency.pdf", "Example Bank\nAccount number 12345678\nStatement period January 2025\nCurrency USD\nCurrency COP")],
+            [synthetic_file("mixed-currency.pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nCurrency USD\nCurrency COP")],
             2025,
             "one-account",
             root / "mixed-currency.json",
@@ -829,7 +843,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("mixed-currency: expected mixed-currencies gate")
 
         dollar = build_preflight(
-            [synthetic_file("dollar.pdf", "Example Bank\nAccount number 12345678\nStatement period January 2025\nClosing balance $100.00")],
+            [synthetic_file("dollar.pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nClosing balance $100.00")],
             2025,
             "one-account",
             root / "dollar.json",
@@ -845,7 +859,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             [
                 synthetic_file(
                     "marketing.pdf",
-                    "Example Bank\nAccount number 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00 USD\nPLEASE TRY OUR NEW MOBILE APP TODAY",
+                    "Example Bank\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00 USD\nPLEASE TRY OUR NEW MOBILE APP TODAY",
                 )
             ],
             2025,
@@ -862,7 +876,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
 
         # An amount adjacent to a code confirms it even with no 'currency' label.
         adjacency = build_preflight(
-            [synthetic_file("adjacency.pdf", "Example Bank\nAccount number 12345678\nStatement period January 2025\nEnding balance 1,234.56 GBP")],
+            [synthetic_file("adjacency.pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nEnding balance 1,234.56 GBP")],
             2025,
             "one-account",
             root / "adjacency.json",
@@ -872,7 +886,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append(f"adjacency: expected GBP from amount adjacency, got {adjacency['currency']}")
 
         accounts = build_preflight(
-            [synthetic_file("accounts.pdf", "Example Bank\nAccount number 11112222\nAccount number 33334444\nStatement period January 2025\nCurrency USD")],
+            [synthetic_file("accounts.pdf", "Example Bank\nAccount 11112222\nAccount 33334444\nStatement period January 2025\nCurrency USD")],
             2025,
             "one-account",
             root / "accounts.json",
@@ -888,7 +902,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             [
                 synthetic_file(
                     "one-account.pdf",
-                    "Example Bank\nMonthly Account Statement\nAccount Summary\nAccount holder JUAN PEREZ GARCIA\nAccount number 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD",
+                    "Example Bank\nMonthly Account Statement\nAccount Summary\nAccount holder JUAN PEREZ GARCIA\nAccount ID 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD",
                 )
             ],
             2025,
@@ -913,13 +927,13 @@ def command_self_test(_args: argparse.Namespace) -> int:
 
         # Two banks where the first statement is long enough (>80 lines) to have
         # hidden the second bank from the old combined-line scan.
-        long_alpha = "Alpha Bank N.A.\nAccount number 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\n" + "\n".join(
+        long_alpha = "Alpha Bank N.A.\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\n" + "\n".join(
             f"01/{(day % 28) + 1:02d}/2025 card purchase ref {day:04d} 10.00 balance 90.00" for day in range(1, 90)
         )
         mixed_institutions = build_preflight(
             [
                 synthetic_file("alpha.pdf", long_alpha),
-                synthetic_file("beta.pdf", "Beta Banco S.A.\nAccount number 12345678\nStatement period February 1 2025 to February 28 2025\nCurrency USD"),
+                synthetic_file("beta.pdf", "Beta Banco S.A.\nAccount 12345678\nStatement period February 1 2025 to February 28 2025\nCurrency USD"),
             ],
             2025,
             "one-institution",
@@ -932,8 +946,8 @@ def command_self_test(_args: argparse.Namespace) -> int:
         # The same bank across two months must not read as two institutions.
         same_institution = build_preflight(
             [
-                synthetic_file("jan.pdf", "Example Bank Monthly Statement January 2025\nAccount number 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD"),
-                synthetic_file("feb.pdf", "Example Bank Monthly Statement February 2025\nAccount number 12345678\nStatement period February 1 2025 to February 28 2025\nCurrency USD"),
+                synthetic_file("jan.pdf", "Example Bank Monthly Statement January 2025\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD"),
+                synthetic_file("feb.pdf", "Example Bank Monthly Statement February 2025\nAccount 12345678\nStatement period February 1 2025 to February 28 2025\nCurrency USD"),
             ],
             2025,
             "one-institution",
@@ -948,7 +962,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             [
                 synthetic_file(
                     "substring.pdf",
-                    "Example Bank Monthly Statement\nAccount number 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nOtherwise please contact the branch\nWe value your trusted partnership likewise",
+                    "Example Bank Monthly Statement\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nOtherwise please contact the branch\nWe value your trusted partnership likewise",
                 )
             ],
             2025,
@@ -965,7 +979,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         # A fintech header ("Wise Account Statement") must still be recognized as
         # an institution even though the line also says "Statement".
         fintech = build_preflight(
-            [synthetic_file("wise.pdf", "Wise Account Statement\nAccount number 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency EUR\nClosing balance 100.00 EUR")],
+            [synthetic_file("wise.pdf", "Wise Account Statement\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency EUR\nClosing balance 100.00 EUR")],
             2025,
             "one-institution",
             root / "wise.json",
@@ -979,8 +993,8 @@ def command_self_test(_args: argparse.Namespace) -> int:
         # The same statement supplied twice is flagged, not silently double-counted.
         duplicate = build_preflight(
             [
-                synthetic_file("dup.pdf", "Example Bank\nAccount number 12345678\nStatement period January 2025\nCurrency USD"),
-                synthetic_file("dup.pdf", "Example Bank\nAccount number 12345678\nStatement period January 2025\nCurrency USD"),
+                synthetic_file("dup.pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nCurrency USD"),
+                synthetic_file("dup.pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nCurrency USD"),
             ],
             2025,
             "one-account",
@@ -1021,6 +1035,14 @@ def command_self_test(_args: argparse.Namespace) -> int:
         except PreflightError:
             pass
 
+        # Exit code stays 0 by default; opt-in flag makes review-required nonzero.
+        if review_exit_code("review-required", False) != 0:
+            failures.append("exit-code: default must stay 0 on review-required")
+        if review_exit_code("review-required", True) != REVIEW_EXIT_CODE:
+            failures.append(f"exit-code: opt-in must return {REVIEW_EXIT_CODE} on review-required")
+        if review_exit_code("ready-for-domain-extraction", True) != 0:
+            failures.append("exit-code: a ready result must exit 0 even with the opt-in flag")
+
         write_json(root / "clean.json", clean)
         write_review_csv(root / "clean-review.csv", clean)
         if not (root / "clean-review.csv").exists():
@@ -1054,6 +1076,11 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--scope", choices=sorted(SUPPORTED_SCOPES), required=True, help="Expected downstream scope.")
     preflight.add_argument("--out", required=True, help="Output preflight JSON path.")
     preflight.add_argument("--csv", help="Optional review CSV path.")
+    preflight.add_argument(
+        "--exit-nonzero-on-review",
+        action="store_true",
+        help=f"Exit {REVIEW_EXIT_CODE} (instead of 0) when the result is review-required, for scripted callers.",
+    )
     preflight.set_defaults(func=command_preflight)
 
     dependency = subparsers.add_parser("dependency-check", help="Check extraction dependency availability.")
