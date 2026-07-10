@@ -564,6 +564,92 @@ check("SCALE-1 a 61-page statement completes <60s with detectors intact",
       f"elapsed={elapsed:.1f}s pages={d['profile']['total_page_count'] if d else '?'}")
 
 # --------------------------------------------------------------------------- #
+# Round-7 currency corroboration (F1/F2/F3): the wrong-currency flip and its fuel
+# --------------------------------------------------------------------------- #
+
+# CURR-1 (the High): a Swiss-format CHF statement -- trailing-minus debits (the
+# authentic Swiss convention), CHF never glued to an amount, and one routine
+# card-FX disclosure that mentions USD. USD must NOT be handed off as the
+# confirmed currency with no gate. Before the fix the bare "usd" alias flipped
+# code to USD ungated; now USD earns no confirmation and the set fails safe.
+p = make_pdf("swiss.pdf", [
+    "Beispielbank Zurich Kontoauszug",
+    "Konto 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period 01.01.2025 - 31.01.2025",
+    "Alle Betraege in CHF",
+    "Belastung 1'234.56-",
+    "Gutschrift 987.65-",
+    "Hinweis: Kartentransaktionen in USD werden umgerechnet",
+])
+proc, d = run("swiss", [str(p)])
+flipped_ungated = bool(d) and d["currency"]["code"] == "USD" and not any("currenc" in g for g in gates_of(d))
+check("CURR-1 Swiss CHF page + one USD disclosure word never hands off USD ungated",
+      d is not None and not flipped_ungated,
+      f"currency={d['currency'] if d else '?'} gates={gates_of(d)}")
+
+# CURR-2 (no cry-wolf): a clean EUR statement (euro sign) whose only USD mention
+# is a quoted exchange rate. It must stay single-currency EUR with no
+# mixed-currencies gate -- the fix must not trade the flip for a false alarm on
+# every European statement that prints an FX table.
+p = make_pdf("eur-rate.pdf", [
+    "Example Bank Europe Monthly Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Closing balance EUR 1.234,56",
+    "Exchange rate USD/EUR 1.0845 applied to card transactions",
+])
+proc, d = run("eur-rate", [str(p)])
+check("CURR-2 EUR statement quoting a USD/EUR rate stays single-currency EUR (no mixed gate)",
+      d and d["currency"]["code"] == "EUR" and "mixed-currencies" not in gates_of(d),
+      f"currency={d['currency'] if d else '?'} gates={gates_of(d)}")
+
+# CURR-3 (F2 negatives): a statement whose figures are all accounting-negative
+# parens must still confirm its currency from code-adjacency, not degrade to
+# unknown-currency.
+p = make_pdf("neg-paren.pdf", [
+    "Example Bank Monthly Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Service charge (12.34) EUR",
+    "Overdraft interest (1.234,56) EUR",
+])
+proc, d = run("neg-paren", [str(p)])
+check("CURR-3 accounting-negative '(1.234,56) EUR' figures confirm EUR (no unknown-currency)",
+      d and d["currency"]["code"] == "EUR" and "unknown-currency" not in gates_of(d),
+      f"currency={d['currency'] if d else '?'} gates={gates_of(d)}")
+
+# CURR-4 (F3 footnotes): every currency mention carries a superscript footnote
+# marker. The marker is stripped before NFKC, so the code still confirms instead
+# of folding to "USD1" and vanishing.
+p = make_pdf("footnote.pdf", [
+    "Example Bank Monthly Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Currency: USD¹",
+    "Closing balance 1,234.56 USD¹",
+])
+proc, d = run("footnote", [str(p)])
+check("CURR-4 footnoted 'USD¹' mentions confirm USD (no unknown-currency)",
+      d and d["currency"]["code"] == "USD" and "unknown-currency" not in gates_of(d),
+      f"currency={d['currency'] if d else '?'} gates={gates_of(d)}")
+
+# CURR-5 (F1b label path): a statement that names its currency only with the
+# German label "Währung" and never glues CHF to an amount. The label alone must
+# confirm the code (amount-adjacency cannot, by construction).
+p = make_pdf("de-label.pdf", [
+    "Example Bank Monthly Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Währung CHF",
+    "Saldo 1'234.56",
+    "Belastung 500.00-",
+])
+proc, d = run("de-label", [str(p)])
+check("CURR-5 German label 'Währung CHF' confirms CHF with no amount-adjacency",
+      d and d["currency"]["code"] == "CHF",
+      f"currency={d['currency'] if d else '?'} gates={gates_of(d)}")
+
+# --------------------------------------------------------------------------- #
 # Report
 # --------------------------------------------------------------------------- #
 

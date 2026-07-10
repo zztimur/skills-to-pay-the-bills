@@ -98,7 +98,13 @@ CURRENCY_ALIASES = {
     "us dollar": "USD",
     "u.s. dollar": "USD",
     "united states dollar": "USD",
-    "usd": "USD",
+    # NOTE: no bare "usd" entry. A three-letter code alias would substring-match
+    # anywhere ("BUSD-STAKE", a card-FX disclosure line) and confirm USD with no
+    # corroboration -- the one code that could then out-vote a genuinely
+    # corroborated foreign code and hand off the wrong currency ungated. USD must
+    # earn confirmation like every other code: via the "$"/"US$" symbol rules, a
+    # currency-label word, or adjacency to an amount. Multi-word names above are
+    # self-corroborating (you do not write "us dollar" incidentally) and stay.
 }
 
 # Explicit designation word ("Account Number", "A/C No.", "Cuenta Nro."):
@@ -371,7 +377,12 @@ NUMERIC_PERIOD_RE = re.compile(
 # an amount. This keeps all-caps prose ("PLEASE TRY OUR APP") and merchant names
 # out of the confirmed set while still surfacing them as weak candidates.
 CURRENCY_LABEL_RE = re.compile(
-    r"\b(?:currenc(?:y|ies)|monedas?|divisas?|denominat(?:ed|ion)|iso\s*4217)\b",
+    # English/Spanish plus German (Währung, umlaut-stripped Wahrung), French
+    # (devise), and Italian/Dutch/Nordic (valuta) -- so a European statement that
+    # only labels its currency in its own language ("Währung: CHF") can still
+    # confirm the code instead of leaving it a weak, unconfirmed candidate.
+    r"\b(?:currenc(?:y|ies)|monedas?|divisas?|w[aä]hrung|devise|valuta|"
+    r"denominat(?:ed|ion)|iso\s*4217)\b",
     re.I,
 )
 # A currency label only confirms a code within this many characters of it, so
@@ -403,6 +414,13 @@ _AMOUNT = (
     r"|\d+[.,]\d{2}"
     r"|\d{5,}"
     r")"
+    # An optional trailing close-paren (accounting negative "(1,234.56) USD") or
+    # trailing minus (European debit "1.234,56- EUR", ASCII '-' or U+2212). This
+    # sign sits BETWEEN the figure and the code; without consuming it the code
+    # would lose amount-adjacency and drop to a weak, unconfirmed candidate on
+    # every negative line. Optional and glued, so it only extends a figure that
+    # already matched -- "(see note 5)" and a range "2020-2024" are not amounts.
+    r"[)\-−]?"
 )
 CURRENCY_AMOUNT_RE = re.compile(
     # No word boundary between the code and the amount, so a glued "EUR1.234,56"
@@ -410,6 +428,12 @@ CURRENCY_AMOUNT_RE = re.compile(
     rf"\b(?P<pre>{_CURRENCY_CODE_ALT})\s*{_AMOUNT}"
     rf"|{_AMOUNT}\s*(?P<post>{_CURRENCY_CODE_ALT})\b"
 )
+
+# Unicode superscript (¹²³⁰⁴-⁹) and subscript (₀-₉) digits -- footnote/reference
+# markers a PDF text layer emits. Stripped at ingestion by clean_line before
+# NFKC would fold them into ordinary digits. Note ¹²³ live at U+00B9/B2/B3, apart
+# from the U+2070 block, and U+2071-2073 are not digits, so the ranges are split.
+FOOTNOTE_DIGIT_RE = re.compile(r"[²³¹⁰⁴-⁹₀-₉]")
 
 
 class PreflightError(Exception):
@@ -419,6 +443,14 @@ class PreflightError(Exception):
 
 
 def clean_line(value: str) -> str:
+    # Drop superscript/subscript footnote markers BEFORE NFKC. On a statement a
+    # "³" after a figure or code is a reference pointer ("Closing balance 100.00
+    # EUR³", "see note²"), never data -- but NFKC would fold it to an ordinary
+    # "3", both destroying the word boundary a currency code needs ("EUR³" ->
+    # "EUR3", no longer matchable) and fabricating a digit inside what reads as an
+    # amount. Stripping must happen here, while the mark is still a superscript
+    # and distinguishable from a real digit; after NFKC it is too late.
+    value = FOOTNOTE_DIGIT_RE.sub("", value)
     # NFKC at ingestion folds compatibility characters that a PDF text layer
     # routinely emits -- ligatures ("ﬁnancial" -> "financial"), full-width
     # digits, the numero sign -- so detectors see canonical ASCII-ish text
@@ -1323,6 +1355,41 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if detect_currency(["Ending balance EUR1.234,56"])["code"] != "EUR":
             failures.append("currency-glued: a code glued to its amount (EUR1.234,56) must confirm")
 
+        # --- Round-7 currency hardening (F1/F2/F3) ---
+        # F1a: USD has no bare substring alias, so it can no longer confirm out of
+        # thin air. A 'BUSD-STAKE' token (or any incidental "usd" substring) must
+        # NOT become a confirmed currency; USD still confirms via label or amount.
+        if "USD" in detect_currency(["Reference BUSD-STAKE-2210"])["candidates"]:  # type: ignore[index]
+            failures.append("currency-usd-alias: a 'usd' substring must not confirm USD")
+        if detect_currency(["Currency USD"])["code"] != "USD":  # type: ignore[index]
+            failures.append("currency-usd-label: a labeled 'Currency USD' must still confirm")
+        if detect_currency(["Closing balance 100.00 USD"])["code"] != "USD":  # type: ignore[index]
+            failures.append("currency-usd-amount: 'USD' beside an amount must still confirm")
+        # F1b: German/French currency labels confirm the code beside them, so a
+        # European statement labeled only in its own language is not left unknown.
+        if detect_currency([clean_line("Währung: CHF")])["code"] != "CHF":  # type: ignore[index]
+            failures.append("currency-label-de: 'Währung: CHF' must confirm CHF")
+        if detect_currency(["Devise: EUR"])["code"] != "EUR":  # type: ignore[index]
+            failures.append("currency-label-fr: 'Devise: EUR' must confirm EUR")
+        # F2: a negative amount keeps code-adjacency -- accounting parens and the
+        # European trailing minus both sit between figure and code.
+        if detect_currency(["Service charge (1.234,56) EUR"])["code"] != "EUR":  # type: ignore[index]
+            failures.append("currency-neg-paren: '(1.234,56) EUR' must confirm EUR")
+        if detect_currency(["Fee 1.234,56- EUR"])["code"] != "EUR":  # type: ignore[index]
+            failures.append("currency-neg-minus: '1.234,56- EUR' must confirm EUR")
+        # F2 guard: the trailing sign only extends a real figure. A bare "5)" or a
+        # year range "2020-2024" is not an amount, so it must not confirm a code.
+        if "USD" in detect_currency(["(see note 5) USD"])["candidates"]:  # type: ignore[index]
+            failures.append("currency-neg-guard: '(see note 5)' must not confirm USD")
+        if "EUR" in detect_currency(["Period 2020-2024 EUR"])["candidates"]:  # type: ignore[index]
+            failures.append("currency-neg-guard: a year range must not confirm EUR")
+        # F3: a footnote superscript on a code is stripped before NFKC, so "EUR¹"
+        # stays "EUR" (not "EUR1") and still confirms beside its amount.
+        if not clean_line("Closing balance 100.00 EUR¹").endswith("EUR"):
+            failures.append("currency-footnote: a superscript marker must be stripped from a code")
+        if detect_currency([clean_line("Closing balance 1.234,56 EUR¹")])["code"] != "EUR":  # type: ignore[index]
+            failures.append("currency-footnote: a footnoted 'EUR¹' beside an amount must confirm EUR")
+
         accounts = build_preflight(
             [synthetic_file("accounts.pdf", "Example Bank\nAccount 11112222\nAccount 33334444\nStatement period January 2025\nCurrency USD")],
             2025,
@@ -1747,7 +1814,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 33 preflight cases")
+    print("Self-test passed: 36 preflight cases")
     return 0
 
 
