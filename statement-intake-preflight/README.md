@@ -111,7 +111,7 @@ The skill should stop or ask for review when:
 - a file is missing or is not a PDF;
 - a `.pdf` file cannot actually be read as a PDF;
 - the PDF has little or no machine-readable text;
-- the same statement PDF is handed in more than once;
+- the same statement PDF is handed in more than once, even under a different name;
 - statement years do not line up with the requested year;
 - `$` appears without enough context to know the currency;
 - multiple currencies appear in one supposed currency bucket;

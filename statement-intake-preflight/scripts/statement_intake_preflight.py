@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import re
 import sys
@@ -333,6 +334,19 @@ BOILERPLATE_YEAR_MARKER_RE = re.compile(
 )
 YEAR_CONTEXT_WINDOW = 8
 
+# Two numeric dates (dd.mm.yyyy, dd/mm/yyyy, yyyy-mm-dd) joined by a range
+# connector, so a statement that prints its period numerically ("01.01.2025 -
+# 31.01.2025", "01/01/2025 al 31/01/2025") is recognized as a period even with
+# no month name or period word. The dash connector allows no surrounding space;
+# the alphabetic connectors ("to", "al", "bis", "hasta", "through") require it,
+# so a lone hyphen elsewhere cannot bridge two unrelated numbers.
+NUMERIC_PERIOD_RE = re.compile(
+    r"\d{1,4}[./-]\d{1,2}[./-]\d{1,4}"
+    r"(?:\s*[-–—]\s*|\s+(?:to|al?|bis|hasta|through)\s+)"
+    r"\d{1,4}[./-]\d{1,2}[./-]\d{1,4}",
+    re.I,
+)
+
 # A three-letter ISO token is only trusted as a currency when it is corroborated:
 # either its line carries a currency-label word, or the code sits directly beside
 # an amount. This keeps all-caps prose ("PLEASE TRY OUR APP") and merchant names
@@ -345,18 +359,27 @@ CURRENCY_LABEL_RE = re.compile(
 # "Currency: COP" confirms COP but "currency conversion fees ... in COP and MXN"
 # (disclosure boilerplate) does not.
 CURRENCY_LABEL_WINDOW = 16
-# "US$" / "U$S" / "US $" -> USD (standard Latin-American notation), so a dollar
-# sign written that way is resolved rather than flagged ambiguous.
-US_DOLLAR_RE = re.compile(r"\bUS ?\$|\bU\$S\b", re.I)
+# A currency symbol glued to a country/currency prefix resolves an otherwise
+# ambiguous sign: "US$"/"U$S"/"US $" -> USD, "R$" -> BRL (Brazil), "S/." or "S/"
+# -> PEN (Peru). Each requires the disambiguating prefix, so a bare "$" is still
+# flagged ambiguous. The sol pattern requires a following digit so "S/N" (sin
+# número) or a stray slash cannot resolve to a currency.
+SYMBOL_CURRENCY_RULES = (
+    (re.compile(r"\bUS ?\$|\bU\$S\b", re.I), "USD", "US$"),
+    (re.compile(r"\bR\$", re.I), "BRL", "R$"),
+    (re.compile(r"\bS/\.?(?=\s*\d)", re.I), "PEN", "S/"),
+)
 _CURRENCY_CODE_ALT = "|".join(sorted(CURRENCY_CODES))
 # An "amount" must look monetary, not just be a digit run: a currency symbol, a
 # decimal-cents figure, a thousands-grouped figure, or a long (>=5 digit) number.
 # A bare 1-4 digit integer no longer counts, so a year ("2025 TRY") or a clock
-# fragment ("TRY 24/7") can no longer corroborate a currency code.
+# fragment ("TRY 24/7") can no longer corroborate a currency code. Thousands
+# separators include the Swiss apostrophe (ASCII ' and U+2019) so "1'234.56"
+# reads as an amount.
 _AMOUNT = (
     r"[-+(]?\s*(?:"
-    r"[$€£¥]\s?\d[\d.,]*"
-    r"|\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?"
+    r"[$€£¥]\s?\d[\d.,'’]*"
+    r"|\d{1,3}(?:[.,'’]\d{3})+(?:[.,]\d{1,2})?"
     r"|\d+[.,]\d{2}"
     r"|\d{5,}"
     r")"
@@ -447,8 +470,30 @@ def load_pdf_files(paths: list[str]) -> list[dict[str, object]]:
         except Exception as exc:  # pragma: no cover - depends on malformed PDF internals.
             warnings.append(f"{path.name} could not be read as a PDF: {exc}")
             read_failed = True
-        files.append(file_profile(path, pages, warnings, is_pdf=True, text_layer_expected=not read_failed))
+        files.append(
+            file_profile(
+                path, pages, warnings, is_pdf=True, text_layer_expected=not read_failed,
+                content_sha256=file_sha256(path),
+            )
+        )
     return files
+
+
+def file_sha256(path: Path) -> str | None:
+    """SHA-256 of a file's bytes, or None if it cannot be read.
+
+    Two statements with different names but identical bytes -- the classic
+    duplicated download -- share a digest even though their paths differ, which
+    path-based duplicate detection alone cannot see.
+    """
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:  # pragma: no cover - unreadable file already warned elsewhere.
+        return None
 
 
 def file_profile(
@@ -457,6 +502,7 @@ def file_profile(
     warnings: list[str],
     is_pdf: bool,
     text_layer_expected: bool = True,
+    content_sha256: str | None = None,
 ) -> dict[str, object]:
     text = "\n".join(str(page.get("text", "")) for page in pages)
     lines = split_lines(text)
@@ -469,6 +515,7 @@ def file_profile(
         "is_pdf": is_pdf,
         "page_count": len(pages),
         "character_count": char_count,
+        "content_sha256": content_sha256,
         "lines": lines,
         "warnings": stable_unique(warnings),
     }
@@ -504,7 +551,7 @@ def detect_periods(lines: Iterable[str]) -> list[str]:
         has_period_term = any(term in low for term in ("period", "periodo", "from", "to", "desde", "hasta", "statement date"))
         has_month = any(month in low for month in MONTH_NAMES)
         has_year = bool(YEAR_RE.search(line))
-        if (has_period_term and has_year) or (has_month and has_year):
+        if (has_period_term and has_year) or (has_month and has_year) or NUMERIC_PERIOD_RE.search(line):
             periods.append(line)
     return stable_unique(periods, limit=20)
 
@@ -742,9 +789,10 @@ def detect_currency(lines: Iterable[str]) -> dict[str, object]:
         if alias in low:
             confirmed.append(code)
             alias_evidence.append(alias)
-    if US_DOLLAR_RE.search(joined):
-        confirmed.append("USD")
-        symbol_markers.add("US$")
+    for pattern, code, marker in SYMBOL_CURRENCY_RULES:
+        if pattern.search(joined):
+            confirmed.append(code)
+            symbol_markers.add(marker)
     if "$" in joined:
         symbol_markers.add("$")
     for symbol, code in (("€", "EUR"), ("£", "GBP"), ("¥", "JPY")):
@@ -810,6 +858,7 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
                 "is_pdf": item.get("is_pdf"),
                 "page_count": item.get("page_count"),
                 "character_count": item.get("character_count"),
+                "content_sha256": item.get("content_sha256"),
                 "detected_years": years,
                 "detected_periods": detect_periods(lines),
                 "statement_titles": detect_statement_titles(lines),
@@ -828,6 +877,23 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
         message = f"The same statement file was supplied more than once: {', '.join(Path(path).name for path in duplicate_inputs)}."
         warnings.append(message)
         add_gate(gates, "duplicate-input", message)
+
+    # Byte-identical files supplied under different names (a re-downloaded
+    # statement) share a content digest even though their paths differ, which
+    # the path check above cannot see. Only flag when the matching digest spans
+    # more than one distinct path, so a same-path repeat stays a duplicate-input.
+    content_groups: dict[str, list[dict[str, object]]] = {}
+    for item in statement_files:
+        digest = item.get("content_sha256")
+        if digest:
+            content_groups.setdefault(str(digest), []).append(item)
+    for group in content_groups.values():
+        distinct_paths = {str(entry.get("resolved_file") or entry.get("file")) for entry in group}
+        if len(distinct_paths) > 1:
+            names = sorted({Path(str(entry.get("file"))).name for entry in group})
+            message = f"Byte-identical statements were supplied under different names: {', '.join(names)}."
+            warnings.append(message)
+            add_gate(gates, "duplicate-content", message)
 
     detected_years = sorted({year for item in statement_files for year in item.get("detected_years", [])})
     outside_years = [year for year in detected_years if year != tax_year]
@@ -1521,6 +1587,43 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if not any(gate.get("code") == "duplicate-input" for gate in duplicate["review_gates"]):  # type: ignore[index]
             failures.append("duplicate: expected duplicate-input gate")
 
+        # A byte-for-byte copy under a different name shares a content digest and
+        # trips duplicate-content, which the path check alone cannot see.
+        probe = root / "hashme.bin"
+        probe.write_bytes(b"example statement bytes")
+        if file_sha256(probe) != hashlib.sha256(b"example statement bytes").hexdigest():
+            failures.append("file-sha256: digest must match hashlib over the same bytes")
+        if file_sha256(root / "does-not-exist.bin") is not None:
+            failures.append("file-sha256: an unreadable path must return None")
+        copy_a = synthetic_file("download.pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nCurrency USD")
+        copy_b = synthetic_file("download (1).pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nCurrency USD")
+        copy_a["content_sha256"] = copy_b["content_sha256"] = "0" * 64
+        content_dup = build_preflight(
+            [copy_a, copy_b], 2025, "one-account", root / "cdup.json", root / "cdup-review.csv"
+        )
+        if not any(gate.get("code") == "duplicate-content" for gate in content_dup["review_gates"]):  # type: ignore[index]
+            failures.append("duplicate-content: byte-identical files under different names must gate")
+
+        # Swiss apostrophe grouping ("CHF 1'234.56") reads as a monetary amount.
+        if detect_currency(["Saldo CHF 1'234.56"])["code"] != "CHF":
+            failures.append("currency-swiss: \"CHF 1'234.56\" must confirm CHF")
+        # Prefixed dollar/sol notations resolve the ambiguous sign.
+        brl = detect_currency(["Saldo final R$ 1.234,56"])
+        if brl["code"] != "BRL" or brl["ambiguous_dollar"]:  # type: ignore[index]
+            failures.append(f"currency-brl: 'R$' must resolve to BRL, got {brl}")
+        if detect_currency(["Saldo S/. 1,234.56"])["code"] != "PEN":
+            failures.append("currency-pen: 'S/.' must resolve to PEN")
+        if detect_currency(["Closing balance 100.00 USD"])["code"] != "USD":
+            failures.append("currency-pen: a plain statement must not spuriously resolve to PEN")
+
+        # A numeric-only period range is detected even with no month or period word.
+        if not detect_periods(["Kontoauszug 01.01.2025 - 31.01.2025"]):
+            failures.append("numeric-period: a dd.mm.yyyy range must be detected as a period")
+        if not detect_periods(["01/01/2025 al 31/01/2025"]):
+            failures.append("numeric-period: a dd/mm/yyyy 'al' range must be detected as a period")
+        if detect_periods(["Ref 12/34 amount 56.00"]):
+            failures.append("numeric-period: a lone fraction-like token must not read as a period range")
+
         # CSV cells that begin with a formula lead are neutralized.
         if csv_safe("=HYPERLINK(\"http://x\")") != "'=HYPERLINK(\"http://x\")":
             failures.append("csv_safe: expected leading '=' to be quoted")
@@ -1579,7 +1682,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 26 preflight cases")
+    print("Self-test passed: 30 preflight cases")
     return 0
 
 
