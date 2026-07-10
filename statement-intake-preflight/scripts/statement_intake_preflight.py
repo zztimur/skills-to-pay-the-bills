@@ -279,6 +279,22 @@ INSTITUTION_LEGAL_SUFFIXES = {
 YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 ISO_CURRENCY_RE = re.compile(r"\b[A-Z]{3}\b")
 
+# A 4-digit year printed next to one of these markers describes the institution
+# or the document, not the statement period: a copyright/legal footer ("© 2019",
+# "(c) 2019 ... All rights reserved") or a heritage/membership tagline ("since
+# 1904", "Established 1852", "Member FDIC since 1933"). Almost every real
+# statement carries a copyright footer whose year rarely equals the tax year, so
+# a year within YEAR_CONTEXT_WINDOW characters of a marker is dropped from year
+# coverage; otherwise that footer alone would force an otherwise-clean statement
+# into the mixed-years review gate. Kept tight (word-boundaried markers, small
+# window) so a genuine period year on the same line is never suppressed.
+BOILERPLATE_YEAR_MARKER_RE = re.compile(
+    r"©|\(c\)|copyright|all rights reserved|\bsince\b|\bestablished\b|\best\.|"
+    r"\bfounded\b|member\s+(?:fdic|sipc)",
+    re.I,
+)
+YEAR_CONTEXT_WINDOW = 8
+
 # A three-letter ISO token is only trusted as a currency when it is corroborated:
 # either its line carries a currency-label word, or the code sits directly beside
 # an amount. This keeps all-caps prose ("PLEASE TRY OUR APP") and merchant names
@@ -411,7 +427,13 @@ def file_profile(
 def detect_years(lines: Iterable[str]) -> list[int]:
     years: set[int] = set()
     for line in lines:
+        marker_spans = [match.span() for match in BOILERPLATE_YEAR_MARKER_RE.finditer(line)]
         for match in YEAR_RE.finditer(line):
+            # A copyright/heritage year sits within a few characters of its
+            # marker ("© 2019", "since 1904"); drop it so it cannot masquerade
+            # as a statement-period year and trip the mixed-years gate.
+            if any(_span_gap(span, match.span()) <= YEAR_CONTEXT_WINDOW for span in marker_spans):
+                continue
             years.add(int(match.group(1)))
     return sorted(years)
 
@@ -487,8 +509,77 @@ def iban_token(raw: str) -> str | None:
     return None
 
 
+def _account_compact(hint: str) -> str:
+    """Separator-free uppercase form of an account/IBAN hint, for comparison."""
+    return re.sub(r"[ .\-]", "", hint).upper()
+
+
+def _account_trailing_digits(compact: str) -> str:
+    match = re.search(r"\d+$", compact)
+    return match.group(0) if match else ""
+
+
+def _same_account(a: str, a_partial: bool, b: str, b_partial: bool) -> bool:
+    """Whether two compacted hints denote the same account.
+
+    Separator-free equality always counts, so a spaced header and a compact
+    footer with the same digits, or a grouped IBAN and its compact spelling,
+    collapse to one account. Beyond exact equality, only a *partial* hint -- one
+    that is masked ("****6666") or an "ending in" suffix -- may absorb into
+    another by matching trailing digits, so two distinct full numbers never
+    merge on a shared tail (that stays a real possible-mixed-accounts signal).
+    """
+    if a == b:
+        return True
+    if not (a_partial or b_partial):
+        return False
+    ta, tb = _account_trailing_digits(a), _account_trailing_digits(b)
+    if len(ta) < 3 or len(tb) < 3:
+        return False
+    return ta.endswith(tb) or tb.endswith(ta)
+
+
+def _dedupe_accounts(raw: list[tuple[str, str, bool]], limit: int = 20) -> list[str]:
+    """Collapse hints that are the same account printed in different forms.
+
+    Each raw entry is (display, compact, is_partial). Full (non-partial) hints
+    are considered first so partial hints attach to them and the fuller spelling
+    wins as the display form. Conservative by construction: genuinely different
+    full account numbers stay separate and still trip possible-mixed-accounts.
+    """
+    ordered = [item for item in raw if not item[2]] + [item for item in raw if item[2]]
+    kept: list[tuple[str, str, bool]] = []
+    for display, compact, partial in ordered:
+        if not compact:
+            continue
+        merged = False
+        for index, (_kept_display, kept_compact, kept_partial) in enumerate(kept):
+            if _same_account(compact, partial, kept_compact, kept_partial):
+                # Prefer the fuller spelling: a masked/suffix hint yields to a
+                # full number once one is seen for the same account.
+                if kept_partial and not partial:
+                    kept[index] = (display, compact, partial)
+                merged = True
+                break
+        if not merged:
+            kept.append((display, compact, partial))
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for display, _compact, _partial in kept:
+        cleaned = clean_line(display)
+        key = cleaned.casefold()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        out.append(cleaned)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def detect_account_hints(lines: Iterable[str]) -> list[str]:
-    hints: list[str] = []
+    raw: list[tuple[str, str, bool]] = []
     for line in lines:
         if COUNTERPARTY_RE.search(line):
             # A transfer/counterparty line names the other party's account or
@@ -501,14 +592,18 @@ def detect_account_hints(lines: Iterable[str]) -> list[str]:
                 for part in _ACCOUNT_SEP_RE.split(match.group(1)):
                     token = account_token(part)
                     if token:
-                        hints.append(token)
+                        compact = _account_compact(token)
+                        # A masked token ("****6666") only pins a suffix.
+                        raw.append((token, compact, "*" in compact or "X" in compact))
         for match in ACCOUNT_IBAN_RE.finditer(line):
             token = iban_token(match.group(1))
             if token:
-                hints.append(token)
+                raw.append((token, _account_compact(token), False))
         for match in ACCOUNT_ENDING_RE.finditer(line):
-            hints.append(clean_line(match.group(1)))
-    return stable_unique(hints, limit=20)
+            fragment = clean_line(match.group(1))
+            # An "ending in N" fragment is inherently a partial (suffix) hint.
+            raw.append((fragment, _account_compact(fragment), True))
+    return _dedupe_accounts(raw)
 
 
 def detect_institution_hints(lines: Iterable[str]) -> list[str]:
@@ -1277,6 +1372,67 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if detect_account_hints(["Cuenta Nros. 11112222 y 33334444"]) != ["11112222", "33334444"]:
             failures.append("plural-label: a plural label joined by a conjunction must yield every account")
 
+        # One account printed in several forms is one account, not a mixed set:
+        # spaced header vs compact footer, masked header vs "ending in" footer,
+        # and a grouped IBAN under a label vs its compact spelling under IBAN.
+        # Two genuinely different full numbers must still surface as two.
+        account_alias_forms = {
+            "spaced+compact": (["Account No. 5555 6666", "questions about account 55556666"], ["5555 6666"]),  # privacy-gate: allow (synthetic account fixture)
+            "masked+ending": (["Account No. ****6666", "your account ending in 6666"], ["****6666"]),  # privacy-gate: allow (synthetic account fixture)
+            "iban-label+keyword": (
+                ["Account No: DE89 3704 0044 0532 0130 00", "IBAN: DE89370400440532013000"],  # privacy-gate: allow (synthetic IBAN)
+                ["DE89 3704 0044 0532 0130 00"],
+            ),
+        }
+        for label, (alias_lines, expected) in account_alias_forms.items():
+            got = detect_account_hints(alias_lines)
+            if got != expected:
+                failures.append(f"account-alias {label}: expected {expected}, got {got}")
+        if _same_account("55556666", False, "12346666", False):
+            failures.append("account-alias: two distinct full numbers sharing a suffix must not merge")
+        if not _same_account("****6666", True, "6666", True):
+            failures.append("account-alias: a masked token and its 'ending in' suffix must merge")
+
+        aliased = build_preflight(
+            [
+                synthetic_file(
+                    "aliased.pdf",
+                    "Example Bank Monthly Statement\nAccount No. 5555 6666\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nQuestions about account 55556666 call us anytime",
+                )
+            ],
+            2025,
+            "one-account",
+            root / "aliased.json",
+            root / "aliased-review.csv",
+        )
+        if any(gate.get("code") == "possible-mixed-accounts" for gate in aliased["review_gates"]):  # type: ignore[index]
+            failures.append("account-alias: one account in two printed forms must not trip possible-mixed-accounts")
+
+        # A copyright footer or heritage tagline year describes the institution,
+        # not the period; it must not trip mixed-years on an otherwise-clean file.
+        if detect_years(["(c) 2019 Example Bancorp. All rights reserved."]) != []:
+            failures.append("boilerplate-year: a copyright footer year must not count as a statement year")
+        if detect_years(["Serving customers since 1904"]) != []:
+            failures.append("boilerplate-year: a heritage 'since 1904' year must not count as a statement year")
+        if detect_years(["Statement period January 1 2025 to January 31 2025"]) != [2025]:
+            failures.append("boilerplate-year: a real period year must still be detected")
+        boilerplate = build_preflight(
+            [
+                synthetic_file(
+                    "boilerplate.pdf",
+                    "Example Bank Monthly Statement\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 1,234.56 USD\n(c) 2019 Example Bancorp. All rights reserved. Member FDIC.",
+                )
+            ],
+            2025,
+            "one-account",
+            root / "boilerplate.json",
+            root / "boilerplate-review.csv",
+        )
+        if any(gate.get("code") == "mixed-years" for gate in boilerplate["review_gates"]):  # type: ignore[index]
+            failures.append("boilerplate-year: a copyright-footer year must not trip mixed-years")
+        if boilerplate["status"] != "ready-for-domain-extraction":  # type: ignore[index]
+            failures.append(f"boilerplate-year: a clean statement with a footer year must stay ready, got {boilerplate['status']}")
+
         # The same statement supplied twice is flagged, not silently double-counted.
         duplicate = build_preflight(
             [
@@ -1349,7 +1505,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 22 preflight cases")
+    print("Self-test passed: 24 preflight cases")
     return 0
 
 
