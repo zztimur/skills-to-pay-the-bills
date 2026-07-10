@@ -12,12 +12,42 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PACKAGE_ROOT / "scripts"))
 
 import get_year_end_fx_rate as fx  # noqa: E402
+
+
+def run_main(arguments: list[str]) -> tuple[int, str, str]:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        code = fx.main(arguments)
+    return code, stdout.getvalue(), stderr.getvalue()
+
+
+def assert_local_json_error(api_file: Path, output_root: Path) -> None:
+    code, stdout, stderr = run_main(
+        [
+            "lookup",
+            "--currency",
+            "THB",
+            "--year",
+            "2025",
+            "--api-file",
+            str(api_file),
+            "--output-root",
+            str(output_root),
+        ]
+    )
+    assert code == 2, (code, stdout, stderr)
+    assert "Could not read supplied local JSON file" in stderr
+    assert str(api_file.resolve()) in stderr
+    assert "Traceback" not in stderr
+    assert not output_root.exists()
 
 
 def main() -> None:
@@ -41,6 +71,21 @@ def main() -> None:
         fx.urlopen = original_urlopen
 
     with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        missing_file = root / "missing.json"
+        assert_local_json_error(missing_file, root / "missing-proof")
+
+        directory_file = root / "directory.json"
+        directory_file.mkdir()
+        assert_local_json_error(directory_file, root / "directory-proof")
+
+        invalid_utf8_file = root / "invalid-utf8.json"
+        invalid_utf8_file.write_bytes(b"\xff")
+        assert_local_json_error(invalid_utf8_file, root / "invalid-utf8-proof")
+
+        with patch.object(Path, "read_text", side_effect=PermissionError("permission denied")):
+            assert_local_json_error(fixture, root / "permission-proof")
+
         output_root = Path(tmp) / "proof"
         args = argparse.Namespace(
             currency="THB",
