@@ -196,6 +196,21 @@ INSTITUTION_NOISE = {
 YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 ISO_CURRENCY_RE = re.compile(r"\b[A-Z]{3}\b")
 
+# A three-letter ISO token is only trusted as a currency when it is corroborated:
+# either its line carries a currency-label word, or the code sits directly beside
+# an amount. This keeps all-caps prose ("PLEASE TRY OUR APP") and merchant names
+# out of the confirmed set while still surfacing them as weak candidates.
+CURRENCY_LABEL_RE = re.compile(
+    r"\b(?:currenc(?:y|ies)|monedas?|divisas?|denominat(?:ed|ion)|iso\s*4217)\b",
+    re.I,
+)
+_CURRENCY_CODE_ALT = "|".join(sorted(CURRENCY_CODES))
+_AMOUNT = r"[-+(]?\s*[$€£¥]?\s*\d[\d.,]*"
+CURRENCY_AMOUNT_RE = re.compile(
+    rf"\b(?P<pre>{_CURRENCY_CODE_ALT})\b\s*{_AMOUNT}"
+    rf"|{_AMOUNT}\s*\b(?P<post>{_CURRENCY_CODE_ALT})\b"
+)
+
 
 class PreflightError(Exception):
     def __init__(self, message: str, exit_code: int = 2) -> None:
@@ -382,38 +397,56 @@ def institution_signature(hint: str) -> str:
 
 
 def detect_currency(lines: Iterable[str]) -> dict[str, object]:
-    codes: list[str] = []
+    lines = list(lines)
+    joined = "\n".join(lines)
+    confirmed: list[str] = []
+    weak: list[str] = []
     symbol_markers: set[str] = set()
     alias_evidence: list[str] = []
-    joined = "\n".join(lines)
-    for match in ISO_CURRENCY_RE.finditer(joined):
-        token = match.group(0).upper()
-        if token in CURRENCY_CODES:
-            codes.append(token)
+
+    for line in lines:
+        has_label = bool(CURRENCY_LABEL_RE.search(line))
+        adjacent = {
+            (match.group("pre") or match.group("post")).upper()
+            for match in CURRENCY_AMOUNT_RE.finditer(line)
+            if (match.group("pre") or match.group("post"))
+        }
+        for match in ISO_CURRENCY_RE.finditer(line):
+            token = match.group(0).upper()
+            if token not in CURRENCY_CODES:
+                continue
+            if has_label or token in adjacent:
+                confirmed.append(token)
+            else:
+                weak.append(token)
+
     low = joined.casefold()
     for alias, code in CURRENCY_ALIASES.items():
         if alias in low:
-            codes.append(code)
+            confirmed.append(code)
             alias_evidence.append(alias)
     if "$" in joined:
         symbol_markers.add("$")
-    for symbol, code in (("\\u20ac", "EUR"), ("\\u00a3", "GBP"), ("\\u00a5", "JPY")):
-        if symbol.encode("utf-8").decode("unicode_escape") in joined:
+    for symbol, code in (("€", "EUR"), ("£", "GBP"), ("¥", "JPY")):
+        if symbol in joined:
             symbol_markers.add(symbol)
-            codes.append(code)
-    unique_codes = sorted(set(codes))
-    if len(unique_codes) == 1:
-        code = unique_codes[0]
-    elif len(unique_codes) > 1:
+            confirmed.append(code)
+
+    confirmed_codes = sorted(set(confirmed))
+    weak_candidates = sorted(set(weak) - set(confirmed_codes))
+    if len(confirmed_codes) == 1:
+        code = confirmed_codes[0]
+    elif len(confirmed_codes) > 1:
         code = "MIXED"
     else:
         code = "UNKNOWN"
     return {
         "code": code,
-        "candidates": unique_codes,
+        "candidates": confirmed_codes,
+        "weak_candidates": weak_candidates,
         "symbol_markers": sorted(symbol_markers),
         "alias_evidence": stable_unique(alias_evidence),
-        "ambiguous_dollar": "$" in symbol_markers and not unique_codes,
+        "ambiguous_dollar": "$" in symbol_markers and not confirmed_codes,
     }
 
 
@@ -762,6 +795,39 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if not any(gate.get("code") == "ambiguous-dollar" for gate in dollar["review_gates"]):  # type: ignore[index]
             failures.append("dollar: expected ambiguous-dollar gate")
 
+        # Marketing prose that merely contains a code word ("TRY") must not be
+        # confirmed as a currency: the account stays single-currency USD, and the
+        # prose token is surfaced only as a weak candidate.
+        marketing = build_preflight(
+            [
+                synthetic_file(
+                    "marketing.pdf",
+                    "Example Bank\nAccount number 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD\nClosing balance 100.00 USD\nPLEASE TRY OUR NEW MOBILE APP TODAY",
+                )
+            ],
+            2025,
+            "one-account",
+            root / "marketing.json",
+            root / "marketing-review.csv",
+        )
+        if marketing["currency"]["code"] != "USD":  # type: ignore[index]
+            failures.append(f"marketing: expected USD, got {marketing['currency']}")
+        if any(gate.get("code") == "mixed-currencies" for gate in marketing["review_gates"]):  # type: ignore[index]
+            failures.append("marketing: all-caps prose 'TRY' must not trip mixed-currencies")
+        if "TRY" not in marketing["currency"]["weak_candidates"]:  # type: ignore[index]
+            failures.append(f"marketing: expected TRY as a weak candidate, got {marketing['currency']}")
+
+        # An amount adjacent to a code confirms it even with no 'currency' label.
+        adjacency = build_preflight(
+            [synthetic_file("adjacency.pdf", "Example Bank\nAccount number 12345678\nStatement period January 2025\nEnding balance 1,234.56 GBP")],
+            2025,
+            "one-account",
+            root / "adjacency.json",
+            root / "adjacency-review.csv",
+        )
+        if adjacency["currency"]["code"] != "GBP":  # type: ignore[index]
+            failures.append(f"adjacency: expected GBP from amount adjacency, got {adjacency['currency']}")
+
         accounts = build_preflight(
             [synthetic_file("accounts.pdf", "Example Bank\nAccount number 11112222\nAccount number 33334444\nStatement period January 2025\nCurrency USD")],
             2025,
@@ -876,7 +942,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 12 preflight cases")
+    print("Self-test passed: 14 preflight cases")
     return 0
 
 
