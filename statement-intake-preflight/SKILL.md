@@ -28,7 +28,7 @@ The command writes:
 - JSON handoff at `--out`.
 - Review CSV beside the JSON unless `--csv` is supplied.
 
-Review the JSON and CSV before passing the JSON to downstream tools. Stop for user review when the output reports non-PDF files, missing files, scanned/image-only or low-text PDFs, mixed years, mixed currencies, ambiguous `$`, possible mixed accounts, possible mixed institutions, or unknown currency/account context required by the requested downstream workflow.
+Review the JSON and CSV before passing the JSON to downstream tools. Stop for user review when the output reports non-PDF files, missing files, scanned/image-only or low-text PDFs, duplicate inputs, mixed years, mixed currencies, ambiguous `$`, possible mixed accounts, possible mixed institutions, or unknown currency/account context required by the requested downstream workflow. `references/workflow.md` has the full gate catalog with severities.
 
 ## Downstream Handoff
 
@@ -55,7 +55,7 @@ Downstream skills must reject preflight JSON when its skill name, tax year, scop
 
 ## Runtime
 
-`preflight` requires machine-readable PDFs and `pdfplumber`. Check availability with:
+Requires Python 3.11 or newer. `preflight` also requires machine-readable PDFs and `pdfplumber`. Check availability with:
 
 ```bash
 python3 "<package-root>/scripts/statement_intake_preflight.py" dependency-check
