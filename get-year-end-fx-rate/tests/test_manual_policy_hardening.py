@@ -25,6 +25,12 @@ def run_main(arguments: list[str]) -> tuple[int, str, str]:
     return code, stdout.getvalue(), stderr.getvalue()
 
 
+def replace_option(arguments: list[str], option: str, value: str) -> list[str]:
+    updated = list(arguments)
+    updated[updated.index(option) + 1] = value
+    return updated
+
+
 def main() -> None:
     for value in (
         "Central Bank 2025 Average",
@@ -63,6 +69,24 @@ def main() -> None:
             str(root / "proof"),
         ]
 
+        assert fx.validate_manual_source_url(" https://example.test/year-end ") == "https://example.test/year-end"
+        assert fx.validate_manual_source_url("http://example.test/year-end") == "http://example.test/year-end"
+        for source_url in ("", "   ", "example.test/year-end", "ftp://example.test/year-end", "/tmp/source.html", "file:///tmp/source.html"):
+            try:
+                fx.validate_manual_source_url(source_url)
+            except fx.RateError as exc:
+                assert exc.code == 2
+                assert "absolute http:// or https://" in str(exc)
+            else:
+                raise AssertionError(f"manual source URL should reject: {source_url!r}")
+
+        for source_url in ("", "   ", "example.test/year-end", "ftp://example.test/year-end", "/tmp/source.html"):
+            code, _stdout, stderr = run_main(
+                [*replace_option(base, "--source-url", source_url), "--proof-file", str(proof_file)]
+            )
+            assert code == 2
+            assert "absolute http:// or https://" in stderr
+
         code, _stdout, stderr = run_main(base)
         assert code == 2
         assert "--proof-file or explain its absence" in stderr
@@ -74,6 +98,10 @@ def main() -> None:
         code, _stdout, stderr = run_main([*base, "--source-note", ""])
         assert code == 2
         assert "nonempty --source-note" in stderr
+
+        code, _stdout, stderr = run_main([*base, "--no-proof-file-reason", "x"])
+        assert code == 2
+        assert "at least 16 characters" in stderr
 
         no_proof_root = root / "no-proof"
         code, stdout, stderr = run_main(
