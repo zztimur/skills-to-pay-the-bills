@@ -14,10 +14,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable
 
+_PDFPLUMBER_IMPORT_ERROR: BaseException | None = None
 try:
     import pdfplumber
-except ImportError:  # pragma: no cover - exercised by users without deps.
+except BaseException as _exc:  # noqa: BLE001 - see below  # pragma: no cover
+    # A broken native dependency (e.g. a cryptography/pyo3 ABI mismatch) raises a
+    # non-Exception PanicException at import time, which "except ImportError"
+    # misses -- crashing even dependency-check with a raw traceback. Degrade to
+    # "unavailable" instead, but never swallow a genuine interrupt or exit.
+    if isinstance(_exc, (KeyboardInterrupt, SystemExit)):
+        raise
     pdfplumber = None
+    _PDFPLUMBER_IMPORT_ERROR = _exc
 
 
 # Handoff-contract version, distinct from the package version in plugin.json.
@@ -829,7 +837,10 @@ def command_preflight(args: argparse.Namespace) -> int:
 
 def command_dependency_check(_args: argparse.Namespace) -> int:
     if pdfplumber is None:
-        print("pdfplumber missing")
+        if _PDFPLUMBER_IMPORT_ERROR is not None:
+            print(f"pdfplumber missing (installed but failed to import: {type(_PDFPLUMBER_IMPORT_ERROR).__name__})")
+        else:
+            print("pdfplumber missing")
         return 1
     print("pdfplumber ok")
     return 0

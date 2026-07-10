@@ -21,7 +21,7 @@ Requires Python 3.11 or newer (the script uses `datetime.UTC`). Use a Python run
 python3 "<package-root>/scripts/statement_intake_preflight.py" dependency-check
 ```
 
-In Codex Desktop, if plain `python3` reports `pdfplumber missing`, call `load_workspace_dependencies` and retry the command with the bundled Python executable. If no available runtime has `pdfplumber`, stop before preflight and report the missing dependency. Do not OCR scanned/image-only PDFs in v1.
+In Codex Desktop, if plain `python3` reports `pdfplumber missing`, call `load_workspace_dependencies` and retry the command with the bundled Python executable. If no available runtime has `pdfplumber`, stop before preflight and report the missing dependency. `dependency-check` exits non-zero and prints `pdfplumber missing` both when the package is absent and when it is installed but fails to import (a broken native dependency), rather than crashing. Do not OCR scanned/image-only PDFs in v1.
 
 ## 3. Run Preflight
 
