@@ -35,9 +35,9 @@ The JSON includes:
 - statement files, resolved paths, page counts, and text counts;
 - detected statement titles and periods;
 - detected years and out-of-year hints;
-- currency candidates and ambiguous `$` warnings;
+- currency candidates it could back up with a nearby amount or name, the weaker ones it could not, and ambiguous `$` warnings;
 - account hints and institution hints;
-- review gates such as low text, mixed years, mixed currencies, possible mixed accounts, and possible mixed institutions.
+- review gates such as low text, duplicate inputs, mixed years, mixed currencies, possible mixed accounts, and possible mixed institutions.
 
 The JSON is for machines. The CSV is for review. The chat answer should not treat either one as a finished tax or FBAR artifact.
 
@@ -111,6 +111,7 @@ The skill should stop or ask for review when:
 - a file is missing or is not a PDF;
 - a `.pdf` file cannot actually be read as a PDF;
 - the PDF has little or no machine-readable text;
+- the same statement PDF is handed in more than once;
 - statement years do not line up with the requested year;
 - `$` appears without enough context to know the currency;
 - multiple currencies appear in one supposed currency bucket;
