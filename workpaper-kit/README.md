@@ -39,6 +39,13 @@ The renderer imports ReportLab only when instantiated. Therefore the FX skills
 remain usable with Python's standard library alone, while
 `statements-to-interest` retains its existing ReportLab runtime requirement.
 
+## Versioning
+
+`workpaper-kit` carries its own `.claude-plugin/plugin.json` version so shared
+engine changes can be reviewed and released independently. It is still internal
+plumbing, not a skill. Use `scripts/release-diff.sh workpaper-kit` to review a
+bump.
+
 ## Interface
 
 ```python

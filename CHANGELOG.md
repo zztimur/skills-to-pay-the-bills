@@ -11,6 +11,20 @@ repo-wide or spans more than one package.
 The current repo version lives in [`VERSION`](VERSION) and is tagged
 `repo-vX.Y.Z`.
 
+## [1.3.2] - 2026-07-11
+
+Shared-infrastructure release for the workpaper engine and the packages that
+now depend on it:
+
+- Added explicit versioning to `workpaper-kit` with its own
+  `.claude-plugin/plugin.json`.
+- Refactored `statements-to-interest` to render through the shared
+  `ReportlabPacketRenderer`.
+- Regenerated the vendored `scripts/_workpaper.py` copies in
+  `get-yearly-fx-rate` and `get-year-end-fx-rate`.
+- Bumped `get-yearly-fx-rate` to 1.3.4, `get-year-end-fx-rate` to 1.4.3, and
+  `statements-to-interest` to 1.2.1.
+
 ## [1.3.1] - 2026-07-09
 
 Initial global version marker, set to 1.3.1 rather than a fresh 1.0.0 to reflect
