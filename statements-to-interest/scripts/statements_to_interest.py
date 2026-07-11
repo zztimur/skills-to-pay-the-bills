@@ -43,8 +43,9 @@ except ImportError:  # pragma: no cover - exercised by users without deps.
 
 
 SKILL_NAME = "statements-to-interest"
-SCHEMA_VERSION = "1.1"
-ANALYSIS_SUPPORTED_SCHEMA_VERSIONS = {SCHEMA_VERSION}
+SCHEMA_VERSION = "1.2"
+ANALYSIS_SUPPORTED_SCHEMA_VERSIONS = {"1.1", SCHEMA_VERSION}
+EXCLUSION_RESOLUTION_SCHEMA_VERSION = "1.0"
 MIN_TEXT_CHARS = 40
 PREFLIGHT_SKILL = "statement-intake-preflight"
 PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0"}
@@ -53,6 +54,10 @@ ANALYSIS_READY_STATUS = "ready-for-reporting"
 ANALYSIS_REVIEW_REQUIRED_STATUS = "review-required"
 ANALYSIS_ZERO_CONFIRMATION_STATUS = "zero-interest-confirmation-required"
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+SANITIZED_DOTTED_ACCOUNT = "123.456.789"  # privacy-gate: allow
+SANITIZED_IBAN = "ZZ00TEST0000000000000000"  # privacy-gate: allow
+SANITIZED_EMAIL = "safe-fixture@example.test"  # privacy-gate: allow
+SANITIZED_LONG_IDENTIFIER = "987654321"  # privacy-gate: allow
 
 CURRENCY_CODES = {
     "AED",
@@ -275,7 +280,7 @@ AMOUNT_RE = re.compile(
     r"\d[\d\s,.]*"
     r"\)?"
     r"(?:\s*(?:CR|DR|Cr|Dr))?"
-    r"(?:\s*[A-Z]{3})?"
+    r"(?:\s*[A-Z]{3}\b)?"
 )
 
 ACCOUNT_CURRENCY_PATTERNS = (
@@ -721,6 +726,8 @@ def extract_rows_from_pages(
                         "page": page.page_number,
                         "evidence_text": line,
                         "reason": reason or "interest-like line excluded",
+                        "classification": "clear-non-interest",
+                        "requires_review": False,
                     }
                 )
                 continue
@@ -736,6 +743,8 @@ def extract_rows_from_pages(
                         "page": page.page_number,
                         "evidence_text": line,
                         "reason": "interest-like line has no positive amount",
+                        "classification": "ambiguous",
+                        "requires_review": True,
                     }
                 )
                 continue
@@ -749,6 +758,8 @@ def extract_rows_from_pages(
                         "page": page.page_number,
                         "evidence_text": line,
                         "reason": f"interest-like line date {selected_date.isoformat()} is outside tax year {tax_year}",
+                        "classification": "ambiguous",
+                        "requires_review": True,
                     }
                 )
                 continue
@@ -979,22 +990,36 @@ def preflight_profile(preflight: dict, source_path: str) -> dict:
     }
 
 
+def excluded_candidate_requires_review(candidate: object) -> bool:
+    if not isinstance(candidate, dict):
+        return True
+    if candidate.get("classification") == "clear-non-interest":
+        return False
+    return candidate.get("requires_review") is not False
+
+
+def excluded_candidates_requiring_review(excluded_candidates: list[dict]) -> list[dict]:
+    return [candidate for candidate in excluded_candidates if excluded_candidate_requires_review(candidate)]
+
+
+def excluded_candidates_review_gate(count: int) -> dict[str, str]:
+    noun = "candidate" if count == 1 else "candidates"
+    verb = "requires" if count == 1 else "require"
+    return {
+        "code": "excluded-interest-like-candidates",
+        "message": (
+            f"{count} excluded interest-like {noun} {verb} reviewer resolution before reporting. "
+            "Correct the source and re-run extraction, or create a digest-bound excluded-candidates resolution."
+        ),
+    }
+
+
 def extraction_review_state(rows: list[dict], excluded_candidates: list[dict]) -> tuple[str, list[dict[str, str]]]:
+    review_candidates = excluded_candidates_requiring_review(excluded_candidates)
+    if review_candidates:
+        return ANALYSIS_REVIEW_REQUIRED_STATUS, [excluded_candidates_review_gate(len(review_candidates))]
     if rows:
         return ANALYSIS_READY_STATUS, []
-    if excluded_candidates:
-        return (
-            ANALYSIS_REVIEW_REQUIRED_STATUS,
-            [
-                {
-                    "code": "zero-count-with-interest-like-candidates",
-                    "message": (
-                        "No interest rows were counted, but interest-like statement lines were excluded. "
-                        "Review the evidence and re-run extraction before reporting."
-                    ),
-                }
-            ],
-        )
     return (
         ANALYSIS_ZERO_CONFIRMATION_STATUS,
         [
@@ -1140,16 +1165,40 @@ def display_file_name(value: object) -> str:
     return redact_pdf_text(Path(text).name or text)
 
 
+PDF_EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+PDF_IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]){11,30}\b", re.IGNORECASE)
+PDF_TAGGED_ACCOUNT_RE = re.compile(
+    r"\b((?:account|acct|cuenta)\s*(?:number|no\.?|n[úu]mero|#)\s*[:#-]?\s*)\d[\d .-]{3,}\b",
+    re.IGNORECASE,
+)
+PDF_NUMERIC_ACCOUNT_RE = re.compile(
+    r"\b((?:account|acct|cuenta)\s*[:#-]?\s*)\d[\d .-]{3,}\b",
+    re.IGNORECASE,
+)
+PDF_LONG_NUMERIC_IDENTIFIER_RE = re.compile(r"(?<![\d.])(?:\d[ -]?){8,}\d(?![\d.])")
+PDF_MONEY_RE = re.compile(r"(?:(?:\b[A-Z]{3}\s+)|[$€£¥]\s*)\d(?:[\d,. ]*\d)?")
+
+
 def redact_pdf_text(value: object) -> str:
     text = "" if value is None else str(value)
-    text = re.sub(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "[redacted email]", text, flags=re.IGNORECASE)
-    text = re.sub(
-        r"\b((?:account|acct|cuenta)\s*(?:number|no\.?|#)?\s*[:#-]?\s*)[A-Z0-9][A-Z0-9 -]{3,}",
-        r"\1[redacted]",
-        text,
-        flags=re.IGNORECASE,
-    )
-    return re.sub(r"(?<![\d.])(?:\d[ -]?){5,}\d(?![\d.])", "[redacted identifier]", text)
+    text = PDF_EMAIL_RE.sub("[redacted email]", text)
+    text = PDF_IBAN_RE.sub("[redacted identifier]", text)
+    protected_values: list[str] = []
+
+    def protect(match: re.Match[str]) -> str:
+        placeholder = f"__protected_value_{len(protected_values)}__"
+        protected_values.append(match.group(0))
+        return placeholder
+
+    for pattern in DATE_PATTERNS + MONTH_DATE_PATTERNS:
+        text = pattern.sub(protect, text)
+    text = PDF_MONEY_RE.sub(protect, text)
+    text = PDF_TAGGED_ACCOUNT_RE.sub(r"\1[redacted]", text)
+    text = PDF_NUMERIC_ACCOUNT_RE.sub(r"\1[redacted]", text)
+    text = PDF_LONG_NUMERIC_IDENTIFIER_RE.sub("[redacted identifier]", text)
+    for index, original in enumerate(protected_values):
+        text = text.replace(f"__protected_value_{index}__", original)
+    return text
 
 
 def redacted_pdf_snippet(value: object, limit: int = 220) -> str:
@@ -1758,6 +1807,14 @@ def load_analysis_payload(input_path: Path) -> dict:
     return analysis
 
 
+def canonical_json_sha256(value: object, label: str) -> str:
+    try:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"{label} cannot be serialized for provenance binding.") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def require_sha256(value: object, label: str) -> str:
     digest = str(value or "")
     if not SHA256_PATTERN.fullmatch(digest):
@@ -1789,8 +1846,17 @@ def validate_analysis_contract(analysis: dict, input_path: Path) -> None:
     analysis_review_gates = analysis.get("review_gates")
     if not isinstance(analysis_review_gates, list):
         raise SystemExit("Input analysis JSON has invalid review_gates; re-run extract before reporting.")
-    if analysis_status == ANALYSIS_READY_STATUS and analysis_review_gates:
-        raise SystemExit("Input analysis JSON marks ready status with review gates; re-run extract before reporting.")
+    rows = analysis.get("rows")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise SystemExit("Input analysis JSON has invalid rows; re-run extract before reporting.")
+    excluded_candidates = analysis.get("excluded_candidates")
+    if not isinstance(excluded_candidates, list) or any(not isinstance(item, dict) for item in excluded_candidates):
+        raise SystemExit("Input analysis JSON has invalid excluded_candidates; re-run extract before reporting.")
+    expected_status, expected_review_gates = extraction_review_state(rows, excluded_candidates)
+    if analysis_status != expected_status or analysis_review_gates != expected_review_gates:
+        raise SystemExit(
+            "Input analysis JSON has an inconsistent extraction status or review gates; re-run extract before reporting."
+        )
 
     statement_files = analysis.get("statement_files")
     if not isinstance(statement_files, list) or not statement_files:
@@ -1846,15 +1912,115 @@ def validate_analysis_contract(analysis: dict, input_path: Path) -> None:
             raise SystemExit(f"Statement PDF changed after extraction: {source_file}. Re-run extract before reporting.")
 
 
-def zero_interest_confirmation(analysis: dict, args: argparse.Namespace) -> str:
+def load_exclusion_resolution_payload(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise SystemExit(f"Excluded-candidates resolution JSON not found: {path}") from None
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"Excluded-candidates resolution JSON is invalid: {path} ({exc.msg} at line {exc.lineno}, column {exc.colno})"
+        ) from None
+    if not isinstance(payload, dict):
+        raise SystemExit("Excluded-candidates resolution JSON must be an object.")
+    return payload
+
+
+def validate_exclusion_resolution(analysis: dict, resolution_path: Path) -> dict:
+    resolution = load_exclusion_resolution_payload(resolution_path)
+    if resolution.get("skill") != SKILL_NAME:
+        raise SystemExit("Excluded-candidates resolution was not generated by this skill.")
+    if str(resolution.get("schema_version", "")) != EXCLUSION_RESOLUTION_SCHEMA_VERSION:
+        raise SystemExit("Excluded-candidates resolution has an unsupported schema version.")
+    if resolution.get("resolution_type") != "excluded-interest-like-candidates":
+        raise SystemExit("Excluded-candidates resolution has an unsupported resolution type.")
+    if resolution.get("decision") != "all-excluded-not-interest":
+        raise SystemExit("Excluded-candidates resolution does not confirm every ambiguous candidate is non-interest.")
+    reviewer_note = resolution.get("reviewer_note")
+    if not isinstance(reviewer_note, str) or not reviewer_note.strip():
+        raise SystemExit("Excluded-candidates resolution has no reviewer note.")
+    review_candidates = excluded_candidates_requiring_review(analysis.get("excluded_candidates", []))
+    if not review_candidates:
+        raise SystemExit("This analysis has no ambiguous excluded candidates to resolve.")
+    if resolution.get("candidate_count") != len(review_candidates):
+        raise SystemExit("Excluded-candidates resolution candidate count does not match the analysis.")
+    if require_sha256(resolution.get("analysis_sha256"), "resolution analysis SHA-256") != canonical_json_sha256(
+        analysis, "analysis JSON"
+    ):
+        raise SystemExit("Excluded-candidates resolution does not match this analysis; regenerate the resolution.")
+    if require_sha256(
+        resolution.get("excluded_candidates_sha256"), "resolution excluded-candidates SHA-256"
+    ) != canonical_json_sha256(review_candidates, "excluded candidates"):
+        raise SystemExit("Excluded-candidates resolution does not match the current excluded candidates; regenerate it.")
+    return resolution
+
+
+def command_resolve_exclusions(args: argparse.Namespace) -> int:
+    input_path = Path(args.input)
+    analysis = load_analysis_payload(input_path)
+    validate_analysis_contract(analysis, input_path)
+    review_candidates = excluded_candidates_requiring_review(analysis.get("excluded_candidates", []))
+    if analysis.get("status") != ANALYSIS_REVIEW_REQUIRED_STATUS or not review_candidates:
+        raise SystemExit("This analysis has no excluded-candidates review gate to resolve.")
+    if not args.all_excluded_not_interest_confirmed:
+        raise SystemExit(
+            "Re-run with --all-excluded-not-interest-confirmed only after reviewing every ambiguous candidate."
+        )
+    reviewer_note = args.reviewer_note.strip()
+    if not reviewer_note:
+        raise SystemExit("--reviewer-note is required with --all-excluded-not-interest-confirmed.")
+    resolution = {
+        "skill": SKILL_NAME,
+        "schema_version": EXCLUSION_RESOLUTION_SCHEMA_VERSION,
+        "resolution_type": "excluded-interest-like-candidates",
+        "generated_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "analysis_sha256": canonical_json_sha256(analysis, "analysis JSON"),
+        "excluded_candidates_sha256": canonical_json_sha256(review_candidates, "excluded candidates"),
+        "candidate_count": len(review_candidates),
+        "decision": "all-excluded-not-interest",
+        "reviewer_note": reviewer_note,
+    }
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(resolution, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"Wrote excluded-candidates resolution: {out_path}")
+    print(f"Resolved candidates: {len(review_candidates)}")
+    return 0
+
+
+def excluded_candidates_resolution_for_report(analysis: dict, resolution_json: str | None) -> dict | None:
+    review_candidates = excluded_candidates_requiring_review(analysis.get("excluded_candidates", []))
+    if not review_candidates:
+        if resolution_json:
+            raise SystemExit("This analysis has no ambiguous excluded candidates; omit --excluded-candidates-resolution-json.")
+        return None
+    if analysis.get("status") != ANALYSIS_REVIEW_REQUIRED_STATUS:
+        raise SystemExit("Input analysis JSON has unresolved excluded candidates; re-run extract before reporting.")
+    if not resolution_json:
+        raise SystemExit(
+            "Analysis has excluded interest-like candidates requiring review. Run resolve-exclusions, then pass "
+            "--excluded-candidates-resolution-json to report."
+        )
+    return validate_exclusion_resolution(analysis, Path(resolution_json))
+
+
+def zero_interest_confirmation(
+    analysis: dict,
+    args: argparse.Namespace,
+    exclusion_resolution: dict | None = None,
+    has_counted_rows: bool = False,
+) -> str:
     status = analysis.get("status")
     review_gates = analysis.get("review_gates", [])
     if status == ANALYSIS_REVIEW_REQUIRED_STATUS:
-        codes = ", ".join(preflight_gate_codes(review_gates)) or "review-required"
-        raise SystemExit(
-            f"Analysis status is review-required ({codes}); resolve excluded interest-like candidates and re-run extract."
-        )
-    if status != ANALYSIS_ZERO_CONFIRMATION_STATUS:
+        if exclusion_resolution is None:
+            codes = ", ".join(preflight_gate_codes(review_gates)) or "review-required"
+            raise SystemExit(
+                f"Analysis status is review-required ({codes}); resolve excluded interest-like candidates before reporting."
+            )
+        if has_counted_rows:
+            return ""
+    elif status != ANALYSIS_ZERO_CONFIRMATION_STATUS:
         return ""
     if not args.zero_interest_confirmed:
         raise SystemExit(
@@ -1924,7 +2090,10 @@ def command_report(args: argparse.Namespace) -> int:
     analysis = load_analysis_payload(input_path)
     validate_analysis_contract(analysis, input_path)
     rows, _totals, currency, foreign_total = report_rows_and_total(analysis, input_path)
-    zero_interest_note = zero_interest_confirmation(analysis, args)
+    exclusion_resolution = excluded_candidates_resolution_for_report(
+        analysis, getattr(args, "excluded_candidates_resolution_json", None)
+    )
+    zero_interest_note = zero_interest_confirmation(analysis, args, exclusion_resolution, bool(rows))
 
     fx_rate = Decimal("0")
     usd_total = Decimal("0")
@@ -2017,6 +2186,12 @@ def command_report(args: argparse.Namespace) -> int:
     label_sources = ", ".join(profile.get("institution_label_sources", [])) or "Not recorded"
     source_total = f"{money(foreign_total)} {currency}".strip() if currency else "0.00"
     usd_total_label = f"USD {money(usd_total)}" if foreign_total else "USD 0.00"
+    exclusion_review = "Not required"
+    if exclusion_resolution:
+        exclusion_review = (
+            f"{exclusion_resolution['candidate_count']} candidate(s) reviewed as non-interest. "
+            f"Note: {exclusion_resolution['reviewer_note']}"
+        )
     add_hero(story, styles, str(analysis.get("institution", "")), analysis.get("tax_year", ""))
     add_kpi_cards(
         story,
@@ -2039,6 +2214,7 @@ def command_report(args: argparse.Namespace) -> int:
         ["Statement files reviewed", str(len(analysis.get("statement_files", [])))],
         ["Interest rows counted", str(len(rows))],
         ["Source-currency total", source_total],
+        ["Excluded-candidate review", redacted_pdf_snippet(exclusion_review)],
         ["Zero-interest confirmation", redacted_pdf_snippet(zero_interest_note) or "Not applicable"],
         ["USD conversion", redacted_pdf_snippet(fx_note)],
         ["FX confirmation", redacted_pdf_snippet(fx_confirmation) or "Not applicable"],
@@ -2190,6 +2366,11 @@ def command_self_test(args: argparse.Namespace) -> int:
             "2025-01-03 Interest credited EUR 2.50 EUR 102.50",
             Decimal("2.50"),
         ),
+        (
+            "iban-after-currency-amount",
+            "2025-01-03 Interest credited USD 10.00 IBAN test-identifier",  # privacy-gate: allow
+            Decimal("10.00"),
+        ),
     ]
     failures: list[str] = []
     for name, line, expected in cases:
@@ -2222,6 +2403,89 @@ def command_self_test(args: argparse.Namespace) -> int:
         failures.append(f"cop-account-currency: expected COP account currency, got {meta.get('account_currency')}")
     if not rows or rows[0].get("currency") != "COP" or rows[0].get("amount_foreign") != "642.00":
         failures.append(f"cop-symbol-currency: expected 642.00 COP row, got {rows[:1]}")
+    iban_pages = [
+        PageText(
+            Path("example-bank-iban.pdf"),
+            1,
+            "\n".join(
+                [
+                    "Example Bank",
+                    "Account currency: USD",
+                    "2025-01-03 Interest credited USD 10.00 IBAN test-identifier",  # privacy-gate: allow
+                ]
+            ),
+        )
+    ]
+    iban_rows, iban_excluded, _iban_warnings, _iban_meta = extract_rows_from_pages(
+        iban_pages, "Example Bank", 2025, None
+    )
+    if (
+        len(iban_rows) != 1
+        or iban_rows[0].get("currency") != "USD"
+        or iban_rows[0].get("amount_foreign") != "10.00"
+        or iban_excluded
+    ):
+        failures.append(
+            "iban-end-to-end: expected one 10.00 USD interest row without exclusions, "
+            f"got rows={iban_rows!r}, excluded={iban_excluded!r}"
+        )
+    withholding_pages = [
+        PageText(
+            Path("example-bank-withholding.pdf"),
+            1,
+            "\n".join(
+                [
+                    "Example Bank",
+                    "Account currency: USD",
+                    "2025-01-03 Interest credited withholding USD 2.00",
+                ]
+            ),
+        )
+    ]
+    withholding_rows, withholding_excluded, _withholding_warnings, _withholding_meta = extract_rows_from_pages(
+        withholding_pages, "Example Bank", 2025, None
+    )
+    withholding_status, withholding_gates = extraction_review_state(withholding_rows, withholding_excluded)
+    if (
+        withholding_rows
+        or len(withholding_excluded) != 1
+        or withholding_excluded[0].get("classification") != "clear-non-interest"
+        or withholding_excluded[0].get("requires_review") is not False
+        or withholding_status != ANALYSIS_ZERO_CONFIRMATION_STATUS
+        or not withholding_gates
+    ):
+        failures.append(
+            "clear-withholding: expected a documented clear exclusion and zero-interest confirmation, "
+            f"got rows={withholding_rows!r}, excluded={withholding_excluded!r}, gates={withholding_gates!r}"
+        )
+    mixed_review_pages = [
+        PageText(
+            Path("example-bank-mixed-review.pdf"),
+            1,
+            "\n".join(
+                [
+                    "Example Bank",
+                    "Account currency: USD",
+                    "2025-01-03 Interest credited USD 10.00",
+                    "2025-02-03 Interest credited",
+                ]
+            ),
+        )
+    ]
+    mixed_rows, mixed_excluded, _mixed_warnings, _mixed_meta = extract_rows_from_pages(
+        mixed_review_pages, "Example Bank", 2025, None
+    )
+    mixed_status, mixed_gates = extraction_review_state(mixed_rows, mixed_excluded)
+    if (
+        len(mixed_rows) != 1
+        or len(excluded_candidates_requiring_review(mixed_excluded)) != 1
+        or mixed_status != ANALYSIS_REVIEW_REQUIRED_STATUS
+        or [gate.get("code") for gate in mixed_gates] != ["excluded-interest-like-candidates"]
+    ):
+        failures.append(
+            "mixed-rows-ambiguous-exclusion: expected review-required despite a counted interest row, "
+            f"got rows={mixed_rows!r}, excluded={mixed_excluded!r}, gates={mixed_gates!r}"
+        )
     split_interest_pages = [
         PageText(
             Path("example-bank-split.pdf"),
@@ -2242,9 +2506,25 @@ def command_self_test(args: argparse.Namespace) -> int:
     zero_status, zero_gates = extraction_review_state(no_interest_rows, no_interest_excluded)
     if zero_status != ANALYSIS_ZERO_CONFIRMATION_STATUS or not zero_gates:
         failures.append("true-zero-interest: no-evidence result must require preparer confirmation")
-    redacted = redacted_pdf_snippet("Account 123456789012; contact test@example.com; transfer 987654321")
-    if "123456789012" in redacted or "987654321" in redacted or "test@example.com" in redacted:
+    privacy_evidence = (
+        f"2025-01-03 Interest credited USD 10.00 Cuenta No. {SANITIZED_DOTTED_ACCOUNT}; "
+        f"IBAN {SANITIZED_IBAN}; email {SANITIZED_EMAIL}; transfer {SANITIZED_LONG_IDENTIFIER}"
+    )
+    redacted = redacted_pdf_snippet(privacy_evidence)
+    if any(
+        value in redacted
+        for value in (SANITIZED_DOTTED_ACCOUNT, SANITIZED_IBAN, SANITIZED_EMAIL, SANITIZED_LONG_IDENTIFIER)
+    ):
         failures.append(f"pdf-redaction: identifier or email leaked in {redacted!r}")
+    if "2025-01-03" not in redacted or "USD 10.00" not in redacted:
+        failures.append(f"pdf-redaction: date or money was incorrectly redacted in {redacted!r}")
+    if redact_pdf_text("Account currency: USD") != "Account currency: USD":
+        failures.append("pdf-redaction: account-currency label was incorrectly redacted")
+    date_with_identifier = redact_pdf_text(f"2025-01-03 {SANITIZED_LONG_IDENTIFIER}")
+    if "2025-01-03" not in date_with_identifier or SANITIZED_LONG_IDENTIFIER in date_with_identifier:
+        failures.append(f"pdf-redaction: date-adjacent identifier handling failed in {date_with_identifier!r}")
+    if redact_pdf_text("USD 123456789") != "USD 123456789":  # privacy-gate: allow
+        failures.append("pdf-redaction: currency-labelled amount was incorrectly redacted")
     try:
         zero_interest_confirmation(
             {"status": ANALYSIS_ZERO_CONFIRMATION_STATUS, "review_gates": zero_gates},
@@ -2386,6 +2666,56 @@ def command_self_test(args: argparse.Namespace) -> int:
             "excluded_candidates": [],
         }
         validate_analysis_contract(valid_analysis, tmp_path / "valid-analysis.json")
+        review_analysis = dict(valid_analysis)
+        review_analysis["excluded_candidates"] = [
+            {
+                "source_file": str(pdf_path),
+                "page": 1,
+                "evidence_text": "2025-02-03 Interest credited",
+                "reason": "interest-like line has no positive amount",
+                "classification": "ambiguous",
+                "requires_review": True,
+            }
+        ]
+        review_analysis["status"], review_analysis["review_gates"] = extraction_review_state(
+            review_analysis["rows"], review_analysis["excluded_candidates"]
+        )
+        review_analysis_path = tmp_path / "review-analysis.json"
+        review_analysis_path.write_text(json.dumps(review_analysis, indent=2), encoding="utf-8")
+        resolution_path = tmp_path / "excluded-candidates-resolution.json"
+        if (
+            command_resolve_exclusions(
+                argparse.Namespace(
+                    input=str(review_analysis_path),
+                    all_excluded_not_interest_confirmed=True,
+                    reviewer_note="Preparer reviewed the evidence and confirmed it was not additional interest income.",
+                    out=str(resolution_path),
+                )
+            )
+            != 0
+        ):
+            failures.append("excluded-candidates-resolution: command returned nonzero")
+        try:
+            validate_exclusion_resolution(review_analysis, resolution_path)
+        except SystemExit as exc:
+            failures.append(f"excluded-candidates-resolution: unexpected rejection {exc}")
+        stale_review_analysis = dict(review_analysis)
+        stale_review_analysis["warnings"] = ["analysis changed after reviewer resolution"]
+        try:
+            validate_exclusion_resolution(stale_review_analysis, resolution_path)
+            failures.append("excluded-candidates-resolution-stale: expected digest rejection")
+        except SystemExit as exc:
+            if "does not match this analysis" not in str(exc):
+                failures.append(f"excluded-candidates-resolution-stale: unexpected rejection {exc}")
+        inconsistent_review_analysis = dict(review_analysis)
+        inconsistent_review_analysis["status"] = ANALYSIS_READY_STATUS
+        inconsistent_review_analysis["review_gates"] = []
+        try:
+            validate_analysis_contract(inconsistent_review_analysis, tmp_path / "inconsistent-review-analysis.json")
+            failures.append("excluded-candidates-review-gate: expected inconsistent status rejection")
+        except SystemExit as exc:
+            if "inconsistent extraction status" not in str(exc):
+                failures.append(f"excluded-candidates-review-gate: unexpected rejection {exc}")
         try:
             validate_analysis_contract(analysis, tmp_path / "hand-made-analysis.json")
             failures.append("analysis-contract: expected hand-made analysis rejection")
@@ -2505,7 +2835,10 @@ def command_self_test(args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print(f"Self-test passed: {len(cases) + 3} parser cases, 9 FX/dependency cases, 14 preflight/provenance cases")
+    print(
+        f"Self-test passed: {len(cases) + 6} parser/review cases, 5 privacy cases, "
+        "9 FX/dependency cases, 17 preflight/provenance cases"
+    )
     return 0
 
 
@@ -2562,6 +2895,7 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
         def report_args(input_path: Path, output_path: Path, **overrides: object) -> argparse.Namespace:
             values: dict[str, object] = {
                 "input": str(input_path),
+                "excluded_candidates_resolution_json": None,
                 "fx_method": None,
                 "fx_rate": None,
                 "fx_workpaper_json": None,
@@ -2577,22 +2911,45 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
             values.update(overrides)
             return argparse.Namespace(**values)
 
+        def resolve_exclusions(analysis_path: Path, name: str) -> Path:
+            resolution_path = root / name
+            if (
+                command_resolve_exclusions(
+                    argparse.Namespace(
+                        input=str(analysis_path),
+                        all_excluded_not_interest_confirmed=True,
+                        reviewer_note="Preparer reviewed every excluded candidate and found no additional interest income.",
+                        out=str(resolution_path),
+                    )
+                )
+                != 0
+            ):
+                failures.append(f"{name}: resolve-exclusions returned nonzero")
+            return resolution_path
+
         usd_analysis_path = extract_pdf(
             "usd-statement.pdf",
             [
                 "Example Bank",
                 "Account currency: USD",
-                "2025-01-03 Interest credited USD 12.34 Account 123456789012",
+                (
+                    f"2025-01-03 Interest credited USD 10.00 Cuenta No. {SANITIZED_DOTTED_ACCOUNT}; "
+                    f"IBAN {SANITIZED_IBAN}; email {SANITIZED_EMAIL}"
+                ),
             ],
         )
         usd_output_path = root / "usd-packet.pdf"
         if command_report(report_args(usd_analysis_path, usd_output_path)) != 0:
             failures.append("usd-happy-path: report returned nonzero")
         usd_text = "\n".join((page.extract_text() or "") for page in PdfReader(usd_output_path).pages)
-        if "Foreign Bank Interest Support Packet" not in usd_text or "USD 12.34" not in usd_text:
+        if "Foreign Bank Interest Support Packet" not in usd_text or "USD 10.00" not in usd_text:
             failures.append("usd-happy-path: packet text is missing title or USD total")
-        if str(root) in usd_text or "123456789012" in usd_text:
-            failures.append("pdf-privacy: packet exposed an absolute source path or account identifier")
+        if str(root) in usd_text or any(
+            value in usd_text for value in (SANITIZED_DOTTED_ACCOUNT, SANITIZED_IBAN, SANITIZED_EMAIL)
+        ):
+            failures.append("pdf-privacy: packet exposed an absolute source path or raw synthetic identifier")
+        if "2025-01-03" not in usd_text or "USD 10.00" not in usd_text:
+            failures.append("pdf-privacy: packet redacted a date or monetary amount")
 
         cop_analysis_path = extract_pdf(
             "cop-statement.pdf",
@@ -2671,6 +3028,58 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
             if "only valid" not in str(exc):
                 failures.append(f"fx-json-bypass: unexpected rejection {exc}")
 
+        mixed_review_analysis_path = extract_pdf(
+            "mixed-review-statement.pdf",
+            [
+                "Example Bank",
+                "Account currency: USD",
+                "2025-01-03 Interest credited USD 10.00",
+                "2025-02-03 Interest credited",
+            ],
+        )
+        mixed_review_analysis = load_analysis_payload(mixed_review_analysis_path)
+        if mixed_review_analysis.get("status") != ANALYSIS_REVIEW_REQUIRED_STATUS:
+            failures.append("mixed-review: analysis did not require review with a counted row")
+        try:
+            command_report(report_args(mixed_review_analysis_path, root / "mixed-review-blocked.pdf"))
+            failures.append("mixed-review: expected report rejection without resolution")
+        except SystemExit as exc:
+            if "resolve-exclusions" not in str(exc):
+                failures.append(f"mixed-review: unexpected rejection {exc}")
+        mixed_resolution_path = resolve_exclusions(mixed_review_analysis_path, "mixed-review-resolution.json")
+        mixed_output_path = root / "mixed-review-packet.pdf"
+        if (
+            command_report(
+                report_args(
+                    mixed_review_analysis_path,
+                    mixed_output_path,
+                    excluded_candidates_resolution_json=str(mixed_resolution_path),
+                )
+            )
+            != 0
+        ):
+            failures.append("mixed-review: report with resolution returned nonzero")
+        mixed_text = "\n".join((page.extract_text() or "") for page in PdfReader(mixed_output_path).pages)
+        mixed_text_normalized = " ".join(mixed_text.split())
+        if "Excluded-candidate review" not in mixed_text_normalized or "additional interest income" not in mixed_text_normalized:
+            failures.append("mixed-review: packet omitted the excluded-candidate reviewer decision")
+        stale_mixed_review = dict(mixed_review_analysis)
+        stale_mixed_review["warnings"] = ["analysis changed after reviewer resolution"]
+        stale_mixed_review_path = root / "mixed-review-stale-analysis.json"
+        stale_mixed_review_path.write_text(json.dumps(stale_mixed_review, indent=2), encoding="utf-8")
+        try:
+            command_report(
+                report_args(
+                    stale_mixed_review_path,
+                    root / "mixed-review-stale-packet.pdf",
+                    excluded_candidates_resolution_json=str(mixed_resolution_path),
+                )
+            )
+            failures.append("mixed-review-stale: expected digest rejection")
+        except SystemExit as exc:
+            if "does not match this analysis" not in str(exc):
+                failures.append(f"mixed-review-stale: unexpected rejection {exc}")
+
         split_analysis_path = extract_pdf(
             "split-statement.pdf",
             ["Example Bank", "Account currency: USD", "2025-01-03 Interest credited", "$10.00"],
@@ -2682,8 +3091,35 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
             command_report(report_args(split_analysis_path, root / "split-packet.pdf"))
             failures.append("split-row-zero: expected report rejection")
         except SystemExit as exc:
-            if "review-required" not in str(exc):
+            if "resolve-exclusions" not in str(exc):
                 failures.append(f"split-row-zero: unexpected rejection {exc}")
+        split_resolution_path = resolve_exclusions(split_analysis_path, "split-resolution.json")
+        try:
+            command_report(
+                report_args(
+                    split_analysis_path,
+                    root / "split-resolution-blocked-packet.pdf",
+                    excluded_candidates_resolution_json=str(split_resolution_path),
+                )
+            )
+            failures.append("split-row-zero: expected zero-interest confirmation rejection")
+        except SystemExit as exc:
+            if "zero-interest-confirmed" not in str(exc):
+                failures.append(f"split-row-zero: unexpected post-resolution rejection {exc}")
+        split_output_path = root / "split-packet.pdf"
+        if (
+            command_report(
+                report_args(
+                    split_analysis_path,
+                    split_output_path,
+                    excluded_candidates_resolution_json=str(split_resolution_path),
+                    zero_interest_confirmed=True,
+                    zero_interest_confirmation_note="Preparer reviewed all supplied statements and confirmed no interest was credited.",
+                )
+            )
+            != 0
+        ):
+            failures.append("split-row-zero: resolved zero-interest report returned nonzero")
 
         zero_analysis_path = extract_pdf(
             "zero-statement.pdf", ["Example Bank", "Account currency: USD", "2025-01-03 Account statement"]
@@ -2789,6 +3225,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     extract.set_defaults(func=command_extract)
 
+    resolve_exclusions = subparsers.add_parser(
+        "resolve-exclusions",
+        help="Create a digest-bound reviewer resolution for ambiguous excluded interest-like candidates.",
+    )
+    resolve_exclusions.add_argument("--input", required=True, help="Input interest-analysis.json with review-required status.")
+    resolve_exclusions.add_argument(
+        "--all-excluded-not-interest-confirmed",
+        action="store_true",
+        help="Confirm that a reviewer checked every ambiguous excluded candidate and found no additional interest income.",
+    )
+    resolve_exclusions.add_argument(
+        "--reviewer-note",
+        default="",
+        help="Required reviewer note explaining the excluded-candidate decision.",
+    )
+    resolve_exclusions.add_argument(
+        "--out",
+        required=True,
+        help="Output digest-bound excluded-candidates resolution JSON path.",
+    )
+    resolve_exclusions.set_defaults(func=command_resolve_exclusions)
+
     fx_prompt = subparsers.add_parser("fx-prompt", help="Print the user-facing FX confirmation prompt for non-USD rows.")
     fx_prompt.add_argument("--input", required=True, help="Input interest-analysis.json.")
     fx_prompt.add_argument(
@@ -2810,6 +3268,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     report = subparsers.add_parser("report", help="Generate the IRS-oriented support packet PDF.")
     report.add_argument("--input", required=True, help="Input interest-analysis.json.")
+    report.add_argument(
+        "--excluded-candidates-resolution-json",
+        help="Required digest-bound resolution JSON when extraction has ambiguous excluded interest-like candidates.",
+    )
     report.add_argument(
         "--fx-method",
         choices=["get-yearly-fx-rate", "irs-yearly-average", "posted-daily-spot", "posted-yearly-average", "user-rate"],

@@ -2,7 +2,19 @@
 
 Use this workflow whenever the skill is triggered. Keep all work local unless the user explicitly asks for otherwise.
 
-Keep raw statement evidence in local JSON/CSV artifacts. The generated PDF redacts account-like identifiers and emails by default, and uses redacted evidence snippets plus page citations.
+Keep raw statement evidence in local JSON/CSV artifacts. The generated PDF redacts emails, IBANs, and labelled account-like identifiers including dotted formats by default, while retaining dates and monetary amounts. Use redacted evidence snippets plus page citations.
+
+## Contents
+
+1. Intake
+2. Runtime Setup
+3. Preflight
+4. Extraction
+5. Review The Extracted Results
+6. FX Decision
+7. Report Verification
+8. Final Response
+9. Troubleshooting and Maintenance Checks
 
 ## 1. Intake
 
@@ -84,6 +96,8 @@ The script writes:
 
 `report` accepts only the current extraction contract: it reloads the ready preflight artifact and rechecks its digest plus every source PDF digest. If those artifacts changed or are missing, re-run extraction rather than editing the analysis JSON.
 
+Each `excluded_candidates` item records whether it is `clear-non-interest` or `ambiguous`. Clear exclusions such as withholding remain visible in the support packet but do not block a report. Any ambiguous candidate makes the analysis `review-required`, even when other interest rows were counted.
+
 Use `--account-currency` only when the reviewed preflight artifact or statement evidence confirms the currency and the interest extractor cannot infer it. Do not treat `$` alone as proof of USD; unresolved `$` belongs back in preflight before reporting.
 
 ## 5. Review The Extracted Results
@@ -96,8 +110,8 @@ Open the JSON and review CSV before generating a report. The CSV is an internal 
 - `totals.row_count`: counted row count.
 - `totals.foreign_total_by_currency`: source-currency totals.
 - `warnings`: script-level review flags.
-- `excluded_candidates`: interest-like lines excluded from totals.
-- `status` and `review_gates`: extraction readiness. `review-required` blocks a packet; `zero-interest-confirmation-required` needs explicit preparer confirmation.
+- `excluded_candidates`: interest-like lines excluded from totals, including their classification and `requires_review` flag.
+- `status` and `review_gates`: extraction readiness. Any ambiguous excluded candidate produces `review-required`, which blocks a packet even when rows were counted. `zero-interest-confirmation-required` needs explicit preparer confirmation.
 
 For each counted row, check:
 
@@ -108,21 +122,33 @@ For each counted row, check:
 - Rows with `$` symbols use the account currency when statement text identifies the account currency.
 - Confidence and notes do not require user confirmation.
 
-Ask the user to confirm before reporting when:
+Stop before reporting when:
 
 - Any row has `confidence` set to `low`.
 - The notes say the transaction date is missing.
-- There are excluded interest-like candidates that could be real interest.
+- There are ambiguous excluded interest-like candidates. Review every one. If all are non-interest, create a digest-bound resolution; if any is countable interest, correct the source or obtain better statement evidence and rerun extraction.
 - Counted rows include unexpected currencies.
 - The extracted total looks inconsistent with statement summaries.
 
-If the extractor repeats a preflight-style warning about institution, year, PDF text, or currency scope, return to the preflight artifact or rerun preflight/extraction with an explicit user-confirmed override instead of resolving that scope issue ad hoc here.
+If the extractor repeats a preflight-style warning about institution, year, PDF text, or currency scope, return to the preflight artifact and rerun preflight/extraction. Do not resolve that scope issue ad hoc here.
 
 Do not add, remove, or edit rows by guess. If a row is missing or wrong, explain the evidence and ask for confirmation or better source data.
 
+To record a reviewer decision that every ambiguous excluded candidate is non-interest, create a resolution bound to the exact analysis JSON:
+
+```bash
+python "<package-root>/scripts/statements_to_interest.py" resolve-exclusions \
+  --input "work/example-bank-2025-interest-analysis.json" \
+  --all-excluded-not-interest-confirmed \
+  --reviewer-note "Preparer reviewed every excluded candidate and found no additional interest income." \
+  --out "work/example-bank-2025-excluded-candidates-resolution.json"
+```
+
+Pass that file to `report` with `--excluded-candidates-resolution-json`. The command rejects a resolution if the analysis or excluded-candidate list has changed. Do not edit the analysis JSON to clear a gate.
+
 If `totals.row_count` is zero:
 
-- If `excluded_candidates` is non-empty, stop. The analysis is `review-required`; inspect the statement evidence and re-run extraction after resolving it.
+- If ambiguous `excluded_candidates` exist, create the resolution above. A zero-interest PDF still also requires explicit preparer confirmation.
 - If no interest-like evidence exists, a zero-interest PDF requires explicit preparer confirmation. Use `--zero-interest-confirmed` and a note explaining the review; the packet records that note.
 
 ## 6. FX Decision
@@ -240,6 +266,15 @@ python "<package-root>/scripts/statements_to_interest.py" report \
   --out "outputs/example-bank-2025-interest-support-packet.pdf"
 ```
 
+Resolved-exclusions report example:
+
+```bash
+python "<package-root>/scripts/statements_to_interest.py" report \
+  --input "work/example-bank-2025-interest-analysis.json" \
+  --excluded-candidates-resolution-json "work/example-bank-2025-excluded-candidates-resolution.json" \
+  --out "outputs/example-bank-2025-interest-support-packet.pdf"
+```
+
 Confirmed zero-interest report example:
 
 ```bash
@@ -258,7 +293,7 @@ After generating the PDF:
 - Confirm the extracted text includes `Foreign Bank Interest Support Packet`.
 - Confirm the PDF text includes the expected USD total.
 - Confirm warning/review flags are represented when present.
-- Confirm the PDF does not expose full local source paths, full account-like identifiers, or raw emails; statement tables should use redacted filenames and page citations.
+- Confirm the PDF does not expose full local source paths, full account-like identifiers (including IBANs and dotted labelled accounts), or raw emails; preserve transaction dates and monetary amounts; statement tables should use redacted filenames and page citations.
 
 Use `pypdf` for a quick text check:
 
