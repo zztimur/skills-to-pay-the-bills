@@ -14,6 +14,8 @@ The user-facing deliverable is the PDF packet. JSON and CSV outputs remain avail
 
 Raw evidence stays in local JSON/CSV artifacts. The PDF packet redacts account-like identifiers and email addresses by default and uses page citations with redacted snippets.
 
+Ambiguous excluded interest-like candidates block a packet even when other interest rows were counted. Review them, then either correct the source and rerun extraction or create a digest-bound `resolve-exclusions` artifact that records the reviewer decision. Clear non-interest exclusions such as withholding remain visible but do not block reporting.
+
 ## Package Map
 
 - `SKILL.md` is the control plane for Codex/OpenAI Agent Skills.
@@ -68,6 +70,18 @@ python statements-to-interest/scripts/statements_to_interest.py report \
   --input "work/example-bank-2025-interest-analysis.json" \
   --out "outputs/example-bank-2025-interest-support-packet.pdf"
 ```
+
+Resolve ambiguous excluded candidates before reporting:
+
+```bash
+python statements-to-interest/scripts/statements_to_interest.py resolve-exclusions \
+  --input "work/example-bank-2025-interest-analysis.json" \
+  --all-excluded-not-interest-confirmed \
+  --reviewer-note "Preparer reviewed every excluded candidate and found no additional interest income." \
+  --out "work/example-bank-2025-excluded-candidates-resolution.json"
+```
+
+Pass the resulting file to `report` with `--excluded-candidates-resolution-json`. The command rejects it if the analysis or excluded-candidate list changes.
 
 For non-USD rows, follow the detailed FX workflow in `references/workflow.md`: generate or collect the FX decision, ask for confirmation, then run `report` with `--fx-rate-confirmed`.
 
