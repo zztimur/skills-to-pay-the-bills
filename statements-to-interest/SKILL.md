@@ -20,7 +20,14 @@ Conditional FX dependency: `get-yearly-fx-rate`. Use it for non-USD published ye
 
 ## Required Workflow
 
-Read `references/workflow.md` before running analysis. It contains the operational checklist, commands, review gates, FX decision rules, troubleshooting, and final-response template.
+Use `references/workflow.md` progressively:
+
+- Read Sections 1-5 for intake, runtime, extraction, and result review before analysis.
+- Read Section 6 only when counted rows are non-USD or the user requests daily spot FX.
+- Read Section 7 immediately before generating or verifying a packet.
+- Read Sections 8-9 only for handoff wording or troubleshooting.
+
+The reference contains the detailed commands, review gates, FX decision rules, troubleshooting, and final-response template.
 
 Dependency: for non-USD published yearly-average FX, use the separate `get-yearly-fx-rate` skill to create a retained FX proof workpaper. `statements-to-interest` consumes that skill's `workpaper.json` and passes its proof documents through in the final output. If `get-yearly-fx-rate` is unavailable, stop before the PDF and ask the user to install/run it or provide a confirmed user/preparer custom rate; do not recreate annual-rate source search inside this skill. Use `dependency-check` when you need a quick installed-dependency check.
 
