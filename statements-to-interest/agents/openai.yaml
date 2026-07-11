@@ -1,7 +1,7 @@
 interface:
   display_name: "Statements to Interest"
-  short_description: "Extract statement interest for tax support"
-  default_prompt: "Use $statements-to-interest after $statement-intake-preflight to extract interest rows, generate the PDF support packet, and pause for FX confirmation when needed."
+  short_description: "Extract statement interest for Schedule B"
+  default_prompt: "Use $statements-to-interest after $statement-intake-preflight to extract foreign-bank interest for Schedule B support and pause before non-USD conversion."
 dependencies:
   skills:
     - name: "statement-intake-preflight"

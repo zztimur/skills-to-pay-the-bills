@@ -6,10 +6,13 @@ This skill is intentionally narrow:
 
 - The statement set has already passed `statement-intake-preflight` for one institution, one tax year, readable PDFs, and currency scope.
 - Interest-income support documentation, not official IRS forms or tax advice.
+- Schedule B interest support only; use `fbar-threshold-check` for FBAR maximum-balance or threshold work.
 
-Required companion skill: `statement-intake-preflight`. This skill assumes the reviewed intake JSON/CSV exists before interest extraction starts.
+Required companion skill: `statement-intake-preflight`. Extraction requires its intake JSON with `status: ready-for-domain-extraction`, no review gates, and the same PDF set, tax year, and institution.
 
 The user-facing deliverable is the PDF packet. JSON and CSV outputs remain available for row review and audit support, but the CSV is not the primary result unless the user asks for it.
+
+Raw evidence stays in local JSON/CSV artifacts. The PDF packet redacts account-like identifiers and email addresses by default and uses page citations with redacted snippets.
 
 ## Package Map
 
@@ -76,6 +79,7 @@ Before shipping or reinstalling the skill:
 python -S skill-forge/scripts/inspect_skill_package.py statements-to-interest --json --strict
 claude plugin validate --strict statements-to-interest
 python statements-to-interest/scripts/statements_to_interest.py self-test
+python statements-to-interest/scripts/statements_to_interest.py smoke-test
 ```
 
 After reinstalling, verify source/installed parity:

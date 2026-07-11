@@ -1,6 +1,6 @@
 ---
 name: statements-to-interest
-description: "Use after statement-intake-preflight for tax/Schedule B/FBAR support: extract interest income, apply FX if needed, and create an IRS-oriented packet."
+description: "Use after statement-intake-preflight to extract foreign-bank interest from one-institution PDFs for Schedule B tax support; pause before non-USD conversion."
 ---
 # Statements To Interest
 
@@ -8,13 +8,13 @@ Analyze a preflighted statement set, extract interest income, convert to USD onl
 
 ## Scope Handoff
 
-Proceed only when the request is for interest-income extraction or tax/Schedule B/FBAR support documentation. Shared statement intake belongs to `statement-intake-preflight`; use its reviewed `--scope one-institution` JSON before this skill extracts interest rows.
+Proceed only when the request is for interest-income extraction or Schedule B tax-support documentation. Shared statement intake belongs to `statement-intake-preflight`; extraction requires its `--scope one-institution` JSON with `status: ready-for-domain-extraction` and an empty `review_gates` list. Do not use this skill to determine FBAR maximum balances or thresholds; route that work to `fbar-threshold-check`.
 
 If preflight reports mixed institutions, mixed years, unreadable/scanned PDFs, mixed currencies, or ambiguous `$`, resolve that in `statement-intake-preflight` before continuing here. CSV or pasted rows require manual review outside this deterministic PDF workflow.
 
 ## Skill Dependencies
 
-Required companion skill: `statement-intake-preflight`. Use it first for shared PDF intake with `--scope one-institution`; this skill consumes the reviewed preflight JSON through `--preflight-json` and keeps only interest-row extraction, FX confirmation, and packet generation here.
+Required companion skill: `statement-intake-preflight`. Use it first for shared PDF intake with `--scope one-institution`; this skill consumes the ready preflight JSON through required `--preflight-json` and keeps only interest-row extraction, FX confirmation, and packet generation here. Do not bypass a preflight gate with an ad hoc CLI flag; resolve the intake issue and rerun preflight.
 
 Conditional FX dependency: `get-yearly-fx-rate`. Use it for non-USD published yearly-average FX workpapers; if it is unavailable or cannot produce a published annual workpaper, stop before PDF generation and ask the user/preparer for a confirmed custom rate instead of sourcing or calculating annual FX here.
 
@@ -46,7 +46,7 @@ python "<package-root>/scripts/statements_to_interest.py" extract \
   --out work/interest-analysis.json
 ```
 
-Review the JSON and review CSV before reporting. Treat the CSV as an internal row-review artifact, not the user-facing deliverable unless the user asks for it. Confirm the reviewed `preflight` summary is present, then focus this skill's review on counted interest rows, excluded interest-like candidates, totals, and FX readiness. Do not invent missing rows. Ask for confirmation when rows are low confidence, ambiguous, out of scope, interest-like candidates might be real income, counted rows contain unexpected currencies, or totals visibly conflict with statement summaries.
+Review the JSON and review CSV before reporting. Treat the CSV as an internal row-review artifact, not the user-facing deliverable unless the user asks for it. Confirm the ready `preflight` summary and its SHA-256 digest are present, then focus this skill's review on counted interest rows, excluded interest-like candidates, totals, and FX readiness. Do not invent missing rows. A zero-row analysis with excluded interest-like evidence is `review-required` and cannot be reported; a zero-row analysis with no interest-like evidence requires explicit preparer confirmation (`--zero-interest-confirmed` plus a non-empty note) before it can become a packet.
 
 For non-USD rows, default to `get-yearly-fx-rate` for the published yearly average exchange rate and retained proof. Do not calculate the yearly average yourself from daily/monthly data. If `get-yearly-fx-rate` cannot produce a published annual workpaper, ask the user for a custom rate, with an optional source, instead of deriving one. Prompt the user with the workpaper rate, source, proof documents, direction, and resulting USD total; ask them to confirm that rate or provide a custom rate before generating the PDF. Use the `fx-prompt` command to produce the exact user-facing confirmation question when a candidate workpaper is available:
 
@@ -69,14 +69,13 @@ python "<package-root>/scripts/statements_to_interest.py" report \
 
 If the user/preparer supplies a custom rate instead of a `get-yearly-fx-rate` workpaper, use `--fx-method user-rate` with `--fx-rate`, `--rate-direction`, and `--fx-rate-confirmed`. Add `--fx-source` only when the user/preparer supplies one. If no source is supplied, the PDF must disclose that no independent source was provided and add a preparer-review warning.
 
-Use item-date spot rates only if the user or preparer explicitly asks for that method. In that case, still prompt for confirmation before reporting and pass a date-keyed `--fx-rates-json` file:
+Use item-date spot rates only if the user or preparer explicitly asks for that method. The rate JSON itself must declare `method: posted-daily-spot`, a non-empty source, proof metadata, direction, and every interest date. Preview the exact source/total with `fx-prompt --fx-method posted-daily-spot --fx-rates-json work/fx-rates.json`, then pass the same file to `report` with a non-empty confirmation note. `--fx-rates-json` cannot supply a yearly-average rate.
 
 ```bash
 python "<package-root>/scripts/statements_to_interest.py" report \
   --input work/interest-analysis.json \
   --fx-method posted-daily-spot \
   --fx-rates-json work/fx-rates.json \
-  --fx-source "Posted daily spot source, currency, retrieval date" \
   --fx-rate-confirmed \
   --fx-confirmation-note "User requested and confirmed daily spot rates" \
   --out outputs/interest-support-packet.pdf
@@ -92,9 +91,9 @@ python "<package-root>/scripts/statements_to_interest.py" report \
 
 ## Report Notes
 
-Read `references/irs-interest-reporting.md` when writing IRS-oriented notes, explaining Schedule B/FBAR/Form 8938 review flags, or refreshing source-link wording.
+Read `references/irs-interest-reporting.md` when writing IRS-oriented notes, explaining Schedule B or related reporting-review flags, or refreshing source-link wording.
 
-The final answer after a completed run should lead with the PDF path, then include the JSON path, row count, source-currency total, USD total, FX proof workpaper/proof-document paths from `get-yearly-fx-rate` when used, and any warnings or manual-review flags. Mention the CSV only as an internal review artifact unless the user asks for it.
+The final answer after a completed run should lead with the PDF path, then include the JSON path, row count, source-currency total, USD total, FX proof workpaper/proof-document paths from `get-yearly-fx-rate` when used, and any warnings or manual-review flags. Mention the CSV only as an internal review artifact unless the user asks for it. Raw statement evidence remains in local JSON/CSV; the PDF uses redacted evidence snippets and page citations.
 
 ## Runtime
 
@@ -104,9 +103,10 @@ After changing the parser, run:
 
 ```bash
 python "<package-root>/scripts/statements_to_interest.py" self-test
+python "<package-root>/scripts/statements_to_interest.py" smoke-test
 ```
 
-To check the FX dependency, run:
+To check the required preflight skill, optional FX workpaper skill, and the active PDF runtime, run:
 
 ```bash
 python "<package-root>/scripts/statements_to_interest.py" dependency-check

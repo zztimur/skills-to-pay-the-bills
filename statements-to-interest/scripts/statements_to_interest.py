@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import os
@@ -41,10 +42,17 @@ except ImportError:  # pragma: no cover - exercised by users without deps.
     colors = None
 
 
-SCHEMA_VERSION = "1.0"
+SKILL_NAME = "statements-to-interest"
+SCHEMA_VERSION = "1.1"
+ANALYSIS_SUPPORTED_SCHEMA_VERSIONS = {SCHEMA_VERSION}
 MIN_TEXT_CHARS = 40
 PREFLIGHT_SKILL = "statement-intake-preflight"
 PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0"}
+PREFLIGHT_READY_STATUS = "ready-for-domain-extraction"
+ANALYSIS_READY_STATUS = "ready-for-reporting"
+ANALYSIS_REVIEW_REQUIRED_STATUS = "review-required"
+ANALYSIS_ZERO_CONFIRMATION_STATUS = "zero-interest-confirmation-required"
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 CURRENCY_CODES = {
     "AED",
@@ -843,9 +851,39 @@ def normalize_preflight_path(path: str | Path) -> str:
     return str(Path(path).expanduser().resolve(strict=False))
 
 
-def load_preflight_json(path: str | None, expected_scope: str, tax_year: int, pdf_paths: list[str]) -> dict | None:
+def sha256_file(path: Path, label: str) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise SystemExit(f"Could not hash {label} {path}: {exc}") from exc
+    return digest.hexdigest()
+
+
+def preflight_gate_codes(review_gates: list[object]) -> list[str]:
+    return sorted(
+        {
+            str(gate.get("code") or "review-gate")
+            for gate in review_gates
+            if isinstance(gate, dict)
+        }
+    )
+
+
+def load_preflight_json(
+    path: str | None,
+    expected_scope: str,
+    tax_year: int,
+    pdf_paths: list[str],
+    expected_institution: str,
+) -> dict:
     if not path:
-        return None
+        raise SystemExit(
+            "Extraction requires --preflight-json from statement-intake-preflight with status "
+            f"{PREFLIGHT_READY_STATUS!r} and no review_gates."
+        )
     preflight_path = Path(path)
     try:
         data = json.loads(preflight_path.read_text(encoding="utf-8"))
@@ -854,6 +892,8 @@ def load_preflight_json(path: str | None, expected_scope: str, tax_year: int, pd
     except json.JSONDecodeError as exc:
         raise SystemExit(f"Preflight JSON {preflight_path} is not valid JSON: {exc}") from exc
 
+    if not isinstance(data, dict):
+        raise SystemExit("Preflight JSON must be an object.")
     if data.get("skill") != PREFLIGHT_SKILL:
         raise SystemExit(f"Preflight JSON must come from {PREFLIGHT_SKILL}.")
     if str(data.get("schema_version", "")) not in PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS:
@@ -862,6 +902,21 @@ def load_preflight_json(path: str | None, expected_scope: str, tax_year: int, pd
         raise SystemExit(f"Preflight tax_year {data.get('tax_year')} does not match extraction tax year {tax_year}.")
     if data.get("scope") != expected_scope:
         raise SystemExit(f"Preflight scope {data.get('scope')!r} does not match required scope {expected_scope!r}.")
+
+    review_gates = data.get("review_gates")
+    if not isinstance(review_gates, list):
+        raise SystemExit("Preflight JSON has no review_gates list.")
+    if review_gates:
+        gate_codes = preflight_gate_codes(review_gates)
+        detail = f" ({', '.join(gate_codes)})" if gate_codes else ""
+        raise SystemExit(
+            "Preflight review_gates must be resolved before interest extraction" f"{detail}."
+        )
+    if data.get("status") != PREFLIGHT_READY_STATUS:
+        raise SystemExit(
+            f"Preflight status {data.get('status')!r} is not {PREFLIGHT_READY_STATUS!r}; "
+            "rerun statement-intake-preflight after resolving its review gates."
+        )
 
     expected = {normalize_preflight_path(path_item) for path_item in pdf_paths}
     statement_files = data.get("statement_files")
@@ -879,6 +934,16 @@ def load_preflight_json(path: str | None, expected_scope: str, tax_year: int, pd
             "Preflight PDF set does not match extraction PDFs. "
             f"Expected {sorted(expected)}; preflight has {sorted(actual)}."
         )
+    profile = data.get("profile")
+    primary_institution = profile.get("primary_institution") if isinstance(profile, dict) else ""
+    if not isinstance(primary_institution, str) or not primary_institution.strip():
+        raise SystemExit("Preflight JSON has no primary institution for extraction binding.")
+    if not text_contains_label(primary_institution, expected_institution):
+        raise SystemExit(
+            f"Preflight institution {primary_institution!r} does not match extraction institution "
+            f"{expected_institution!r}."
+        )
+    data["_source_sha256"] = sha256_file(preflight_path, "preflight JSON")
     return data
 
 
@@ -898,12 +963,13 @@ def preflight_warning_lines(preflight: dict | None) -> list[str]:
     return sorted(set(lines))
 
 
-def preflight_profile(preflight: dict | None, source_path: str | None) -> dict | None:
+def preflight_profile(preflight: dict, source_path: str) -> dict:
     if not preflight:
-        return None
+        raise ValueError("preflight is required")
     artifacts = preflight.get("artifacts") if isinstance(preflight.get("artifacts"), dict) else {}
     return {
         "source_json": source_path,
+        "source_sha256": preflight.get("_source_sha256"),
         "status": preflight.get("status"),
         "scope": preflight.get("scope"),
         "currency": preflight.get("currency"),
@@ -913,11 +979,47 @@ def preflight_profile(preflight: dict | None, source_path: str | None) -> dict |
     }
 
 
+def extraction_review_state(rows: list[dict], excluded_candidates: list[dict]) -> tuple[str, list[dict[str, str]]]:
+    if rows:
+        return ANALYSIS_READY_STATUS, []
+    if excluded_candidates:
+        return (
+            ANALYSIS_REVIEW_REQUIRED_STATUS,
+            [
+                {
+                    "code": "zero-count-with-interest-like-candidates",
+                    "message": (
+                        "No interest rows were counted, but interest-like statement lines were excluded. "
+                        "Review the evidence and re-run extraction before reporting."
+                    ),
+                }
+            ],
+        )
+    return (
+        ANALYSIS_ZERO_CONFIRMATION_STATUS,
+        [
+            {
+                "code": "zero-interest-confirmation-required",
+                "message": (
+                    "No interest-like evidence was found. A preparer must explicitly confirm the zero-interest "
+                    "result before a support packet can be generated."
+                ),
+            }
+        ],
+    )
+
+
 def command_extract(args: argparse.Namespace) -> int:
     tax_year = int(args.tax_year)
     account_currency_override = normalize_currency_code(args.account_currency, "account currency")
     pdf_paths = [Path(p) for p in args.pdf]
-    preflight = load_preflight_json(args.preflight_json, "one-institution", tax_year, args.pdf)
+    preflight = load_preflight_json(
+        args.preflight_json,
+        "one-institution",
+        tax_year,
+        args.pdf,
+        args.institution,
+    )
     all_rows: list[dict] = []
     all_excluded: list[dict] = []
     all_warnings: list[str] = preflight_warning_lines(preflight)
@@ -931,6 +1033,8 @@ def command_extract(args: argparse.Namespace) -> int:
         statement_files.append(
             {
                 "file": str(pdf_path),
+                "resolved_file": normalize_preflight_path(pdf_path),
+                "content_sha256": sha256_file(pdf_path, "statement PDF"),
                 "page_count": meta["page_count"],
                 "character_count": meta["character_count"],
                 "detected_periods": meta["periods"],
@@ -949,7 +1053,9 @@ def command_extract(args: argparse.Namespace) -> int:
     title_values = sorted({title for item in statement_files for title in item.get("statement_titles", [])})
     period_values = sorted({period for item in statement_files for period in item.get("detected_periods", [])})
     institution_label_sources = sorted({item.get("institution_label_basis", "") for item in statement_files if item.get("institution_label_basis")})
+    analysis_status, analysis_review_gates = extraction_review_state(all_rows, all_excluded)
     analysis = {
+        "skill": SKILL_NAME,
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "institution": args.institution,
@@ -968,8 +1074,18 @@ def command_extract(args: argparse.Namespace) -> int:
             "one_tax_year_only": True,
             "text_pdfs_only": True,
         },
-        "preflight": preflight_profile(preflight, args.preflight_json),
+        "status": analysis_status,
+        "review_gates": analysis_review_gates,
+        "preflight": preflight_profile(preflight, normalize_preflight_path(args.preflight_json)),
         "statement_files": statement_files,
+        "source_pdf_summary": {
+            "file_count": len(statement_files),
+            "total_page_count": sum(int(item["page_count"]) for item in statement_files),
+            "total_character_count": sum(int(item["character_count"]) for item in statement_files),
+            "content_sha256_by_file": [
+                {"file": item["file"], "content_sha256": item["content_sha256"]} for item in statement_files
+            ],
+        },
         "rows": sorted(all_rows, key=lambda row: (row.get("date") or "9999-99-99", row.get("source_file", ""))),
         "excluded_candidates": all_excluded,
         "warnings": sorted(set(all_warnings)),
@@ -985,6 +1101,11 @@ def command_extract(args: argparse.Namespace) -> int:
     write_csv(analysis["rows"], csv_path)
     print(f"Wrote analysis: {out_path}")
     print(f"Wrote CSV: {csv_path}")
+    print(f"Analysis status: {analysis['status']}")
+    if analysis["review_gates"]:
+        print("Review gates:")
+        for gate in analysis["review_gates"]:
+            print(f"- {gate['code']}: {gate['message']}")
     if analysis["warnings"]:
         print("Warnings:")
         for warning in analysis["warnings"]:
@@ -1016,7 +1137,24 @@ def display_file_name(value: object) -> str:
     text = "" if value is None else str(value)
     if not text:
         return ""
-    return Path(text).name or text
+    return redact_pdf_text(Path(text).name or text)
+
+
+def redact_pdf_text(value: object) -> str:
+    text = "" if value is None else str(value)
+    text = re.sub(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "[redacted email]", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\b((?:account|acct|cuenta)\s*(?:number|no\.?|#)?\s*[:#-]?\s*)[A-Z0-9][A-Z0-9 -]{3,}",
+        r"\1[redacted]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"(?<![\d.])(?:\d[ -]?){5,}\d(?![\d.])", "[redacted identifier]", text)
+
+
+def redacted_pdf_snippet(value: object, limit: int = 220) -> str:
+    text = redact_pdf_text(value).strip()
+    return f"{text[:limit - 1]}…" if len(text) > limit else text
 
 
 def make_styles():
@@ -1229,7 +1367,7 @@ def page_footer(canvas, doc) -> None:
     canvas.restoreState()
 
 
-def load_fx_rates_json(path: Path, fallback_method: str | None, fallback_source: str, fallback_direction: str) -> dict[str, dict[str, object]]:
+def load_fx_rates_json(path: Path) -> dict[str, dict[str, object]]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -1237,15 +1375,20 @@ def load_fx_rates_json(path: Path, fallback_method: str | None, fallback_source:
     except json.JSONDecodeError as exc:
         raise SystemExit(f"FX rates JSON is invalid: {path} ({exc.msg} at line {exc.lineno}, column {exc.colno})") from None
 
-    default_method = fallback_method or "user-rate"
-    default_source = fallback_source
-    default_direction = fallback_direction
-    rates_payload = payload
-    if isinstance(payload, dict) and "rates" in payload:
-        default_method = payload.get("method") or default_method
-        default_source = payload.get("source") or default_source
-        default_direction = payload.get("rate_direction") or default_direction
-        rates_payload = payload.get("rates")
+    if not isinstance(payload, dict):
+        raise SystemExit("FX rates JSON must be an object with method, source, proof, rate_direction, and rates fields.")
+    if payload.get("method") != "posted-daily-spot":
+        raise SystemExit("FX rates JSON method must be 'posted-daily-spot'.")
+    default_source = payload.get("source")
+    default_proof = payload.get("proof")
+    default_direction = payload.get("rate_direction")
+    if not isinstance(default_source, str) or not default_source.strip():
+        raise SystemExit("FX rates JSON must include a non-empty source.")
+    if not isinstance(default_proof, (str, dict, list)) or not default_proof:
+        raise SystemExit("FX rates JSON must include non-empty proof metadata.")
+    if default_direction not in {"foreign-per-usd", "usd-per-foreign"}:
+        raise SystemExit("FX rates JSON rate_direction must be foreign-per-usd or usd-per-foreign.")
+    rates_payload = payload.get("rates")
 
     records: list[tuple[str, object]]
     if isinstance(rates_payload, dict):
@@ -1257,33 +1400,87 @@ def load_fx_rates_json(path: Path, fallback_method: str | None, fallback_source:
                 raise SystemExit("FX rates JSON list entries must be objects with date and rate fields.")
             records.append((str(item["date"]), item))
     else:
-        raise SystemExit("FX rates JSON must be a date-to-rate object, a rates object, or a list of date/rate objects.")
+        raise SystemExit("FX rates JSON rates must be a date-to-rate object or a list of date/rate objects.")
+    if not records:
+        raise SystemExit("FX rates JSON rates must not be empty.")
 
     loaded: dict[str, dict[str, object]] = {}
     for date_key, raw_value in records:
         if not re.fullmatch(r"20\d{2}-\d{2}-\d{2}", date_key):
             raise SystemExit(f"FX rate key must be an ISO date, got: {date_key}")
+        try:
+            date.fromisoformat(date_key)
+        except ValueError as exc:
+            raise SystemExit(f"FX rate key is not a real ISO date: {date_key}") from exc
+        if date_key in loaded:
+            raise SystemExit(f"FX rates JSON contains duplicate date: {date_key}")
         if isinstance(raw_value, dict):
             if "rate" not in raw_value:
                 raise SystemExit(f"FX rate entry for {date_key} must include a rate field.")
             rate_value = raw_value["rate"]
-            method = raw_value.get("method") or default_method
+            method = raw_value.get("method") or payload["method"]
             source = raw_value.get("source") or default_source
+            proof = raw_value.get("proof") or default_proof
             direction = raw_value.get("rate_direction") or default_direction
         else:
             rate_value = raw_value
-            method = default_method
+            method = payload["method"]
             source = default_source
+            proof = default_proof
             direction = default_direction
+        if method != "posted-daily-spot":
+            raise SystemExit(f"FX rate entry for {date_key} must use method posted-daily-spot.")
+        if not isinstance(source, str) or not source.strip():
+            raise SystemExit(f"FX rate entry for {date_key} has no source metadata.")
+        if not isinstance(proof, (str, dict, list)) or not proof:
+            raise SystemExit(f"FX rate entry for {date_key} has no proof metadata.")
         if direction not in {"foreign-per-usd", "usd-per-foreign"}:
             raise SystemExit(f"Unsupported rate_direction for {date_key}: {direction}")
         loaded[date_key] = {
             "rate": parse_decimal(str(rate_value), f"FX rate for {date_key}"),
             "method": str(method),
             "source": str(source),
+            "proof": proof,
             "rate_direction": str(direction),
         }
     return loaded
+
+
+def apply_daily_spot_rates(
+    rows: list[dict], currency: str, row_fx_rates: dict[str, dict[str, object]]
+) -> tuple[list[Decimal], list[str], str]:
+    row_usd_values: list[Decimal] = []
+    row_fx_labels: list[str] = []
+    used_sources: set[str] = set()
+    used_directions: set[str] = set()
+    for row in rows:
+        row_date = str(row.get("date", ""))
+        if not row_date:
+            raise SystemExit("Cannot apply row-level FX rates because at least one counted row has no date.")
+        fx_spec = row_fx_rates.get(row_date)
+        if not fx_spec:
+            raise SystemExit(f"Missing FX rate for counted row date: {row_date}")
+        amount = Decimal(str(row.get("amount_foreign", "0")))
+        rate = fx_spec["rate"]
+        direction = str(fx_spec["rate_direction"])
+        if direction == "foreign-per-usd":
+            row_usd = amount / rate
+            label = f"{money(rate)} {currency}/USD"
+        else:
+            row_usd = amount * rate
+            label = f"{money(rate)} USD/{currency}"
+        row_usd_values.append(row_usd)
+        row_fx_labels.append(label)
+        used_sources.add(str(fx_spec["source"]))
+        used_directions.add(direction)
+    sources = "; ".join(sorted(used_sources))
+    directions = ", ".join(sorted(used_directions))
+    return (
+        row_usd_values,
+        row_fx_labels,
+        "posted daily spot exchange rate; row-level rates matched by interest date; "
+        f"direction: {directions}; source: {sources}.",
+    )
 
 
 def reject_self_calculated_posted_average(args: argparse.Namespace) -> None:
@@ -1415,15 +1612,15 @@ def dependency_required_message(currency: str, tax_year: object) -> str:
     )
 
 
-def find_get_yearly_fx_rate_skill() -> Path | None:
+def find_installed_skill(skill_name: str) -> Path | None:
     candidates: list[Path] = []
     script_path = Path(__file__).resolve()
     if len(script_path.parents) >= 3:
-        candidates.append(script_path.parents[2] / "get-yearly-fx-rate" / "SKILL.md")
+        candidates.append(script_path.parents[2] / skill_name / "SKILL.md")
     env_codex_home = os.environ.get("CODEX_HOME")
     if env_codex_home:
-        candidates.append(Path(env_codex_home) / "skills" / "get-yearly-fx-rate" / "SKILL.md")
-    candidates.append(Path.home() / ".codex" / "skills" / "get-yearly-fx-rate" / "SKILL.md")
+        candidates.append(Path(env_codex_home) / "skills" / skill_name / "SKILL.md")
+    candidates.append(Path.home() / ".codex" / "skills" / skill_name / "SKILL.md")
     seen: set[Path] = set()
     for candidate in candidates:
         resolved = candidate.expanduser()
@@ -1435,17 +1632,37 @@ def find_get_yearly_fx_rate_skill() -> Path | None:
     return None
 
 
+def find_get_yearly_fx_rate_skill() -> Path | None:
+    return find_installed_skill("get-yearly-fx-rate")
+
+
 def command_dependency_check(args: argparse.Namespace) -> int:
-    skill_md = find_get_yearly_fx_rate_skill()
-    if skill_md:
-        print(f"get-yearly-fx-rate skill found: {skill_md}")
-        return 0
-    print(
-        "get-yearly-fx-rate skill not found. Install/run it before published yearly-average FX, "
-        "or use --fx-method user-rate with a confirmed custom rate.",
-        file=sys.stderr,
-    )
-    return 2
+    failures: list[str] = []
+    preflight_skill = find_installed_skill(PREFLIGHT_SKILL)
+    if preflight_skill:
+        print(f"Required {PREFLIGHT_SKILL} skill found: {preflight_skill}")
+    else:
+        failures.append(f"Required {PREFLIGHT_SKILL} skill not found.")
+    fx_skill = find_get_yearly_fx_rate_skill()
+    if fx_skill:
+        print(f"Optional get-yearly-fx-rate skill found: {fx_skill}")
+    else:
+        print("Optional get-yearly-fx-rate skill not found; published yearly-average FX will require installation.")
+    if pdfplumber is None:
+        failures.append("pdfplumber is unavailable in this Python runtime.")
+    if colors is None:
+        failures.append("reportlab is unavailable in this Python runtime.")
+    try:
+        import pypdf  # noqa: F401
+    except ImportError:
+        failures.append("pypdf is unavailable in this Python runtime.")
+    if failures:
+        for failure in failures:
+            print(failure, file=sys.stderr)
+        print("Use the bundled Codex workspace Python or install the missing required dependency.", file=sys.stderr)
+        return 2
+    print("PDF runtime dependencies available: pdfplumber, reportlab, pypdf.")
+    return 0
 
 
 def build_fx_confirmation_prompt(args: argparse.Namespace, analysis: dict, currency: str, foreign_total: Decimal) -> str:
@@ -1503,6 +1720,32 @@ def build_fx_confirmation_prompt(args: argparse.Namespace, analysis: dict, curre
     return "\n".join(lines)
 
 
+def build_daily_fx_confirmation_prompt(
+    analysis: dict,
+    currency: str,
+    foreign_total: Decimal,
+    rows: list[dict],
+    row_fx_rates: dict[str, dict[str, object]],
+) -> str:
+    row_usd_values, _row_fx_labels, fx_note = apply_daily_spot_rates(rows, currency, row_fx_rates)
+    institution = analysis.get("institution", "the institution")
+    tax_year = analysis.get("tax_year", "the tax year")
+    return "\n".join(
+        [
+            f"FX confirmation needed before I generate the PDF for {institution} {tax_year}.",
+            "",
+            "I found/propose date-keyed posted daily spot FX rates:",
+            f"Method: {FX_METHOD_LABELS['posted-daily-spot']}",
+            f"Rate coverage: {len(row_fx_rates)} supplied date(s) for {len(rows)} counted interest row(s)",
+            f"Source-currency total: {money(foreign_total)} {currency}",
+            f"USD total using these rates: USD {money(sum(row_usd_values, Decimal('0')))}",
+            f"Source/proof summary: {fx_note}",
+            "",
+            'Reply "confirm" to use these daily spot rates, or send a custom rate instead.',
+        ]
+    )
+
+
 def load_analysis_payload(input_path: Path) -> dict:
     try:
         analysis = json.loads(input_path.read_text(encoding="utf-8"))
@@ -1513,6 +1756,115 @@ def load_analysis_payload(input_path: Path) -> dict:
     if not isinstance(analysis, dict):
         raise SystemExit(f"Input analysis JSON must be an object: {input_path}")
     return analysis
+
+
+def require_sha256(value: object, label: str) -> str:
+    digest = str(value or "")
+    if not SHA256_PATTERN.fullmatch(digest):
+        raise SystemExit(f"Input analysis JSON has invalid {label}; re-run extract to create a provenance-complete analysis.")
+    return digest
+
+
+def validate_analysis_contract(analysis: dict, input_path: Path) -> None:
+    if analysis.get("skill") != SKILL_NAME:
+        raise SystemExit(f"Input analysis JSON must be generated by {SKILL_NAME}; re-run extract before reporting.")
+    if str(analysis.get("schema_version", "")) not in ANALYSIS_SUPPORTED_SCHEMA_VERSIONS:
+        raise SystemExit(
+            f"Unsupported analysis schema_version {analysis.get('schema_version')!r}; re-run extract before reporting."
+        )
+    institution = analysis.get("institution")
+    if not isinstance(institution, str) or not institution.strip():
+        raise SystemExit("Input analysis JSON has no institution; re-run extract before reporting.")
+    try:
+        tax_year = int(analysis.get("tax_year"))
+    except (TypeError, ValueError) as exc:
+        raise SystemExit("Input analysis JSON has no valid tax_year; re-run extract before reporting.") from exc
+    analysis_status = analysis.get("status")
+    if analysis_status not in {
+        ANALYSIS_READY_STATUS,
+        ANALYSIS_REVIEW_REQUIRED_STATUS,
+        ANALYSIS_ZERO_CONFIRMATION_STATUS,
+    }:
+        raise SystemExit("Input analysis JSON has no supported extraction status; re-run extract before reporting.")
+    analysis_review_gates = analysis.get("review_gates")
+    if not isinstance(analysis_review_gates, list):
+        raise SystemExit("Input analysis JSON has invalid review_gates; re-run extract before reporting.")
+    if analysis_status == ANALYSIS_READY_STATUS and analysis_review_gates:
+        raise SystemExit("Input analysis JSON marks ready status with review gates; re-run extract before reporting.")
+
+    statement_files = analysis.get("statement_files")
+    if not isinstance(statement_files, list) or not statement_files:
+        raise SystemExit("Input analysis JSON has no statement_files; re-run extract before reporting.")
+    normalized_files: list[tuple[str, str]] = []
+    for item in statement_files:
+        if not isinstance(item, dict):
+            raise SystemExit("Input analysis JSON has an invalid statement_files entry; re-run extract before reporting.")
+        source_file = item.get("resolved_file") or item.get("file")
+        if not isinstance(source_file, str) or not source_file:
+            raise SystemExit("Input analysis JSON statement_files entries need a source file; re-run extract before reporting.")
+        normalized_files.append((source_file, require_sha256(item.get("content_sha256"), "statement PDF SHA-256")))
+
+    source_summary = analysis.get("source_pdf_summary")
+    if not isinstance(source_summary, dict) or source_summary.get("file_count") != len(statement_files):
+        raise SystemExit("Input analysis JSON has an invalid source_pdf_summary; re-run extract before reporting.")
+    summary_hashes = source_summary.get("content_sha256_by_file")
+    if not isinstance(summary_hashes, list) or len(summary_hashes) != len(statement_files):
+        raise SystemExit("Input analysis JSON has incomplete source PDF digest metadata; re-run extract before reporting.")
+    expected_hashes = sorted(
+        (str(item.get("file", "")), str(item.get("content_sha256", ""))) for item in statement_files
+    )
+    actual_hashes = sorted(
+        (str(item.get("file", "")), str(item.get("content_sha256", "")))
+        for item in summary_hashes
+        if isinstance(item, dict)
+    )
+    if actual_hashes != expected_hashes:
+        raise SystemExit("Input analysis JSON source PDF digest summary does not match statement_files; re-run extract.")
+
+    preflight = analysis.get("preflight")
+    if not isinstance(preflight, dict):
+        raise SystemExit("Input analysis JSON has no preflight proof; re-run extract before reporting.")
+    if preflight.get("status") != PREFLIGHT_READY_STATUS or preflight.get("review_gates") != []:
+        raise SystemExit("Input analysis JSON has a non-ready preflight proof; resolve preflight and re-run extract.")
+    source_json = preflight.get("source_json")
+    if not isinstance(source_json, str) or not source_json:
+        raise SystemExit("Input analysis JSON preflight proof has no source JSON path; re-run extract before reporting.")
+    recorded_preflight_sha256 = require_sha256(preflight.get("source_sha256"), "preflight SHA-256")
+    refreshed_preflight = load_preflight_json(
+        source_json,
+        "one-institution",
+        tax_year,
+        [source_file for source_file, _digest in normalized_files],
+        institution,
+    )
+    if refreshed_preflight.get("_source_sha256") != recorded_preflight_sha256:
+        raise SystemExit("Preflight proof changed after extraction; re-run extract before reporting.")
+
+    for source_file, recorded_sha256 in normalized_files:
+        current_sha256 = sha256_file(Path(source_file), "statement PDF")
+        if current_sha256 != recorded_sha256:
+            raise SystemExit(f"Statement PDF changed after extraction: {source_file}. Re-run extract before reporting.")
+
+
+def zero_interest_confirmation(analysis: dict, args: argparse.Namespace) -> str:
+    status = analysis.get("status")
+    review_gates = analysis.get("review_gates", [])
+    if status == ANALYSIS_REVIEW_REQUIRED_STATUS:
+        codes = ", ".join(preflight_gate_codes(review_gates)) or "review-required"
+        raise SystemExit(
+            f"Analysis status is review-required ({codes}); resolve excluded interest-like candidates and re-run extract."
+        )
+    if status != ANALYSIS_ZERO_CONFIRMATION_STATUS:
+        return ""
+    if not args.zero_interest_confirmed:
+        raise SystemExit(
+            "This analysis found no interest-like evidence. Re-run report with --zero-interest-confirmed and "
+            "--zero-interest-confirmation-note after preparer review."
+        )
+    note = args.zero_interest_confirmation_note.strip()
+    if not note:
+        raise SystemExit("--zero-interest-confirmation-note is required with --zero-interest-confirmed.")
+    return note
 
 
 def report_rows_and_total(analysis: dict, input_path: Path) -> tuple[list[dict], dict[str, str], str, Decimal]:
@@ -1536,12 +1888,20 @@ def report_rows_and_total(analysis: dict, input_path: Path) -> tuple[list[dict],
 def command_fx_prompt(args: argparse.Namespace) -> int:
     input_path = Path(args.input)
     analysis = load_analysis_payload(input_path)
-    _rows, _totals, currency, foreign_total = report_rows_and_total(analysis, input_path)
+    rows, _totals, currency, foreign_total = report_rows_and_total(analysis, input_path)
     if foreign_total == 0:
         print("No interest rows were counted, so no FX confirmation is needed.")
         return 0
     if currency == "USD":
         print("Counted interest rows are already denominated in USD, so no FX confirmation is needed.")
+        return 0
+    if args.fx_workpaper_json and args.fx_rates_json:
+        raise SystemExit("Use either --fx-workpaper-json or --fx-rates-json, not both.")
+    if args.fx_rates_json:
+        if args.fx_method != "posted-daily-spot":
+            raise SystemExit("--fx-rates-json is only valid with --fx-method posted-daily-spot.")
+        row_fx_rates = load_fx_rates_json(Path(args.fx_rates_json))
+        print(build_daily_fx_confirmation_prompt(analysis, currency, foreign_total, rows, row_fx_rates))
         return 0
     configure_fx_from_workpaper(args, analysis, currency)
     if published_fx_requires_workpaper(args):
@@ -1558,9 +1918,13 @@ def command_report(args: argparse.Namespace) -> int:
         raise SystemExit("reportlab is required. Run with a Python environment that has reportlab installed.")
     if args.fx_workpaper_json and args.fx_rates_json:
         raise SystemExit("Use either --fx-workpaper-json for yearly-average FX or --fx-rates-json for explicit spot rates, not both.")
+    if args.fx_rates_json and args.fx_method != "posted-daily-spot":
+        raise SystemExit("--fx-rates-json is only valid with --fx-method posted-daily-spot.")
     input_path = Path(args.input)
     analysis = load_analysis_payload(input_path)
+    validate_analysis_contract(analysis, input_path)
     rows, _totals, currency, foreign_total = report_rows_and_total(analysis, input_path)
+    zero_interest_note = zero_interest_confirmation(analysis, args)
 
     fx_rate = Decimal("0")
     usd_total = Decimal("0")
@@ -1578,7 +1942,14 @@ def command_report(args: argparse.Namespace) -> int:
             fx_note = "No FX conversion was needed because the counted interest rows are already denominated in USD."
         else:
             fx_workpaper = configure_fx_from_workpaper(args, analysis, currency)
+            row_fx_rates = load_fx_rates_json(Path(args.fx_rates_json)) if args.fx_rates_json else {}
             if not args.fx_rate_confirmed:
+                if row_fx_rates:
+                    print(
+                        build_daily_fx_confirmation_prompt(analysis, currency, foreign_total, rows, row_fx_rates),
+                        file=sys.stderr,
+                    )
+                    return 2
                 if published_fx_requires_workpaper(args):
                     print(dependency_required_message(currency, analysis.get("tax_year", "")), file=sys.stderr)
                     return 2
@@ -1594,39 +1965,12 @@ def command_report(args: argparse.Namespace) -> int:
                         return 2
                 print(build_fx_confirmation_prompt(args, analysis, currency, foreign_total), file=sys.stderr)
                 return 2
-            fx_confirmation = args.fx_confirmation_note or "User confirmed the FX rate before report generation."
-            row_fx_rates = load_fx_rates_json(Path(args.fx_rates_json), args.fx_method, args.fx_source, args.rate_direction) if args.fx_rates_json else {}
+            if not args.fx_confirmation_note.strip():
+                raise SystemExit("--fx-confirmation-note is required with --fx-rate-confirmed for non-USD reports.")
+            fx_confirmation = args.fx_confirmation_note.strip()
             if row_fx_rates:
-                used_methods: set[str] = set()
-                used_sources: set[str] = set()
-                used_directions: set[str] = set()
-                for row in rows:
-                    row_date = row.get("date", "")
-                    if not row_date:
-                        raise SystemExit("Cannot apply row-level FX rates because at least one counted row has no date.")
-                    fx_spec = row_fx_rates.get(str(row_date))
-                    if not fx_spec:
-                        raise SystemExit(f"Missing FX rate for counted row date: {row_date}")
-                    amount = Decimal(str(row.get("amount_foreign", "0")))
-                    rate = fx_spec["rate"]
-                    direction = str(fx_spec["rate_direction"])
-                    if direction == "foreign-per-usd":
-                        row_usd = amount / rate
-                        label = f"{money(rate)} {currency}/USD"
-                    else:
-                        row_usd = amount * rate
-                        label = f"{money(rate)} USD/{currency}"
-                    row_usd_values.append(row_usd)
-                    row_fx_labels.append(label)
-                    used_methods.add(str(fx_spec["method"]))
-                    if fx_spec["source"]:
-                        used_sources.add(str(fx_spec["source"]))
-                    used_directions.add(direction)
+                row_usd_values, row_fx_labels, fx_note = apply_daily_spot_rates(rows, currency, row_fx_rates)
                 usd_total = sum(row_usd_values, Decimal("0"))
-                methods = ", ".join(FX_METHOD_LABELS.get(method, method) for method in sorted(used_methods))
-                sources = "; ".join(sorted(used_sources)) or "No source label supplied"
-                directions = ", ".join(sorted(used_directions))
-                fx_note = f"{methods}; row-level rates matched by interest date; direction: {directions}; source: {sources}."
             else:
                 if published_fx_requires_workpaper(args):
                     raise SystemExit(dependency_required_message(currency, analysis.get("tax_year", "")))
@@ -1668,8 +2012,8 @@ def command_report(args: argparse.Namespace) -> int:
 
     profile = analysis.get("institution_profile", {})
     account_currency = profile.get("account_currency", "") or currency
-    profile_periods = ", ".join(profile.get("detected_periods", [])) or "Not detected"
-    profile_titles = ", ".join(profile.get("statement_titles", [])) or "Not detected"
+    profile_periods = redacted_pdf_snippet(", ".join(profile.get("detected_periods", []))) or "Not detected"
+    profile_titles = redacted_pdf_snippet(", ".join(profile.get("statement_titles", []))) or "Not detected"
     label_sources = ", ".join(profile.get("institution_label_sources", [])) or "Not recorded"
     source_total = f"{money(foreign_total)} {currency}".strip() if currency else "0.00"
     usd_total_label = f"USD {money(usd_total)}" if foreign_total else "USD 0.00"
@@ -1686,7 +2030,7 @@ def command_report(args: argparse.Namespace) -> int:
     story.append(Paragraph("Packet Summary", styles["SectionTitle"]))
     summary_rows = [
         ["Field", "Value"],
-        ["Institution", analysis.get("institution", "")],
+        ["Institution", redacted_pdf_snippet(analysis.get("institution", ""))],
         ["Tax year", analysis.get("tax_year", "")],
         ["Account currency", account_currency or "Not detected"],
         ["Statement title(s)", profile_titles],
@@ -1695,14 +2039,15 @@ def command_report(args: argparse.Namespace) -> int:
         ["Statement files reviewed", str(len(analysis.get("statement_files", [])))],
         ["Interest rows counted", str(len(rows))],
         ["Source-currency total", source_total],
-        ["USD conversion", fx_note],
-        ["FX confirmation", fx_confirmation or "Not applicable"],
+        ["Zero-interest confirmation", redacted_pdf_snippet(zero_interest_note) or "Not applicable"],
+        ["USD conversion", redacted_pdf_snippet(fx_note)],
+        ["FX confirmation", redacted_pdf_snippet(fx_confirmation) or "Not applicable"],
         ["USD total for reporting support", usd_total_label],
     ]
     if fx_workpaper:
         proof = fx_workpaper.get("proof", {})
         if isinstance(proof, dict) and proof.get("workpaper_pdf"):
-            summary_rows.insert(-1, ["FX proof workpaper", Path(str(proof.get("workpaper_pdf"))).name])
+            summary_rows.insert(-1, ["FX proof workpaper", display_file_name(proof.get("workpaper_pdf"))])
     add_table(story, summary_rows, [2.1 * inch, 5.1 * inch], styles)
 
     story.append(Paragraph("Statements Reviewed", styles["SectionTitle"]))
@@ -1733,15 +2078,21 @@ def command_report(args: argparse.Namespace) -> int:
                 [
                     row.get("date", ""),
                     row.get("statement_period", ""),
-                    row.get("description", ""),
+                    redacted_pdf_snippet(row.get("description", "")),
                     f"{money(amount)} {row.get('currency', '')}".strip(),
                     usd_cell,
-                    f"{Path(row.get('source_file', '')).name}, p. {row.get('page', '')}",
+                    f"{display_file_name(row.get('source_file', ''))}, p. {row.get('page', '')}",
                 ]
             )
         add_table(story, interest_rows, [0.75 * inch, 0.65 * inch, 2.55 * inch, 1.1 * inch, 0.9 * inch, 1.25 * inch], styles)
     else:
         story.append(Paragraph("No interest rows were counted from the provided machine-readable statements.", styles["Normal"]))
+        if zero_interest_note:
+            story.append(
+                Paragraph(
+                    escape(f"Preparer zero-interest confirmation: {redacted_pdf_snippet(zero_interest_note)}"), styles["Normal"]
+                )
+            )
         story.append(Spacer(1, 0.12 * inch))
 
     excluded = analysis.get("excluded_candidates", [])
@@ -1751,9 +2102,9 @@ def command_report(args: argparse.Namespace) -> int:
         for item in excluded[:80]:
             excluded_rows.append(
                 [
-                    f"{Path(item.get('source_file', '')).name}, p. {item.get('page', '')}",
-                    item.get("evidence_text", ""),
-                    item.get("reason", ""),
+                    f"{display_file_name(item.get('source_file', ''))}, p. {item.get('page', '')}",
+                    redacted_pdf_snippet(item.get("evidence_text", "")),
+                    redacted_pdf_snippet(item.get("reason", "")),
                 ]
             )
         add_table(story, excluded_rows, [1.3 * inch, 3.7 * inch, 2.2 * inch], styles)
@@ -1761,7 +2112,7 @@ def command_report(args: argparse.Namespace) -> int:
         story.append(Paragraph("No ambiguous or excluded interest-like lines were detected.", styles["Normal"]))
         story.append(Spacer(1, 0.12 * inch))
 
-    warnings = list(analysis.get("warnings", []))
+    warnings = [redacted_pdf_snippet(warning) for warning in analysis.get("warnings", [])]
     if custom_rate_no_source:
         warnings.append(CUSTOM_RATE_NO_SOURCE_WARNING)
     if warnings:
@@ -1871,6 +2222,48 @@ def command_self_test(args: argparse.Namespace) -> int:
         failures.append(f"cop-account-currency: expected COP account currency, got {meta.get('account_currency')}")
     if not rows or rows[0].get("currency") != "COP" or rows[0].get("amount_foreign") != "642.00":
         failures.append(f"cop-symbol-currency: expected 642.00 COP row, got {rows[:1]}")
+    split_interest_pages = [
+        PageText(
+            Path("example-bank-split.pdf"),
+            1,
+            "Example Bank\n2025-01-03 Interest credited\n$10.00",
+        )
+    ]
+    split_rows, split_excluded, _split_warnings, _split_meta = extract_rows_from_pages(
+        split_interest_pages, "Example Bank", 2025, None
+    )
+    split_status, split_gates = extraction_review_state(split_rows, split_excluded)
+    if split_status != ANALYSIS_REVIEW_REQUIRED_STATUS or not split_gates:
+        failures.append("split-row-zero: excluded interest-like evidence must block zero-interest reporting")
+    no_interest_pages = [PageText(Path("example-bank-empty.pdf"), 1, "Example Bank\n2025-01-03 Account statement")]
+    no_interest_rows, no_interest_excluded, _no_interest_warnings, _no_interest_meta = extract_rows_from_pages(
+        no_interest_pages, "Example Bank", 2025, None
+    )
+    zero_status, zero_gates = extraction_review_state(no_interest_rows, no_interest_excluded)
+    if zero_status != ANALYSIS_ZERO_CONFIRMATION_STATUS or not zero_gates:
+        failures.append("true-zero-interest: no-evidence result must require preparer confirmation")
+    redacted = redacted_pdf_snippet("Account 123456789012; contact test@example.com; transfer 987654321")
+    if "123456789012" in redacted or "987654321" in redacted or "test@example.com" in redacted:
+        failures.append(f"pdf-redaction: identifier or email leaked in {redacted!r}")
+    try:
+        zero_interest_confirmation(
+            {"status": ANALYSIS_ZERO_CONFIRMATION_STATUS, "review_gates": zero_gates},
+            argparse.Namespace(zero_interest_confirmed=False, zero_interest_confirmation_note=""),
+        )
+        failures.append("zero-interest-confirmation: expected confirmation rejection")
+    except SystemExit:
+        pass
+    if (
+        zero_interest_confirmation(
+            {"status": ANALYSIS_ZERO_CONFIRMATION_STATUS, "review_gates": zero_gates},
+            argparse.Namespace(
+                zero_interest_confirmed=True,
+                zero_interest_confirmation_note="Preparer reviewed statements and confirmed no interest was credited.",
+            ),
+        )
+        != "Preparer reviewed statements and confirmed no interest was credited."
+    ):
+        failures.append("zero-interest-confirmation: expected retained confirmation note")
 
     analysis = {
         "institution": "Example Bank",
@@ -1893,11 +2286,23 @@ def command_self_test(args: argparse.Namespace) -> int:
     with tempfile.TemporaryDirectory(prefix="statements-to-interest-self-test-") as tmp:
         tmp_path = Path(tmp)
         pdf_path = tmp_path / "statement.pdf"
+        pdf_path.write_bytes(b"synthetic statement fixture")
         preflight_path = write_preflight_fixture(tmp_path, "preflight-ok", 2025, "one-institution", [pdf_path])
-        preflight = load_preflight_json(str(preflight_path), "one-institution", 2025, [str(pdf_path)])
+        preflight = load_preflight_json(
+            str(preflight_path), "one-institution", 2025, [str(pdf_path)], "Preflight Bank"
+        )
         preflight_warnings = preflight_warning_lines(preflight)
         if not any("sample review warning" in warning for warning in preflight_warnings):
             failures.append("preflight-warning-import: expected sample warning")
+        profile = preflight_profile(preflight, str(preflight_path))
+        if len(str(profile.get("source_sha256", ""))) != 64:
+            failures.append("preflight-source-digest: expected SHA-256 digest")
+        try:
+            load_preflight_json(None, "one-institution", 2025, [str(pdf_path)], "Preflight Bank")
+            failures.append("missing-preflight: expected preflight rejection")
+        except SystemExit as exc:
+            if "requires --preflight-json" not in str(exc):
+                failures.append(f"missing-preflight: unexpected rejection {exc}")
         for name, year, scope, pdfs, expected in (
             ("bad-year", 2024, "one-institution", [pdf_path], "tax_year"),
             ("bad-scope", 2025, "one-account", [pdf_path], "scope"),
@@ -1905,8 +2310,134 @@ def command_self_test(args: argparse.Namespace) -> int:
         ):
             bad_preflight = write_preflight_fixture(tmp_path, name, year, scope, pdfs)
             try:
-                load_preflight_json(str(bad_preflight), "one-institution", 2025, [str(pdf_path)])
+                load_preflight_json(
+                    str(bad_preflight), "one-institution", 2025, [str(pdf_path)], "Preflight Bank"
+                )
                 failures.append(f"{name}: expected preflight rejection")
+            except SystemExit as exc:
+                if expected not in str(exc):
+                    failures.append(f"{name}: expected {expected!r} in rejection, got {exc}")
+        try:
+            load_preflight_json(str(preflight_path), "one-institution", 2025, [str(pdf_path)], "Other Bank")
+            failures.append("institution-mismatch: expected preflight rejection")
+        except SystemExit as exc:
+            if "institution" not in str(exc):
+                failures.append(f"institution-mismatch: unexpected rejection {exc}")
+        gated_preflight = write_preflight_fixture(
+            tmp_path,
+            "preflight-gated",
+            2025,
+            "one-institution",
+            [pdf_path],
+            status="review-required",
+            review_gates=[{"code": "sample-gate", "message": "sample gate message"}],
+        )
+        try:
+            load_preflight_json(
+                str(gated_preflight), "one-institution", 2025, [str(pdf_path)], "Preflight Bank"
+            )
+            failures.append("preflight-review-gate: expected preflight rejection")
+        except SystemExit as exc:
+            if "review_gates" not in str(exc):
+                failures.append(f"preflight-review-gate: unexpected rejection {exc}")
+        stale_preflight = write_preflight_fixture(
+            tmp_path,
+            "preflight-stale",
+            2025,
+            "one-institution",
+            [pdf_path],
+            status="review-required",
+        )
+        try:
+            load_preflight_json(
+                str(stale_preflight), "one-institution", 2025, [str(pdf_path)], "Preflight Bank"
+            )
+            failures.append("preflight-status: expected preflight rejection")
+        except SystemExit as exc:
+            if "status" not in str(exc):
+                failures.append(f"preflight-status: unexpected rejection {exc}")
+
+        source_pdf_sha256 = sha256_file(pdf_path, "statement PDF")
+        valid_analysis = {
+            "skill": SKILL_NAME,
+            "schema_version": SCHEMA_VERSION,
+            "institution": "Preflight Bank",
+            "tax_year": 2025,
+            "status": ANALYSIS_READY_STATUS,
+            "review_gates": [],
+            "preflight": preflight_profile(preflight, normalize_preflight_path(preflight_path)),
+            "statement_files": [
+                {
+                    "file": str(pdf_path),
+                    "resolved_file": normalize_preflight_path(pdf_path),
+                    "content_sha256": source_pdf_sha256,
+                    "page_count": 1,
+                    "character_count": 100,
+                }
+            ],
+            "source_pdf_summary": {
+                "file_count": 1,
+                "total_page_count": 1,
+                "total_character_count": 100,
+                "content_sha256_by_file": [{"file": str(pdf_path), "content_sha256": source_pdf_sha256}],
+            },
+            "rows": analysis["rows"],
+            "warnings": [],
+            "excluded_candidates": [],
+        }
+        validate_analysis_contract(valid_analysis, tmp_path / "valid-analysis.json")
+        try:
+            validate_analysis_contract(analysis, tmp_path / "hand-made-analysis.json")
+            failures.append("analysis-contract: expected hand-made analysis rejection")
+        except SystemExit as exc:
+            if "generated by" not in str(exc):
+                failures.append(f"analysis-contract: unexpected rejection {exc}")
+
+        daily_rates_path = tmp_path / "daily-rates.json"
+        daily_rates_path.write_text(
+            json.dumps(
+                {
+                    "method": "posted-daily-spot",
+                    "source": "Example central-bank daily series, retrieved 2026-07-10",
+                    "proof": {"saved_file": "daily-rate-proof.html", "sha256": "abc123"},
+                    "rate_direction": "foreign-per-usd",
+                    "rates": {"2025-01-03": "4000.00"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        daily_rates = load_fx_rates_json(daily_rates_path)
+        daily_values, _daily_labels, _daily_note = apply_daily_spot_rates(analysis["rows"], "COP", daily_rates)
+        if daily_values != [Decimal("0.3715")]:
+            failures.append(f"daily-fx-valid: unexpected converted values {daily_values}")
+        for name, payload, expected in (
+            (
+                "daily-fx-yearly-bypass",
+                {
+                    "method": "posted-yearly-average",
+                    "source": "self-calculated daily average",
+                    "proof": "calculation.csv",
+                    "rate_direction": "foreign-per-usd",
+                    "rates": {"2025-01-03": "4000.00"},
+                },
+                "method",
+            ),
+            (
+                "daily-fx-missing-proof",
+                {
+                    "method": "posted-daily-spot",
+                    "source": "Example daily source",
+                    "rate_direction": "foreign-per-usd",
+                    "rates": {"2025-01-03": "4000.00"},
+                },
+                "proof",
+            ),
+        ):
+            bad_daily_path = tmp_path / f"{name}.json"
+            bad_daily_path.write_text(json.dumps(payload), encoding="utf-8")
+            try:
+                load_fx_rates_json(bad_daily_path)
+                failures.append(f"{name}: expected rejection")
             except SystemExit as exc:
                 if expected not in str(exc):
                     failures.append(f"{name}: expected {expected!r} in rejection, got {exc}")
@@ -1963,27 +2494,275 @@ def command_self_test(args: argparse.Namespace) -> int:
         prompt = build_fx_confirmation_prompt(prompt_args, analysis, "COP", Decimal("1486.00"))
         if CUSTOM_RATE_NO_SOURCE_LABEL not in prompt:
             failures.append("custom-rate-no-source-prompt: expected honest no-source label")
+        preflight_path.write_text(preflight_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        try:
+            validate_analysis_contract(valid_analysis, tmp_path / "stale-analysis.json")
+            failures.append("analysis-stale-preflight: expected preflight proof rejection")
+        except SystemExit as exc:
+            if "changed after extraction" not in str(exc):
+                failures.append(f"analysis-stale-preflight: unexpected rejection {exc}")
     if failures:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print(f"Self-test passed: {len(cases) + 1} parser cases, 6 FX/dependency cases, 4 preflight cases")
+    print(f"Self-test passed: {len(cases) + 3} parser cases, 9 FX/dependency cases, 14 preflight/provenance cases")
     return 0
 
 
-def write_preflight_fixture(root: Path, name: str, tax_year: int, scope: str, pdf_paths: list[Path]) -> Path:
+def command_smoke_test(_args: argparse.Namespace) -> int:
+    if pdfplumber is None or colors is None:
+        print("Smoke test requires pdfplumber and reportlab.", file=sys.stderr)
+        return 2
+    try:
+        from pypdf import PdfReader
+        from reportlab.pdfgen import canvas
+    except ImportError as exc:
+        print(f"Smoke test requires pypdf and reportlab canvas: {exc}", file=sys.stderr)
+        return 2
+
+    failures: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="statements-to-interest-smoke-") as tmp:
+        root = Path(tmp)
+
+        def write_pdf(name: str, lines: list[str]) -> Path:
+            path = root / name
+            document = canvas.Canvas(str(path), pagesize=letter)
+            text = document.beginText(72, 720)
+            text.setFont("Helvetica", 11)
+            for line in lines:
+                text.textLine(line)
+            document.drawText(text)
+            document.save()
+            return path
+
+        def extract_pdf(name: str, lines: list[str]) -> Path:
+            pdf_path = write_pdf(name, lines)
+            preflight_path = write_preflight_fixture(
+                root,
+                f"{Path(name).stem}-preflight",
+                2025,
+                "one-institution",
+                [pdf_path],
+                primary_institution="Example Bank",
+            )
+            analysis_path = root / f"{Path(name).stem}-analysis.json"
+            command_extract(
+                argparse.Namespace(
+                    pdf=[str(pdf_path)],
+                    tax_year=2025,
+                    institution="Example Bank",
+                    account_currency=None,
+                    preflight_json=str(preflight_path),
+                    out=str(analysis_path),
+                    csv=None,
+                )
+            )
+            return analysis_path
+
+        def report_args(input_path: Path, output_path: Path, **overrides: object) -> argparse.Namespace:
+            values: dict[str, object] = {
+                "input": str(input_path),
+                "fx_method": None,
+                "fx_rate": None,
+                "fx_workpaper_json": None,
+                "fx_rates_json": None,
+                "fx_source": "",
+                "fx_rate_confirmed": False,
+                "fx_confirmation_note": "",
+                "zero_interest_confirmed": False,
+                "zero_interest_confirmation_note": "",
+                "rate_direction": "foreign-per-usd",
+                "out": str(output_path),
+            }
+            values.update(overrides)
+            return argparse.Namespace(**values)
+
+        usd_analysis_path = extract_pdf(
+            "usd-statement.pdf",
+            [
+                "Example Bank",
+                "Account currency: USD",
+                "2025-01-03 Interest credited USD 12.34 Account 123456789012",
+            ],
+        )
+        usd_output_path = root / "usd-packet.pdf"
+        if command_report(report_args(usd_analysis_path, usd_output_path)) != 0:
+            failures.append("usd-happy-path: report returned nonzero")
+        usd_text = "\n".join((page.extract_text() or "") for page in PdfReader(usd_output_path).pages)
+        if "Foreign Bank Interest Support Packet" not in usd_text or "USD 12.34" not in usd_text:
+            failures.append("usd-happy-path: packet text is missing title or USD total")
+        if str(root) in usd_text or "123456789012" in usd_text:
+            failures.append("pdf-privacy: packet exposed an absolute source path or account identifier")
+
+        cop_analysis_path = extract_pdf(
+            "cop-statement.pdf",
+            [
+                "Example Bank",
+                "Account currency: COP",
+                "2025-01-03 Interest credited COP 1486.00",
+            ],
+        )
+        workpaper_path = root / "cop-workpaper.json"
+        workpaper_path.write_text(
+            json.dumps(
+                {
+                    "skill": "get-yearly-fx-rate",
+                    "currency": "COP",
+                    "year": 2025,
+                    "foreign_per_usd": "4000.00",
+                    "source": {
+                        "title": "Example published yearly average",
+                        "url": "https://example.test/fx",
+                        "retrieved": "2026-07-10",
+                    },
+                    "proof": {
+                        "workpaper_json": str(workpaper_path),
+                        "workpaper_pdf": str(root / "cop-workpaper.pdf"),
+                        "saved_files": [{"path": str(root / "cop-source-proof.html"), "sha256": "abc123"}],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        cop_output_path = root / "cop-packet.pdf"
+        if (
+            command_report(
+                report_args(
+                    cop_analysis_path,
+                    cop_output_path,
+                    fx_workpaper_json=str(workpaper_path),
+                    fx_rate_confirmed=True,
+                    fx_confirmation_note="Preparer confirmed the published yearly average rate.",
+                )
+            )
+            != 0
+        ):
+            failures.append("cop-yearly-average: report returned nonzero")
+        cop_text = "\n".join((page.extract_text() or "") for page in PdfReader(cop_output_path).pages)
+        if "USD 0.37" not in cop_text or "Preparer confirmed the published yearly average rate." not in cop_text:
+            failures.append("cop-yearly-average: packet is missing conversion or confirmation evidence")
+
+        bad_fx_path = root / "bad-fx.json"
+        bad_fx_path.write_text(
+            json.dumps(
+                {
+                    "method": "posted-yearly-average",
+                    "source": "self-calculated daily average",
+                    "proof": "calculation.csv",
+                    "rate_direction": "foreign-per-usd",
+                    "rates": {"2025-01-03": "4000.00"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        try:
+            command_report(
+                report_args(
+                    cop_analysis_path,
+                    root / "blocked-fx.pdf",
+                    fx_method="posted-yearly-average",
+                    fx_rates_json=str(bad_fx_path),
+                    fx_rate_confirmed=True,
+                    fx_confirmation_note="Attempted confirmation.",
+                )
+            )
+            failures.append("fx-json-bypass: expected report rejection")
+        except SystemExit as exc:
+            if "only valid" not in str(exc):
+                failures.append(f"fx-json-bypass: unexpected rejection {exc}")
+
+        split_analysis_path = extract_pdf(
+            "split-statement.pdf",
+            ["Example Bank", "Account currency: USD", "2025-01-03 Interest credited", "$10.00"],
+        )
+        split_analysis = load_analysis_payload(split_analysis_path)
+        if split_analysis.get("status") != ANALYSIS_REVIEW_REQUIRED_STATUS:
+            failures.append("split-row-zero: analysis did not require review")
+        try:
+            command_report(report_args(split_analysis_path, root / "split-packet.pdf"))
+            failures.append("split-row-zero: expected report rejection")
+        except SystemExit as exc:
+            if "review-required" not in str(exc):
+                failures.append(f"split-row-zero: unexpected rejection {exc}")
+
+        zero_analysis_path = extract_pdf(
+            "zero-statement.pdf", ["Example Bank", "Account currency: USD", "2025-01-03 Account statement"]
+        )
+        zero_output_path = root / "zero-packet.pdf"
+        if (
+            command_report(
+                report_args(
+                    zero_analysis_path,
+                    zero_output_path,
+                    zero_interest_confirmed=True,
+                    zero_interest_confirmation_note="Preparer reviewed all supplied statements and confirmed no interest was credited.",
+                )
+            )
+            != 0
+        ):
+            failures.append("zero-confirmed: report returned nonzero")
+        zero_text = "\n".join((page.extract_text() or "") for page in PdfReader(zero_output_path).pages)
+        if "Preparer zero-interest confirmation" not in zero_text:
+            failures.append("zero-confirmed: packet omitted preparer confirmation")
+
+        gated_preflight = write_preflight_fixture(
+            root,
+            "gated-preflight",
+            2025,
+            "one-institution",
+            [root / "usd-statement.pdf"],
+            status="review-required",
+            review_gates=[{"code": "sample-gate", "message": "review required"}],
+            primary_institution="Example Bank",
+        )
+        try:
+            command_extract(
+                argparse.Namespace(
+                    pdf=[str(root / "usd-statement.pdf")],
+                    tax_year=2025,
+                    institution="Example Bank",
+                    account_currency=None,
+                    preflight_json=str(gated_preflight),
+                    out=str(root / "gated-analysis.json"),
+                    csv=None,
+                )
+            )
+            failures.append("preflight-gate: expected extraction rejection")
+        except SystemExit as exc:
+            if "review_gates" not in str(exc):
+                failures.append(f"preflight-gate: unexpected rejection {exc}")
+
+    if failures:
+        for failure in failures:
+            print(f"FAIL: {failure}", file=sys.stderr)
+        return 1
+    print("Smoke test passed: USD, yearly-average FX, FX bypass, zero-interest, preflight gate, and PDF privacy.")
+    return 0
+
+
+def write_preflight_fixture(
+    root: Path,
+    name: str,
+    tax_year: int,
+    scope: str,
+    pdf_paths: list[Path],
+    *,
+    status: str = PREFLIGHT_READY_STATUS,
+    review_gates: list[dict] | None = None,
+    primary_institution: str = "Preflight Bank",
+) -> Path:
     path = root / f"{name}.json"
     data = {
         "schema_version": "1.0",
         "skill": PREFLIGHT_SKILL,
-        "status": "review-required",
+        "status": status,
         "tax_year": tax_year,
         "scope": scope,
         "statement_files": [{"file": str(pdf), "resolved_file": normalize_preflight_path(pdf)} for pdf in pdf_paths],
         "currency": {"code": "USD", "candidates": ["USD"]},
-        "profile": {"primary_institution": "Preflight Bank"},
+        "profile": {"primary_institution": primary_institution},
         "warnings": ["sample review warning"],
-        "review_gates": [{"code": "sample-gate", "message": "sample gate message"}],
+        "review_gates": review_gates or [],
         "artifacts": {"review_csv": str(root / f"{name}.csv")},
     }
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -2001,7 +2780,13 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--account-currency", help="Optional account currency override, e.g. COP when statements use $ for pesos.")
     extract.add_argument("--out", required=True, help="Output JSON path, e.g. work/interest-analysis.json.")
     extract.add_argument("--csv", help="Optional CSV path. Defaults to interest-items.csv beside the JSON.")
-    extract.add_argument("--preflight-json", help="statement-intake-preflight JSON reviewed before extraction.")
+    extract.add_argument(
+        "--preflight-json",
+        required=True,
+        help=(
+            "statement-intake-preflight JSON with status ready-for-domain-extraction and no review_gates."
+        ),
+    )
     extract.set_defaults(func=command_extract)
 
     fx_prompt = subparsers.add_parser("fx-prompt", help="Print the user-facing FX confirmation prompt for non-USD rows.")
@@ -2013,6 +2798,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fx_prompt.add_argument("--fx-rate", help="Proposed exchange rate. Default direction is foreign currency units per 1 USD.")
     fx_prompt.add_argument("--fx-workpaper-json", help="workpaper.json produced by the get-yearly-fx-rate skill.")
+    fx_prompt.add_argument("--fx-rates-json", help="Date-keyed posted-daily-spot FX rates JSON for preview and confirmation.")
     fx_prompt.add_argument("--fx-source", default="", help="Human-readable FX source label.")
     fx_prompt.add_argument(
         "--rate-direction",
@@ -2031,7 +2817,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     report.add_argument("--fx-rate", help="Exchange rate. Default direction is foreign currency units per 1 USD.")
     report.add_argument("--fx-workpaper-json", help="workpaper.json produced by the get-yearly-fx-rate skill.")
-    report.add_argument("--fx-rates-json", help="Date-keyed FX rates JSON for row-level spot conversion.")
+    report.add_argument(
+        "--fx-rates-json",
+        help="Date-keyed posted-daily-spot FX JSON with source and proof metadata; valid only with --fx-method posted-daily-spot.",
+    )
     report.add_argument("--fx-source", default="", help="Human-readable FX source label.")
     report.add_argument(
         "--fx-rate-confirmed",
@@ -2041,7 +2830,17 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument(
         "--fx-confirmation-note",
         default="",
-        help="Optional note describing the user's FX confirmation or custom-rate instruction.",
+        help="Required non-empty note when --fx-rate-confirmed is used for a non-USD report.",
+    )
+    report.add_argument(
+        "--zero-interest-confirmed",
+        action="store_true",
+        help="Required when extraction found no interest-like evidence and a zero-interest packet is intended.",
+    )
+    report.add_argument(
+        "--zero-interest-confirmation-note",
+        default="",
+        help="Required preparer confirmation note used in a zero-interest support packet.",
     )
     report.add_argument(
         "--rate-direction",
@@ -2052,11 +2851,16 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--out", required=True, help="Output PDF path.")
     report.set_defaults(func=command_report)
 
-    dependency_check = subparsers.add_parser("dependency-check", help="Check whether get-yearly-fx-rate is installed.")
+    dependency_check = subparsers.add_parser(
+        "dependency-check", help="Check required preflight, optional FX, and PDF runtime dependencies."
+    )
     dependency_check.set_defaults(func=command_dependency_check)
 
     self_test = subparsers.add_parser("self-test", help="Run parser regression checks.")
     self_test.set_defaults(func=command_self_test)
+
+    smoke_test = subparsers.add_parser("smoke-test", help="Run synthetic PDF extraction, report, and privacy regression checks.")
+    smoke_test.set_defaults(func=command_smoke_test)
     return parser
 
 
