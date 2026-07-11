@@ -1,0 +1,8 @@
+{
+  "author": {
+    "name": "Timur"
+  },
+  "description": "Internal workpaper/proof-packet engine shared by the FX and statement skills.",
+  "name": "workpaper-kit",
+  "version": "1.0.0"
+}
