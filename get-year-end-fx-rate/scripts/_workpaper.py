@@ -799,10 +799,26 @@ def _copy_saved_proofs(folder: Path, saved_proofs: Iterable[Path], *, proof_requ
     """Copy each proof into the packet folder and record its hashed entry.
 
     ``proof_required`` determines whether an unusable proof raises ``RateError``
-    or is skipped.
+    or is skipped. Proofs already in the packet are retained unless they use a
+    generated-artifact name; those are staged under a ``source-proof-*`` name
+    before the workpaper renderer overwrites the generated artifact.
     """
+    saved_proof_list = list(saved_proofs)
+    generated_paths = {
+        (folder / name).resolve()
+        for name in ("workpaper.md", "workpaper.json", "workpaper.pdf")
+    }
+    # Reserve every supplied in-packet proof before copying any external proof.
+    # That prevents source-proof-N names supplied later in the list from being
+    # overwritten by an earlier copied proof.
+    occupied_paths = generated_paths | {
+        path.resolve()
+        for path in saved_proof_list
+        if path.is_file() and path.parent.resolve() == folder.resolve()
+    }
+
     entries: list[dict[str, object]] = []
-    for index, original_path in enumerate(saved_proofs, start=1):
+    for index, original_path in enumerate(saved_proof_list, start=1):
         proof_path = original_path
         # is_file() (not exists()) so a directory or broken symlink fails as a
         # clean RateError instead of an IsADirectoryError from copy2/hashing.
@@ -810,11 +826,15 @@ def _copy_saved_proofs(folder: Path, saved_proofs: Iterable[Path], *, proof_requ
             if proof_required:
                 raise RateError(f"Proof file does not exist or is not a regular file: {proof_path}", 2)
             continue
-        if proof_path.parent.resolve() != folder.resolve():
-            copied_name = f"source-proof-{index}{proof_path.suffix}"
-            copied_path = folder / copied_name
+        if proof_path.parent.resolve() != folder.resolve() or proof_path.resolve() in generated_paths:
+            copied_path = folder / f"source-proof-{index}{proof_path.suffix}"
+            disambiguator = 2
+            while copied_path.resolve() in occupied_paths:
+                copied_path = folder / f"source-proof-{index}-{disambiguator}{proof_path.suffix}"
+                disambiguator += 1
             shutil.copy2(proof_path, copied_path)
             proof_path = copied_path
+            occupied_paths.add(copied_path.resolve())
         entries.append(
             {
                 "filename": proof_path.name,

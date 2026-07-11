@@ -498,6 +498,34 @@ def test_hardening_boundary() -> None:
                 raise AssertionError(f"extra_json {bad_extra} must raise")
 
 
+def test_proof_name_collision_hardening() -> None:
+    """Proof entries never point to a generated file the builder overwrites."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        root = tmp / "out"
+        folder = root / "cad-2024-src"
+        folder.mkdir(parents=True)
+        colliding_proof = folder / "workpaper.pdf"
+        original_bytes = b"saved source proof before PDF rendering\n"
+        colliding_proof.write_bytes(original_bytes)
+
+        workpaper = wp.build_workpaper(
+            wp.WorkpaperSpec(
+                output_root=str(root), skill_name="kit", currency_code="CAD", year=2024,
+                rate=Decimal("1.37"), rate_direction="foreign-per-usd", source_title="Src",
+                source_url="u", source_category="c", retrieval_date="2026-01-01", source_note="n",
+                document_title="T", document_subtitle="s", rate_phrase="p", caveats=[],
+                saved_proofs=[colliding_proof], proof_required=True,
+            )
+        )
+        saved_file = workpaper["proof"]["saved_files"][0]  # type: ignore[index]
+        saved_path = Path(saved_file["path"])
+        assert saved_path.name == "source-proof-1.pdf"
+        assert saved_path.read_bytes() == original_bytes
+        assert saved_file["sha256"] == wp.sha256_file(saved_path)
+        assert saved_path != folder / "workpaper.pdf"
+
+
 def test_pdf_transliteration() -> None:
     """Non-latin1 source text degrades legibly in the PDF; json/md keep UTF-8."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -565,6 +593,7 @@ def main() -> int:
         test_link_and_artifact_helpers,
         test_helpers,
         test_hardening_boundary,
+        test_proof_name_collision_hardening,
         test_pdf_transliteration,
         test_optional_reportlab_packet_renderer,
     ]
