@@ -4,6 +4,18 @@ Use this workflow whenever the skill is triggered. Keep all work local unless th
 
 Keep raw statement evidence in local JSON/CSV artifacts. The generated PDF redacts emails, IBANs, and labelled account-like identifiers including dotted formats by default, while retaining dates and monetary amounts. Use redacted evidence snippets plus page citations.
 
+## Contents
+
+1. Intake
+2. Runtime Setup
+3. Preflight
+4. Extraction
+5. Review The Extracted Results
+6. FX Decision
+7. Report Verification
+8. Final Response
+9. Troubleshooting and Maintenance Checks
+
 ## 1. Intake
 
 Collect or infer these inputs:
