@@ -93,7 +93,7 @@ python "<package-root>/scripts/statements_to_interest.py" report \
 
 Read `references/irs-interest-reporting.md` when writing IRS-oriented notes, explaining Schedule B or related reporting-review flags, or refreshing source-link wording.
 
-The final answer after a completed run should lead with the PDF path, then include the JSON path, row count, source-currency total, USD total, FX proof workpaper/proof-document paths from `get-yearly-fx-rate` when used, and any warnings or manual-review flags. Mention the CSV only as an internal review artifact unless the user asks for it. Raw statement evidence remains in local JSON/CSV; the PDF uses redacted evidence snippets and page citations.
+The final answer after a completed run should lead with the PDF path, then include the JSON path, row count, source-currency total, USD total, FX proof workpaper/proof-document paths from `get-yearly-fx-rate` when used, and any warnings or manual-review flags. Mention the CSV only as an internal review artifact unless the user asks for it. Raw statement evidence remains in local JSON/CSV; the PDF uses redacted evidence snippets and page citations. Redact emails, IBANs, and labelled account identifiers including dotted formats; retain transaction dates and monetary amounts so the evidence stays reviewable.
 
 ## Runtime
 

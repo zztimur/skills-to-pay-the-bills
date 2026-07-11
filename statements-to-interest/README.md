@@ -12,7 +12,7 @@ Required companion skill: `statement-intake-preflight`. Extraction requires its 
 
 The user-facing deliverable is the PDF packet. JSON and CSV outputs remain available for row review and audit support, but the CSV is not the primary result unless the user asks for it.
 
-Raw evidence stays in local JSON/CSV artifacts. The PDF packet redacts account-like identifiers and email addresses by default and uses page citations with redacted snippets.
+Raw evidence stays in local JSON/CSV artifacts. The PDF packet redacts emails, IBANs, and labelled account-like identifiers including dotted formats by default, while retaining dates and monetary amounts for review. It uses page citations with redacted snippets.
 
 Ambiguous excluded interest-like candidates block a packet even when other interest rows were counted. Review them, then either correct the source and rerun extraction or create a digest-bound `resolve-exclusions` artifact that records the reviewer decision. Clear non-interest exclusions such as withholding remain visible but do not block reporting.
 

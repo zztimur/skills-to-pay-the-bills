@@ -54,6 +54,10 @@ ANALYSIS_READY_STATUS = "ready-for-reporting"
 ANALYSIS_REVIEW_REQUIRED_STATUS = "review-required"
 ANALYSIS_ZERO_CONFIRMATION_STATUS = "zero-interest-confirmation-required"
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+SANITIZED_DOTTED_ACCOUNT = "123.456.789"  # privacy-gate: allow
+SANITIZED_IBAN = "ZZ00TEST0000000000000000"  # privacy-gate: allow
+SANITIZED_EMAIL = "safe-fixture@example.test"  # privacy-gate: allow
+SANITIZED_LONG_IDENTIFIER = "987654321"  # privacy-gate: allow
 
 CURRENCY_CODES = {
     "AED",
@@ -1161,16 +1165,40 @@ def display_file_name(value: object) -> str:
     return redact_pdf_text(Path(text).name or text)
 
 
+PDF_EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+PDF_IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]){11,30}\b", re.IGNORECASE)
+PDF_TAGGED_ACCOUNT_RE = re.compile(
+    r"\b((?:account|acct|cuenta)\s*(?:number|no\.?|n[úu]mero|#)\s*[:#-]?\s*)\d[\d .-]{3,}\b",
+    re.IGNORECASE,
+)
+PDF_NUMERIC_ACCOUNT_RE = re.compile(
+    r"\b((?:account|acct|cuenta)\s*[:#-]?\s*)\d[\d .-]{3,}\b",
+    re.IGNORECASE,
+)
+PDF_LONG_NUMERIC_IDENTIFIER_RE = re.compile(r"(?<![\d.])(?:\d[ -]?){8,}\d(?![\d.])")
+PDF_MONEY_RE = re.compile(r"(?:(?:\b[A-Z]{3}\s+)|[$€£¥]\s*)\d(?:[\d,. ]*\d)?")
+
+
 def redact_pdf_text(value: object) -> str:
     text = "" if value is None else str(value)
-    text = re.sub(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "[redacted email]", text, flags=re.IGNORECASE)
-    text = re.sub(
-        r"\b((?:account|acct|cuenta)\s*(?:number|no\.?|#)?\s*[:#-]?\s*)[A-Z0-9][A-Z0-9 -]{3,}",
-        r"\1[redacted]",
-        text,
-        flags=re.IGNORECASE,
-    )
-    return re.sub(r"(?<![\d.])(?:\d[ -]?){5,}\d(?![\d.])", "[redacted identifier]", text)
+    text = PDF_EMAIL_RE.sub("[redacted email]", text)
+    text = PDF_IBAN_RE.sub("[redacted identifier]", text)
+    protected_values: list[str] = []
+
+    def protect(match: re.Match[str]) -> str:
+        placeholder = f"__protected_value_{len(protected_values)}__"
+        protected_values.append(match.group(0))
+        return placeholder
+
+    for pattern in DATE_PATTERNS + MONTH_DATE_PATTERNS:
+        text = pattern.sub(protect, text)
+    text = PDF_MONEY_RE.sub(protect, text)
+    text = PDF_TAGGED_ACCOUNT_RE.sub(r"\1[redacted]", text)
+    text = PDF_NUMERIC_ACCOUNT_RE.sub(r"\1[redacted]", text)
+    text = PDF_LONG_NUMERIC_IDENTIFIER_RE.sub("[redacted identifier]", text)
+    for index, original in enumerate(protected_values):
+        text = text.replace(f"__protected_value_{index}__", original)
+    return text
 
 
 def redacted_pdf_snippet(value: object, limit: int = 220) -> str:
@@ -2478,9 +2506,25 @@ def command_self_test(args: argparse.Namespace) -> int:
     zero_status, zero_gates = extraction_review_state(no_interest_rows, no_interest_excluded)
     if zero_status != ANALYSIS_ZERO_CONFIRMATION_STATUS or not zero_gates:
         failures.append("true-zero-interest: no-evidence result must require preparer confirmation")
-    redacted = redacted_pdf_snippet("Account 123456789012; contact test@example.com; transfer 987654321")
-    if "123456789012" in redacted or "987654321" in redacted or "test@example.com" in redacted:
+    privacy_evidence = (
+        f"2025-01-03 Interest credited USD 10.00 Cuenta No. {SANITIZED_DOTTED_ACCOUNT}; "
+        f"IBAN {SANITIZED_IBAN}; email {SANITIZED_EMAIL}; transfer {SANITIZED_LONG_IDENTIFIER}"
+    )
+    redacted = redacted_pdf_snippet(privacy_evidence)
+    if any(
+        value in redacted
+        for value in (SANITIZED_DOTTED_ACCOUNT, SANITIZED_IBAN, SANITIZED_EMAIL, SANITIZED_LONG_IDENTIFIER)
+    ):
         failures.append(f"pdf-redaction: identifier or email leaked in {redacted!r}")
+    if "2025-01-03" not in redacted or "USD 10.00" not in redacted:
+        failures.append(f"pdf-redaction: date or money was incorrectly redacted in {redacted!r}")
+    if redact_pdf_text("Account currency: USD") != "Account currency: USD":
+        failures.append("pdf-redaction: account-currency label was incorrectly redacted")
+    date_with_identifier = redact_pdf_text(f"2025-01-03 {SANITIZED_LONG_IDENTIFIER}")
+    if "2025-01-03" not in date_with_identifier or SANITIZED_LONG_IDENTIFIER in date_with_identifier:
+        failures.append(f"pdf-redaction: date-adjacent identifier handling failed in {date_with_identifier!r}")
+    if redact_pdf_text("USD 123456789") != "USD 123456789":  # privacy-gate: allow
+        failures.append("pdf-redaction: currency-labelled amount was incorrectly redacted")
     try:
         zero_interest_confirmation(
             {"status": ANALYSIS_ZERO_CONFIRMATION_STATUS, "review_gates": zero_gates},
@@ -2791,7 +2835,10 @@ def command_self_test(args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print(f"Self-test passed: {len(cases) + 6} parser/review cases, 9 FX/dependency cases, 17 preflight/provenance cases")
+    print(
+        f"Self-test passed: {len(cases) + 6} parser/review cases, 5 privacy cases, "
+        "9 FX/dependency cases, 17 preflight/provenance cases"
+    )
     return 0
 
 
@@ -2885,7 +2932,10 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
             [
                 "Example Bank",
                 "Account currency: USD",
-                "2025-01-03 Interest credited USD 10.00 IBAN test-identifier",  # privacy-gate: allow
+                (
+                    f"2025-01-03 Interest credited USD 10.00 Cuenta No. {SANITIZED_DOTTED_ACCOUNT}; "
+                    f"IBAN {SANITIZED_IBAN}; email {SANITIZED_EMAIL}"
+                ),
             ],
         )
         usd_output_path = root / "usd-packet.pdf"
@@ -2894,8 +2944,12 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
         usd_text = "\n".join((page.extract_text() or "") for page in PdfReader(usd_output_path).pages)
         if "Foreign Bank Interest Support Packet" not in usd_text or "USD 10.00" not in usd_text:
             failures.append("usd-happy-path: packet text is missing title or USD total")
-        if str(root) in usd_text:
-            failures.append("pdf-privacy: packet exposed an absolute source path")
+        if str(root) in usd_text or any(
+            value in usd_text for value in (SANITIZED_DOTTED_ACCOUNT, SANITIZED_IBAN, SANITIZED_EMAIL)
+        ):
+            failures.append("pdf-privacy: packet exposed an absolute source path or raw synthetic identifier")
+        if "2025-01-03" not in usd_text or "USD 10.00" not in usd_text:
+            failures.append("pdf-privacy: packet redacted a date or monetary amount")
 
         cop_analysis_path = extract_pdf(
             "cop-statement.pdf",
