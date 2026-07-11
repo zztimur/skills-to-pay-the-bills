@@ -20,7 +20,14 @@ Conditional FX dependency: `get-yearly-fx-rate`. Use it for non-USD published ye
 
 ## Required Workflow
 
-Read `references/workflow.md` before running analysis. It contains the operational checklist, commands, review gates, FX decision rules, troubleshooting, and final-response template.
+Use `references/workflow.md` progressively:
+
+- Read Sections 1-5 for intake, runtime, extraction, and result review before analysis.
+- Read Section 6 only when counted rows are non-USD or the user requests daily spot FX.
+- Read Section 7 immediately before generating or verifying a packet.
+- Read Sections 8-9 only for handoff wording or troubleshooting.
+
+The reference contains the detailed commands, review gates, FX decision rules, troubleshooting, and final-response template.
 
 Dependency: for non-USD published yearly-average FX, use the separate `get-yearly-fx-rate` skill to create a retained FX proof workpaper. `statements-to-interest` consumes that skill's `workpaper.json` and passes its proof documents through in the final output. If `get-yearly-fx-rate` is unavailable, stop before the PDF and ask the user to install/run it or provide a confirmed user/preparer custom rate; do not recreate annual-rate source search inside this skill. Use `dependency-check` when you need a quick installed-dependency check.
 
@@ -46,7 +53,7 @@ python "<package-root>/scripts/statements_to_interest.py" extract \
   --out work/interest-analysis.json
 ```
 
-Review the JSON and review CSV before reporting. Treat the CSV as an internal row-review artifact, not the user-facing deliverable unless the user asks for it. Confirm the ready `preflight` summary and its SHA-256 digest are present, then focus this skill's review on counted interest rows, excluded interest-like candidates, totals, and FX readiness. Do not invent missing rows. A zero-row analysis with excluded interest-like evidence is `review-required` and cannot be reported; a zero-row analysis with no interest-like evidence requires explicit preparer confirmation (`--zero-interest-confirmed` plus a non-empty note) before it can become a packet.
+Review the JSON and review CSV before reporting. Treat the CSV as an internal row-review artifact, not the user-facing deliverable unless the user asks for it. Confirm the ready `preflight` summary and its SHA-256 digest are present, then focus this skill's review on counted interest rows, excluded interest-like candidates, totals, and FX readiness. Do not invent missing rows. Clear exclusions such as withholding remain documented but do not block reporting. Any ambiguous excluded candidate makes the analysis `review-required`, even with counted rows: review every candidate, correct the source and rerun extraction when one is countable, or create `resolve-exclusions` JSON after a reviewer confirms all are non-interest. Pass that digest-bound file to `report` with `--excluded-candidates-resolution-json`. A zero-row packet also needs explicit preparer confirmation (`--zero-interest-confirmed` plus a non-empty note).
 
 For non-USD rows, default to `get-yearly-fx-rate` for the published yearly average exchange rate and retained proof. Do not calculate the yearly average yourself from daily/monthly data. If `get-yearly-fx-rate` cannot produce a published annual workpaper, ask the user for a custom rate, with an optional source, instead of deriving one. Prompt the user with the workpaper rate, source, proof documents, direction, and resulting USD total; ask them to confirm that rate or provide a custom rate before generating the PDF. Use the `fx-prompt` command to produce the exact user-facing confirmation question when a candidate workpaper is available:
 
@@ -93,7 +100,7 @@ python "<package-root>/scripts/statements_to_interest.py" report \
 
 Read `references/irs-interest-reporting.md` when writing IRS-oriented notes, explaining Schedule B or related reporting-review flags, or refreshing source-link wording.
 
-The final answer after a completed run should lead with the PDF path, then include the JSON path, row count, source-currency total, USD total, FX proof workpaper/proof-document paths from `get-yearly-fx-rate` when used, and any warnings or manual-review flags. Mention the CSV only as an internal review artifact unless the user asks for it. Raw statement evidence remains in local JSON/CSV; the PDF uses redacted evidence snippets and page citations.
+The final answer after a completed run should lead with the PDF path, then include the JSON path, row count, source-currency total, USD total, FX proof workpaper/proof-document paths from `get-yearly-fx-rate` when used, and any warnings or manual-review flags. Mention the CSV only as an internal review artifact unless the user asks for it. Raw statement evidence remains in local JSON/CSV; the PDF uses redacted evidence snippets and page citations. Redact emails, IBANs, and labelled account identifiers including dotted formats; retain transaction dates and monetary amounts so the evidence stays reviewable.
 
 ## Runtime
 
