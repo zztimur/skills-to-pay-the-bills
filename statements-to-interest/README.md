@@ -21,7 +21,8 @@ Ambiguous excluded interest-like candidates block a packet even when other inter
 - `SKILL.md` is the control plane for Codex/OpenAI Agent Skills.
 - `references/workflow.md` has the detailed operational checklist, FX gate, troubleshooting, verification, and final-response template.
 - `references/irs-interest-reporting.md` has IRS-oriented wording and source-link guidance.
-- `scripts/statements_to_interest.py` performs extraction, FX prompts, PDF generation, dependency checks, and self-tests.
+- `scripts/statements_to_interest.py` performs extraction, FX prompts, packet assembly, dependency checks, and self-tests.
+- `workpaper-kit/workpaper.py` is vendored as `scripts/_workpaper.py` and owns the shared ReportLab packet layout. Edit the canonical kit and run `workpaper-kit/sync.sh`; do not hand-edit the vendored copy.
 - `statement-intake-preflight` provides the shared PDF intake JSON/CSV used before extraction.
 - `.claude-plugin/` and `commands/` provide the Claude Code entrypoint while reusing the same root workflow.
 

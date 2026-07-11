@@ -10,7 +10,7 @@ cd "$repo_root"
 # them cannot clobber a partially staged change.
 if [ -f workpaper-kit/sync.sh ]; then
   bash workpaper-kit/sync.sh
-  git add get-yearly-fx-rate/scripts/_workpaper.py get-year-end-fx-rate/scripts/_workpaper.py
+  git add get-yearly-fx-rate/scripts/_workpaper.py get-year-end-fx-rate/scripts/_workpaper.py statements-to-interest/scripts/_workpaper.py
 fi
 
 python3 privacy-gate/scripts/privacy_gate.py scan --staged --strict

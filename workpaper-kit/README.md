@@ -1,11 +1,13 @@
 # workpaper-kit
 
-The shared workpaper / proof-packet engine behind `get-yearly-fx-rate` and
-`get-year-end-fx-rate`.
+The shared workpaper / proof-packet engine behind `get-yearly-fx-rate`,
+`get-year-end-fx-rate`, and the rich PDF packet used by
+`statements-to-interest`.
 
 This is **internal plumbing, not a skill**: there is no `SKILL.md`, no command
-adapter, and no agent trigger. It is a pure-standard-library runtime library
-that a skill imports locally after it has already determined a rate.
+adapter, and no agent trigger. Its FX/proof-packet core is pure standard
+library. Its optional rich-packet surface lazily uses ReportLab only in skills
+that already require it, such as `statements-to-interest`.
 
 ## Why this exists
 
@@ -23,6 +25,19 @@ exactly that machine — nothing else.
 The kit **never fetches, never parses a rate, and never touches currency
 aliases or source layers.** A caller hands it an already-parsed `Decimal` and a
 `WorkpaperSpec`; the kit computes the reciprocal and writes the packet.
+
+## Rich PDF packets
+
+`ReportlabPacketRenderer` is the common layout layer for support packets that
+need ReportLab flowables rather than the FX workpaper's deterministic raw-PDF
+format. It provides the shared style sheet, hero/header, KPI cards, paginating
+tables, review-note boxes, footer, and document build step. The caller keeps
+domain decisions, row extraction, and redaction; pass only already-redacted
+display values to the renderer.
+
+The renderer imports ReportLab only when instantiated. Therefore the FX skills
+remain usable with Python's standard library alone, while
+`statements-to-interest` retains its existing ReportLab runtime requirement.
 
 ## Interface
 

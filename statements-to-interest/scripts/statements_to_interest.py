@@ -25,21 +25,13 @@ except ImportError:  # pragma: no cover - exercised by users without deps.
     pdfplumber = None
 
 try:
-    from reportlab.lib import colors
-    from reportlab.lib.enums import TA_CENTER
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import inch
-    from reportlab.platypus import (
-        PageBreak,
-        Paragraph,
-        SimpleDocTemplate,
-        Spacer,
-        Table,
-        TableStyle,
-    )
+    from reportlab.platypus import PageBreak, Paragraph, Spacer
 except ImportError:  # pragma: no cover - exercised by users without deps.
-    colors = None
+    inch = None
+    PageBreak = Paragraph = Spacer = None
+
+from _workpaper import ReportlabPacketRenderer, escape_reportlab_text, reportlab_available
 
 
 SKILL_NAME = "statements-to-interest"
@@ -1149,13 +1141,7 @@ def parse_decimal(value: str, label: str) -> Decimal:
 
 
 def escape(value: object) -> str:
-    text = "" if value is None else str(value)
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace("\n", "<br/>")
-    )
+    return escape_reportlab_text(value)
 
 
 def display_file_name(value: object) -> str:
@@ -1204,216 +1190,6 @@ def redact_pdf_text(value: object) -> str:
 def redacted_pdf_snippet(value: object, limit: int = 220) -> str:
     text = redact_pdf_text(value).strip()
     return f"{text[:limit - 1]}…" if len(text) > limit else text
-
-
-def make_styles():
-    styles = getSampleStyleSheet()
-    styles["Normal"].fontSize = 9
-    styles["Normal"].leading = 12
-    styles.add(
-        ParagraphStyle(
-            name="HeroTitle",
-            parent=styles["Title"],
-            alignment=TA_CENTER,
-            textColor=colors.white,
-            fontSize=22,
-            leading=26,
-            spaceAfter=3,
-        )
-    )
-    styles.add(
-        ParagraphStyle(
-            name="HeroSubtitle",
-            parent=styles["Normal"],
-            alignment=TA_CENTER,
-            textColor=colors.HexColor("#E6F3F3"),
-            fontSize=9,
-            leading=12,
-        )
-    )
-    styles.add(
-        ParagraphStyle(
-            name="SectionTitle",
-            parent=styles["Heading2"],
-            textColor=colors.HexColor("#0F3D3E"),
-            fontSize=12,
-            leading=15,
-            spaceBefore=8,
-            spaceAfter=6,
-        )
-    )
-    styles.add(
-        ParagraphStyle(
-            name="Small",
-            parent=styles["Normal"],
-            fontSize=7,
-            leading=9,
-        )
-    )
-    styles.add(
-        ParagraphStyle(
-            name="Cell",
-            parent=styles["Normal"],
-            fontSize=7,
-            leading=8,
-        )
-    )
-    styles.add(
-        ParagraphStyle(
-            name="TableHeader",
-            parent=styles["Cell"],
-            textColor=colors.white,
-            fontName="Helvetica-Bold",
-        )
-    )
-    styles.add(
-        ParagraphStyle(
-            name="KpiCard",
-            parent=styles["Normal"],
-            alignment=TA_CENTER,
-            fontSize=8,
-            leading=12,
-        )
-    )
-    styles.add(
-        ParagraphStyle(
-            name="BoxText",
-            parent=styles["Normal"],
-            fontSize=8,
-            leading=11,
-        )
-    )
-    return styles
-
-
-def as_paragraphs(rows: list[list[object]], styles, header: bool = True) -> list[list[object]]:
-    converted: list[list[object]] = []
-    for index, row in enumerate(rows):
-        style = styles["TableHeader"] if header and index == 0 else styles["Cell"]
-        converted.append([Paragraph(escape(cell), style) for cell in row])
-    return converted
-
-
-def add_table(story: list, rows: list[list[object]], widths: list[float], styles, header: bool = True) -> None:
-    table = Table(as_paragraphs(rows, styles, header=header), colWidths=widths, repeatRows=1 if header else 0)
-    table_style = [
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D6E4E5")),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-    ]
-    if header:
-        table_style.extend(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F3D3E")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7FAFC")]),
-            ]
-        )
-    table.setStyle(TableStyle(table_style))
-    story.append(table)
-    story.append(Spacer(1, 0.16 * inch))
-
-
-def add_hero(story: list, styles, institution: str, tax_year: object) -> None:
-    title = "Foreign Bank Interest Support Packet"
-    subtitle = f"{institution or 'Institution not recorded'} - {tax_year or 'tax year not recorded'}"
-    hero = Table(
-        [
-            [Paragraph(escape(title), styles["HeroTitle"])],
-            [
-                Paragraph(
-                    escape(f"{subtitle}. For U.S. tax return support only; not an official IRS form."),
-                    styles["HeroSubtitle"],
-                )
-            ],
-        ],
-        colWidths=[7.4 * inch],
-    )
-    hero.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#0F3D3E")),
-                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#0A2C2D")),
-                ("TOPPADDING", (0, 0), (-1, 0), 13),
-                ("BOTTOMPADDING", (0, 0), (-1, 0), 2),
-                ("TOPPADDING", (0, 1), (-1, 1), 0),
-                ("BOTTOMPADDING", (0, 1), (-1, 1), 13),
-                ("LEFTPADDING", (0, 0), (-1, -1), 12),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-            ]
-        )
-    )
-    story.append(hero)
-    story.append(Spacer(1, 0.18 * inch))
-
-
-def add_kpi_cards(story: list, items: list[tuple[str, str]], styles) -> None:
-    cells = []
-    for label, value in items:
-        cells.append(
-            Paragraph(
-                f'<font color="#667085">{escape(label)}</font><br/><font size="15" color="#0F3D3E"><b>{escape(value)}</b></font>',
-                styles["KpiCard"],
-            )
-        )
-    card_width = 7.4 * inch / max(len(items), 1)
-    table = Table([cells], colWidths=[card_width for _item in items])
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7FAFC")),
-                ("BOX", (0, 0), (-1, -1), 0.4, colors.HexColor("#D6E4E5")),
-                ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#D6E4E5")),
-                ("TOPPADDING", (0, 0), (-1, -1), 9),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
-                ("LEFTPADDING", (0, 0), (-1, -1), 7),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-            ]
-        )
-    )
-    story.append(table)
-    story.append(Spacer(1, 0.18 * inch))
-
-
-def add_note_box(story: list, title: str, lines: list[str], styles, tone: str = "info") -> None:
-    palette = {
-        "warning": ("#FFF8E6", "#F4C95D", "#7A4F00"),
-        "info": ("#F0F7F7", "#B8D8D8", "#0F3D3E"),
-    }
-    background, border, title_color = palette.get(tone, palette["info"])
-    body = f'<font color="{title_color}"><b>{escape(title)}</b></font>'
-    if lines:
-        body = f"{body}<br/>" + "<br/>".join(escape(line) for line in lines)
-    box = Table([[Paragraph(body, styles["BoxText"])]], colWidths=[7.4 * inch])
-    box.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor(background)),
-                ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor(border)),
-                ("LEFTPADDING", (0, 0), (-1, -1), 8),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 7),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-            ]
-        )
-    )
-    story.append(box)
-    story.append(Spacer(1, 0.14 * inch))
-
-
-def page_footer(canvas, doc) -> None:
-    canvas.saveState()
-    canvas.setStrokeColor(colors.HexColor("#D6E4E5"))
-    canvas.setLineWidth(0.25)
-    canvas.line(0.55 * inch, 0.5 * inch, 7.95 * inch, 0.5 * inch)
-    canvas.setFont("Helvetica", 7)
-    canvas.setFillColor(colors.HexColor("#666666"))
-    canvas.drawString(0.55 * inch, 0.35 * inch, "Generated support packet - not an official IRS form.")
-    canvas.drawRightString(7.95 * inch, 0.35 * inch, f"Page {doc.page}")
-    canvas.restoreState()
 
 
 def load_fx_rates_json(path: Path) -> dict[str, dict[str, object]]:
@@ -1699,7 +1475,7 @@ def command_dependency_check(args: argparse.Namespace) -> int:
         print("Optional get-yearly-fx-rate skill not found; published yearly-average FX will require installation.")
     if pdfplumber is None:
         failures.append("pdfplumber is unavailable in this Python runtime.")
-    if colors is None:
+    if not reportlab_available():
         failures.append("reportlab is unavailable in this Python runtime.")
     try:
         import pypdf  # noqa: F401
@@ -2080,7 +1856,7 @@ def command_fx_prompt(args: argparse.Namespace) -> int:
 
 
 def command_report(args: argparse.Namespace) -> int:
-    if colors is None:
+    if not reportlab_available():
         raise SystemExit("reportlab is required. Run with a Python environment that has reportlab installed.")
     if args.fx_workpaper_json and args.fx_rates_json:
         raise SystemExit("Use either --fx-workpaper-json for yearly-average FX or --fx-rates-json for explicit spot rates, not both.")
@@ -2167,16 +1943,11 @@ def command_report(args: argparse.Namespace) -> int:
             fx_note = f"{fx_note} Confirmation: {fx_confirmation}"
 
     out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    doc = SimpleDocTemplate(
-        str(out_path),
-        pagesize=letter,
-        rightMargin=0.55 * inch,
-        leftMargin=0.55 * inch,
-        topMargin=0.55 * inch,
-        bottomMargin=0.55 * inch,
+    renderer = ReportlabPacketRenderer(
+        out_path,
+        footer_text="Generated support packet - not an official IRS form.",
     )
-    styles = make_styles()
+    styles = renderer.make_styles()
     story: list = []
 
     profile = analysis.get("institution_profile", {})
@@ -2192,8 +1963,8 @@ def command_report(args: argparse.Namespace) -> int:
             f"{exclusion_resolution['candidate_count']} candidate(s) reviewed as non-interest. "
             f"Note: {exclusion_resolution['reviewer_note']}"
         )
-    add_hero(story, styles, str(analysis.get("institution", "")), analysis.get("tax_year", ""))
-    add_kpi_cards(
+    renderer.add_hero(story, styles, str(analysis.get("institution", "")), analysis.get("tax_year", ""))
+    renderer.add_kpi_cards(
         story,
         [
             ("Interest rows", str(len(rows))),
@@ -2224,7 +1995,7 @@ def command_report(args: argparse.Namespace) -> int:
         proof = fx_workpaper.get("proof", {})
         if isinstance(proof, dict) and proof.get("workpaper_pdf"):
             summary_rows.insert(-1, ["FX proof workpaper", display_file_name(proof.get("workpaper_pdf"))])
-    add_table(story, summary_rows, [2.1 * inch, 5.1 * inch], styles)
+    renderer.add_table(story, summary_rows, [2.1 * inch, 5.1 * inch], styles)
 
     story.append(Paragraph("Statements Reviewed", styles["SectionTitle"]))
     file_rows = [["File", "Pages", "Detected periods", "Account currency", "Currency markers"]]
@@ -2238,7 +2009,7 @@ def command_report(args: argparse.Namespace) -> int:
                 ", ".join(item.get("currency_candidates", [])) or "Not detected",
             ]
         )
-    add_table(story, file_rows, [2.55 * inch, 0.45 * inch, 1.75 * inch, 1.05 * inch, 1.4 * inch], styles)
+    renderer.add_table(story, file_rows, [2.55 * inch, 0.45 * inch, 1.75 * inch, 1.05 * inch, 1.4 * inch], styles)
 
     story.append(Paragraph("Interest Rows Counted", styles["SectionTitle"]))
     if rows:
@@ -2260,7 +2031,7 @@ def command_report(args: argparse.Namespace) -> int:
                     f"{display_file_name(row.get('source_file', ''))}, p. {row.get('page', '')}",
                 ]
             )
-        add_table(story, interest_rows, [0.75 * inch, 0.65 * inch, 2.55 * inch, 1.1 * inch, 0.9 * inch, 1.25 * inch], styles)
+        renderer.add_table(story, interest_rows, [0.75 * inch, 0.65 * inch, 2.55 * inch, 1.1 * inch, 0.9 * inch, 1.25 * inch], styles)
     else:
         story.append(Paragraph("No interest rows were counted from the provided machine-readable statements.", styles["Normal"]))
         if zero_interest_note:
@@ -2283,7 +2054,7 @@ def command_report(args: argparse.Namespace) -> int:
                     redacted_pdf_snippet(item.get("reason", "")),
                 ]
             )
-        add_table(story, excluded_rows, [1.3 * inch, 3.7 * inch, 2.2 * inch], styles)
+        renderer.add_table(story, excluded_rows, [1.3 * inch, 3.7 * inch, 2.2 * inch], styles)
     else:
         story.append(Paragraph("No ambiguous or excluded interest-like lines were detected.", styles["Normal"]))
         story.append(Spacer(1, 0.12 * inch))
@@ -2292,7 +2063,7 @@ def command_report(args: argparse.Namespace) -> int:
     if custom_rate_no_source:
         warnings.append(CUSTOM_RATE_NO_SOURCE_WARNING)
     if warnings:
-        add_note_box(story, "Warnings for preparer review", warnings, styles, tone="warning")
+        renderer.add_note_box(story, "Warnings for preparer review", warnings, styles, tone="warning")
 
     if fx_workpaper:
         artifacts = fx_workpaper_artifacts(fx_workpaper)
@@ -2307,7 +2078,7 @@ def command_report(args: argparse.Namespace) -> int:
                         item.get("sha256", ""),
                     ]
                 )
-            add_table(story, artifact_rows, [1.7 * inch, 2.2 * inch, 3.3 * inch], styles)
+            renderer.add_table(story, artifact_rows, [1.7 * inch, 2.2 * inch, 3.3 * inch], styles)
 
     story.append(PageBreak())
     story.append(Paragraph("IRS-Oriented Review Notes", styles["SectionTitle"]))
@@ -2335,7 +2106,7 @@ def command_report(args: argparse.Namespace) -> int:
     for source in sources:
         story.append(Paragraph(escape(source), styles["Small"]))
 
-    doc.build(story, onFirstPage=page_footer, onLaterPages=page_footer)
+    renderer.build(story)
     print(f"Wrote PDF: {out_path}")
     print(f"USD total: {money(usd_total)}")
     if fx_workpaper:
@@ -2843,11 +2614,12 @@ def command_self_test(args: argparse.Namespace) -> int:
 
 
 def command_smoke_test(_args: argparse.Namespace) -> int:
-    if pdfplumber is None or colors is None:
+    if pdfplumber is None or not reportlab_available():
         print("Smoke test requires pdfplumber and reportlab.", file=sys.stderr)
         return 2
     try:
         from pypdf import PdfReader
+        from reportlab.lib.pagesizes import letter
         from reportlab.pdfgen import canvas
     except ImportError as exc:
         print(f"Smoke test requires pypdf and reportlab canvas: {exc}", file=sys.stderr)
