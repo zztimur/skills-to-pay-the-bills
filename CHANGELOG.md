@@ -11,6 +11,18 @@ repo-wide or spans more than one package.
 The current repo version lives in [`VERSION`](VERSION) and is tagged
 `repo-vX.Y.Z`.
 
+## [1.3.3] - 2026-07-11
+
+Shared-infrastructure patch release for the proof-packet engine:
+
+- Hardened `workpaper-kit` so saved proofs that already live inside the output
+  folder and collide with generated artifact names are copied to
+  `source-proof-*` before render time, preserving the original proof bytes and
+  hashes.
+- Bumped `workpaper-kit` to `1.0.1` and regenerated the vendored
+  `scripts/_workpaper.py` copies in `get-yearly-fx-rate`,
+  `get-year-end-fx-rate`, and `statements-to-interest`.
+
 ## [1.3.2] - 2026-07-11
 
 Shared-infrastructure release for the workpaper engine and the packages that
