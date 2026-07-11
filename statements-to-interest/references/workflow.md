@@ -2,6 +2,8 @@
 
 Use this workflow whenever the skill is triggered. Keep all work local unless the user explicitly asks for otherwise.
 
+Keep raw statement evidence in local JSON/CSV artifacts. The generated PDF redacts account-like identifiers and emails by default, and uses redacted evidence snippets plus page citations.
+
 ## 1. Intake
 
 Collect or infer these inputs:
@@ -56,7 +58,7 @@ python3 "<preflight-root>/scripts/statement_intake_preflight.py" preflight \
   --out "work/statement-preflight.json"
 ```
 
-Review the preflight JSON and CSV. Stop here until preflight review gates are resolved or explicitly accepted. Do not duplicate those shared checks in this skill; preflight owns PDF readability, institution/year/currency scope, ambiguous `$`, and account/institution hints. Preflight does not replace interest-row extraction; it only standardizes the intake handoff.
+Review the preflight JSON and CSV. Stop here until preflight returns `status: ready-for-domain-extraction` with an empty `review_gates` list. The extractor rejects every other preflight artifact before reading PDFs; resolve the intake issue and rerun preflight rather than bypassing it with an ad hoc flag. Do not duplicate those shared checks in this skill; preflight owns PDF readability, institution/year/currency scope, ambiguous `$`, and account/institution hints. Preflight does not replace interest-row extraction; it only standardizes the intake handoff.
 
 ## 4. Extraction
 
@@ -77,7 +79,10 @@ The script writes:
 - Analysis JSON at `--out`.
 - Review CSV beside the JSON unless `--csv` is supplied. This is for row inspection; do not make CSV the user-facing deliverable unless the user asks for it.
 - `institution_profile` with institution name, account currency, statement titles, detected periods, institution-label source, and statement count.
-- `preflight` summary when `--preflight-json` is supplied; the script rejects mismatched tax year, scope, or PDF set.
+- `preflight` summary with source SHA-256 digest; the script requires `--preflight-json`, and rejects non-ready/gated results, mismatched tax year, institution, scope, or PDF set.
+- `source_pdf_summary` and per-file content SHA-256 digests for local audit traceability.
+
+`report` accepts only the current extraction contract: it reloads the ready preflight artifact and rechecks its digest plus every source PDF digest. If those artifacts changed or are missing, re-run extraction rather than editing the analysis JSON.
 
 Use `--account-currency` only when the reviewed preflight artifact or statement evidence confirms the currency and the interest extractor cannot infer it. Do not treat `$` alone as proof of USD; unresolved `$` belongs back in preflight before reporting.
 
@@ -92,6 +97,7 @@ Open the JSON and review CSV before generating a report. The CSV is an internal 
 - `totals.foreign_total_by_currency`: source-currency totals.
 - `warnings`: script-level review flags.
 - `excluded_candidates`: interest-like lines excluded from totals.
+- `status` and `review_gates`: extraction readiness. `review-required` blocks a packet; `zero-interest-confirmation-required` needs explicit preparer confirmation.
 
 For each counted row, check:
 
@@ -114,6 +120,11 @@ If the extractor repeats a preflight-style warning about institution, year, PDF 
 
 Do not add, remove, or edit rows by guess. If a row is missing or wrong, explain the evidence and ask for confirmation or better source data.
 
+If `totals.row_count` is zero:
+
+- If `excluded_candidates` is non-empty, stop. The analysis is `review-required`; inspect the statement evidence and re-run extraction after resolving it.
+- If no interest-like evidence exists, a zero-interest PDF requires explicit preparer confirmation. Use `--zero-interest-confirmed` and a note explaining the review; the packet records that note.
+
 ## 6. FX Decision
 
 If all counted rows are USD:
@@ -129,7 +140,7 @@ If counted rows are not USD:
 4. If `get-yearly-fx-rate` is unavailable or cannot produce a workpaper, stop before the PDF and ask the user to install/run it or provide a confirmed user/preparer custom rate.
 5. Accept a user/preparer custom rate when preferred. Use `--fx-method user-rate`; `--fx-source` is optional for custom rates.
 6. Show the user the workpaper rate, source, proof documents, direction, and resulting USD total before generating the PDF. Use `fx-prompt` to print the exact confirmation question when a workpaper is available. Ask: "Confirm this published yearly average rate, or send a custom rate to use instead."
-7. Generate the non-USD PDF only after the user confirms the proposed yearly average workpaper or provides a custom rate. Pass `--fx-rate-confirmed` and a concise `--fx-confirmation-note`.
+7. Generate the non-USD PDF only after the user confirms the proposed yearly average workpaper, custom rate, or explicitly requested daily spot rates. Pass `--fx-rate-confirmed` and a non-empty concise `--fx-confirmation-note`.
 8. Confirm rate direction:
    - Default is `foreign-per-usd`, matching IRS yearly average tables.
    - Use `--rate-direction usd-per-foreign` only when the supplied rate is USD per one foreign currency unit.
@@ -192,6 +203,10 @@ Daily spot override example:
 {
   "method": "posted-daily-spot",
   "source": "Banco de la Republica TRM series 1, retrieved 2026-07-02",
+  "proof": {
+    "saved_file": "work/fx-rate-proof/cop-2025-daily-source.html",
+    "sha256": "<saved proof digest>"
+  },
   "rate_direction": "foreign-per-usd",
   "rates": {
     "2025-01-03": "4410.50",
@@ -201,11 +216,17 @@ Daily spot override example:
 ```
 
 ```bash
+python "<package-root>/scripts/statements_to_interest.py" fx-prompt \
+  --input "work/example-bank-2025-interest-analysis.json" \
+  --fx-method posted-daily-spot \
+  --fx-rates-json "work/example-bank-2025-fx-rates.json"
+```
+
+```bash
 python "<package-root>/scripts/statements_to_interest.py" report \
   --input "work/example-bank-2025-interest-analysis.json" \
   --fx-method posted-daily-spot \
   --fx-rates-json "work/example-bank-2025-fx-rates.json" \
-  --fx-source "Posted daily spot exchange rates, source and retrieval date" \
   --fx-rate-confirmed \
   --fx-confirmation-note "User requested and confirmed daily spot rates" \
   --out "outputs/example-bank-2025-interest-support-packet.pdf"
@@ -219,6 +240,16 @@ python "<package-root>/scripts/statements_to_interest.py" report \
   --out "outputs/example-bank-2025-interest-support-packet.pdf"
 ```
 
+Confirmed zero-interest report example:
+
+```bash
+python "<package-root>/scripts/statements_to_interest.py" report \
+  --input "work/example-bank-2025-interest-analysis.json" \
+  --zero-interest-confirmed \
+  --zero-interest-confirmation-note "Preparer reviewed all supplied statements and confirmed no interest was credited." \
+  --out "outputs/example-bank-2025-interest-support-packet.pdf"
+```
+
 ## 7. Report Verification
 
 After generating the PDF:
@@ -227,7 +258,7 @@ After generating the PDF:
 - Confirm the extracted text includes `Foreign Bank Interest Support Packet`.
 - Confirm the PDF text includes the expected USD total.
 - Confirm warning/review flags are represented when present.
-- Confirm the PDF does not expose full local source paths; statement tables should use filenames.
+- Confirm the PDF does not expose full local source paths, full account-like identifiers, or raw emails; statement tables should use redacted filenames and page citations.
 
 Use `pypdf` for a quick text check:
 
