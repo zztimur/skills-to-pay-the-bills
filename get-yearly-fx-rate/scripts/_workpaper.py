@@ -15,6 +15,11 @@ already-parsed :class:`~decimal.Decimal` plus a :class:`WorkpaperSpec` and the
 kit writes ``workpaper.md`` + ``workpaper.json`` + ``workpaper.pdf`` and a
 copied, hashed source proof under ``work/<slug>/``.
 
+The core remains standard-library-only so the FX skills retain their lightweight
+runtime. ``ReportlabPacketRenderer`` is an optional, lazily imported renderer
+for richer support packets such as ``statements-to-interest``. It is vendored
+with the same module but is never imported by, or required for, the FX paths.
+
 All divergence between the two skills is absorbed by ``WorkpaperSpec`` fields
 (document title/subtitle, rate phrase, caveats, extra rows, extra JSON, proof
 policy). The PDF engine is yearly's, generalized; year-end adopts its look.
@@ -899,3 +904,266 @@ def build_workpaper(spec: WorkpaperSpec) -> dict[str, object]:
         json.dumps(serializable, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     return workpaper
+
+
+# --------------------------------------------------------------------------- #
+# Optional ReportLab packet renderer.                                         #
+# --------------------------------------------------------------------------- #
+
+
+def _reportlab_components() -> tuple[object, ...]:
+    """Load ReportLab only for callers that need rich, flowable-based packets."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_CENTER
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import inch
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    except ImportError as exc:  # pragma: no cover - exercised by dependent skills.
+        raise RateError("reportlab is required. Run with a Python environment that has reportlab installed.", 2) from exc
+    return colors, TA_CENTER, letter, ParagraphStyle, getSampleStyleSheet, inch, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+
+def reportlab_available() -> bool:
+    """Return whether the optional rich-packet renderer can run in this runtime."""
+    try:
+        _reportlab_components()
+    except RateError:
+        return False
+    return True
+
+
+def escape_reportlab_text(value: object) -> str:
+    """Escape untrusted packet text for ReportLab's paragraph mini-markup."""
+    text = "" if value is None else str(value)
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br/>")
+
+
+class ReportlabPacketRenderer:
+    """Reusable rich-packet layout layer for standalone skill packages.
+
+    The caller owns domain decisions and must provide already-redacted text.
+    This renderer owns the recurring report layout: styles, headings, tables,
+    KPI cards, warning boxes, page footer, and final PDF construction.
+    """
+
+    def __init__(
+        self,
+        output_path: Path | str,
+        *,
+        footer_text: str,
+        margin_inches: float = 0.55,
+        content_width_inches: float = 7.4,
+    ) -> None:
+        (
+            self._colors,
+            self._ta_center,
+            self._letter,
+            self._paragraph_style,
+            self._sample_styles,
+            self._inch,
+            self._paragraph,
+            self._document,
+            self._spacer,
+            self._table,
+            self._table_style,
+        ) = _reportlab_components()
+        self.output_path = Path(output_path)
+        self.footer_text = footer_text
+        self._margin = margin_inches * self._inch
+        self._content_width = content_width_inches * self._inch
+
+    def make_styles(self):
+        """Return the shared support-packet ReportLab style sheet."""
+        styles = self._sample_styles()
+        styles["Normal"].fontSize = 9
+        styles["Normal"].leading = 12
+        styles.add(
+            self._paragraph_style(
+                name="HeroTitle",
+                parent=styles["Title"],
+                alignment=self._ta_center,
+                textColor=self._colors.white,
+                fontSize=22,
+                leading=26,
+                spaceAfter=3,
+            )
+        )
+        styles.add(
+            self._paragraph_style(
+                name="HeroSubtitle",
+                parent=styles["Normal"],
+                alignment=self._ta_center,
+                textColor=self._colors.HexColor("#E6F3F3"),
+                fontSize=9,
+                leading=12,
+            )
+        )
+        styles.add(
+            self._paragraph_style(
+                name="SectionTitle",
+                parent=styles["Heading2"],
+                textColor=self._colors.HexColor("#0F3D3E"),
+                fontSize=12,
+                leading=15,
+                spaceBefore=8,
+                spaceAfter=6,
+            )
+        )
+        styles.add(self._paragraph_style(name="Small", parent=styles["Normal"], fontSize=7, leading=9))
+        styles.add(self._paragraph_style(name="Cell", parent=styles["Normal"], fontSize=7, leading=8))
+        styles.add(
+            self._paragraph_style(
+                name="TableHeader",
+                parent=styles["Cell"],
+                textColor=self._colors.white,
+                fontName="Helvetica-Bold",
+            )
+        )
+        styles.add(
+            self._paragraph_style(
+                name="KpiCard",
+                parent=styles["Normal"],
+                alignment=self._ta_center,
+                fontSize=8,
+                leading=12,
+            )
+        )
+        styles.add(self._paragraph_style(name="BoxText", parent=styles["Normal"], fontSize=8, leading=11))
+        return styles
+
+    def add_table(self, story: list, rows: list[list[object]], widths: list[float], styles, *, header: bool = True) -> None:
+        converted: list[list[object]] = []
+        for index, row in enumerate(rows):
+            style = styles["TableHeader"] if header and index == 0 else styles["Cell"]
+            converted.append([self._paragraph(escape_reportlab_text(cell), style) for cell in row])
+        table = self._table(converted, colWidths=widths, repeatRows=1 if header else 0)
+        table_style = [
+            ("GRID", (0, 0), (-1, -1), 0.25, self._colors.HexColor("#D6E4E5")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]
+        if header:
+            table_style.extend(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), self._colors.HexColor("#0F3D3E")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), self._colors.white),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [self._colors.white, self._colors.HexColor("#F7FAFC")]),
+                ]
+            )
+        table.setStyle(self._table_style(table_style))
+        story.append(table)
+        story.append(self._spacer(1, 0.16 * self._inch))
+
+    def add_hero(self, story: list, styles, institution: str, tax_year: object) -> None:
+        title = "Foreign Bank Interest Support Packet"
+        subtitle = f"{institution or 'Institution not recorded'} - {tax_year or 'tax year not recorded'}"
+        hero = self._table(
+            [
+                [self._paragraph(escape_reportlab_text(title), styles["HeroTitle"])],
+                [
+                    self._paragraph(
+                        escape_reportlab_text(f"{subtitle}. For U.S. tax return support only; not an official IRS form."),
+                        styles["HeroSubtitle"],
+                    )
+                ],
+            ],
+            colWidths=[self._content_width],
+        )
+        hero.setStyle(
+            self._table_style(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), self._colors.HexColor("#0F3D3E")),
+                    ("BOX", (0, 0), (-1, -1), 0.5, self._colors.HexColor("#0A2C2D")),
+                    ("TOPPADDING", (0, 0), (-1, 0), 13),
+                    ("BOTTOMPADDING", (0, 0), (-1, 0), 2),
+                    ("TOPPADDING", (0, 1), (-1, 1), 0),
+                    ("BOTTOMPADDING", (0, 1), (-1, 1), 13),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+                ]
+            )
+        )
+        story.append(hero)
+        story.append(self._spacer(1, 0.18 * self._inch))
+
+    def add_kpi_cards(self, story: list, items: list[tuple[str, str]], styles) -> None:
+        cells = [
+            self._paragraph(
+                f'<font color="#667085">{escape_reportlab_text(label)}</font><br/>'
+                f'<font size="15" color="#0F3D3E"><b>{escape_reportlab_text(value)}</b></font>',
+                styles["KpiCard"],
+            )
+            for label, value in items
+        ]
+        card_width = self._content_width / max(len(items), 1)
+        table = self._table([cells], colWidths=[card_width for _item in items])
+        table.setStyle(
+            self._table_style(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), self._colors.HexColor("#F7FAFC")),
+                    ("BOX", (0, 0), (-1, -1), 0.4, self._colors.HexColor("#D6E4E5")),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.25, self._colors.HexColor("#D6E4E5")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 9),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                ]
+            )
+        )
+        story.append(table)
+        story.append(self._spacer(1, 0.18 * self._inch))
+
+    def add_note_box(self, story: list, title: str, lines: list[str], styles, *, tone: str = "info") -> None:
+        palette = {
+            "warning": ("#FFF8E6", "#F4C95D", "#7A4F00"),
+            "info": ("#F0F7F7", "#B8D8D8", "#0F3D3E"),
+        }
+        background, border, title_color = palette.get(tone, palette["info"])
+        body = f'<font color="{title_color}"><b>{escape_reportlab_text(title)}</b></font>'
+        if lines:
+            body = f"{body}<br/>" + "<br/>".join(escape_reportlab_text(line) for line in lines)
+        box = self._table([[self._paragraph(body, styles["BoxText"])]], colWidths=[self._content_width])
+        box.setStyle(
+            self._table_style(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), self._colors.HexColor(background)),
+                    ("BOX", (0, 0), (-1, -1), 0.5, self._colors.HexColor(border)),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                    ("TOPPADDING", (0, 0), (-1, -1), 7),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                ]
+            )
+        )
+        story.append(box)
+        story.append(self._spacer(1, 0.14 * self._inch))
+
+    def page_footer(self, canvas, doc) -> None:
+        canvas.saveState()
+        canvas.setStrokeColor(self._colors.HexColor("#D6E4E5"))
+        canvas.setLineWidth(0.25)
+        canvas.line(self._margin, 0.5 * self._inch, self._letter[0] - self._margin, 0.5 * self._inch)
+        canvas.setFont("Helvetica", 7)
+        canvas.setFillColor(self._colors.HexColor("#666666"))
+        canvas.drawString(self._margin, 0.35 * self._inch, self.footer_text)
+        canvas.drawRightString(self._letter[0] - self._margin, 0.35 * self._inch, f"Page {doc.page}")
+        canvas.restoreState()
+
+    def build(self, story: Sequence[object]) -> Path:
+        """Write the supplied ReportLab flowables with the shared packet chrome."""
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        document = self._document(
+            str(self.output_path),
+            pagesize=self._letter,
+            rightMargin=self._margin,
+            leftMargin=self._margin,
+            topMargin=self._margin,
+            bottomMargin=self._margin,
+        )
+        document.build(list(story), onFirstPage=self.page_footer, onLaterPages=self.page_footer)
+        return self.output_path

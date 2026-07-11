@@ -532,6 +532,29 @@ def test_pdf_transliteration() -> None:
         assert wp._to_latin1_safe("Zürich café") == "Zürich café"
 
 
+def test_optional_reportlab_packet_renderer() -> None:
+    """The shared rich-packet API stays optional for standard-library FX runs."""
+    if not wp.reportlab_available():
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        output = Path(tmp) / "packet.pdf"
+        renderer = wp.ReportlabPacketRenderer(
+            output,
+            footer_text="Generated support packet - not an official IRS form.",
+        )
+        styles = renderer.make_styles()
+        story: list = []
+        renderer.add_hero(story, styles, "Example Bank", 2025)
+        renderer.add_kpi_cards(story, [("Interest rows", "1"), ("USD support total", "USD 10.00")], styles)
+        renderer.add_table(story, [["Field", "Value"], ["Account", "[redacted]"]], [2.1 * 72, 5.1 * 72], styles)
+        renderer.add_note_box(story, "Warnings for preparer review", ["A reviewed warning."], styles, tone="warning")
+        assert renderer.build(story) == output
+        data = output.read_bytes()
+        assert data.startswith(b"%PDF-1."), "ReportLab packet PDF header"
+        assert data.rstrip().endswith(b"%%EOF"), "ReportLab packet PDF trailer"
+        assert len(data) > 1000
+
+
 def main() -> int:
     tests = [
         test_yearly_golden_md_and_json,
@@ -543,6 +566,7 @@ def main() -> int:
         test_helpers,
         test_hardening_boundary,
         test_pdf_transliteration,
+        test_optional_reportlab_packet_renderer,
     ]
     for test in tests:
         test()

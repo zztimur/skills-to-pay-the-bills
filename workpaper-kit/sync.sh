@@ -13,11 +13,12 @@ here="$(cd "$(dirname "$0")" && pwd)"
 repo_root="$(cd "$here/.." && pwd)"
 canonical="$here/workpaper.py"
 
-# Skill packages that vendor the kit. Add new packages here when the kit grows
-# (e.g. Phase 6: fbar-threshold-check, statements-to-interest).
+# Skill packages that vendor the kit. Add a package here whenever it uses a
+# public workpaper-kit API so standalone installs keep working.
 skills=(
   "get-yearly-fx-rate"
   "get-year-end-fx-rate"
+  "statements-to-interest"
 )
 
 if [ ! -f "$canonical" ]; then
