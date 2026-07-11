@@ -2,7 +2,7 @@
 
 Use this workflow whenever the skill is triggered. Keep all work local unless the user explicitly asks for otherwise.
 
-Keep raw statement evidence in local JSON/CSV artifacts. The generated PDF redacts account-like identifiers and emails by default, and uses redacted evidence snippets plus page citations.
+Keep raw statement evidence in local JSON/CSV artifacts. The generated PDF redacts emails, IBANs, and labelled account-like identifiers including dotted formats by default, while retaining dates and monetary amounts. Use redacted evidence snippets plus page citations.
 
 ## 1. Intake
 
@@ -281,7 +281,7 @@ After generating the PDF:
 - Confirm the extracted text includes `Foreign Bank Interest Support Packet`.
 - Confirm the PDF text includes the expected USD total.
 - Confirm warning/review flags are represented when present.
-- Confirm the PDF does not expose full local source paths, full account-like identifiers, or raw emails; statement tables should use redacted filenames and page citations.
+- Confirm the PDF does not expose full local source paths, full account-like identifiers (including IBANs and dotted labelled accounts), or raw emails; preserve transaction dates and monetary amounts; statement tables should use redacted filenames and page citations.
 
 Use `pypdf` for a quick text check:
 
