@@ -82,7 +82,7 @@ python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py lookup \
   --output-root work/fx-rate-proof
 ```
 
-If the script cannot reach the IRS page (exit code 5, common in sandboxed or proxied environments), fetch the page yourself, save the HTML, and rerun `lookup` with `--html-file <saved.html>`. The workpaper records whether the snapshot was fetched live or supplied from a file.
+If the script cannot reach the IRS page (exit code 5, common in sandboxed or proxied environments), fetch the canonical IRS page yourself, save its raw HTML as a regular UTF-8 file no larger than 5 MiB, and rerun `lookup` with `--html-file <saved.html>`. The saved file replays the IRS source; it cannot replace the source URL or make another table look IRS-backed.
 
 Manual workpaper for a non-IRS published annual source:
 
@@ -102,7 +102,7 @@ python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py manual \
 
 `foreign-per-usd` means `1 USD = <rate> foreign currency`. Use `usd-per-foreign` only when the source is quoted as `1 foreign currency = <rate> USD`.
 
-For non-IRS manual sources, the proof file is required. Save the source page as PDF/HTML, take a screenshot, or download the source data first. A folder, broken link, or missing path is not proof; the command stops before it creates a packet. The script copies a valid proof into the workpaper folder and hashes it.
+For non-IRS manual sources, the proof file is required. Save the source page as PDF/HTML, take a screenshot, or download the source data first. A folder, broken link, or missing path is not proof; the command stops before it creates a packet. The script copies a valid proof into the workpaper folder and hashes it. It also requires a real absolute source URL, a specific note that says why the rate is a yearly/annual average, and a retrieval date that is not in the future. Daily, monthly, quarterly, intraday, spot, year-end, and FBAR source labels are rejected instead of getting a yearly-average costume.
 
 Pass `--rate` as a plain number with no thousands separators (`4200` or `4200.00`, never `4,200`); an ambiguous value is rejected rather than silently rescaled into a workpaper. For a real ISO 4217 code the skill does not already know (outside the IRS table and its aliases), add `--allow-unknown-code` to confirm it is not a typo.
 
@@ -120,7 +120,7 @@ If it reports unmapped rows, update `IRS_ROWS_BY_CODE` and aliases in the script
 
 The skill should stop instead of getting cute when:
 
-- The currency is ambiguous, like `peso`, `dollar`, or `pound`.
+- The currency is ambiguous, like `peso`, `dollar`, `pound`, or `ruble`.
 - The requested year is not published yet, or falls outside 1970-2100.
 - The source gives daily/monthly/quarterly data but no annual average.
 - There is no local proof file for a non-IRS annual source.

@@ -11,6 +11,7 @@ import io
 import json
 import re
 import shutil
+import stat
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+from urllib.parse import urlparse
 
 from _workpaper import RateError, WorkpaperSpec, build_workpaper, final_text
 
@@ -28,6 +30,7 @@ IRS_YEARLY_URL = (
     "https://www.irs.gov/individuals/international-taxpayers/"
     "yearly-average-currency-exchange-rates"
 )
+MAX_HTML_SNAPSHOT_BYTES = 5 * 1024 * 1024
 
 IRS_ROWS_BY_CODE = {
     "AFN": ("Afghanistan", "Afghani"),
@@ -138,7 +141,17 @@ AMBIGUOUS_TERMS = {
     "dinar": "Use a country or ISO code, for example DZD, BHD, IQD, or TND.",
     "krone": "Use a country or ISO code, for example DKK or NOK.",
     "krona": "Use a country or ISO code, for example SEK or ISK.",
+    "ruble": "Use RUB for Russian ruble, or provide a country/ISO code.",
 }
+
+ANNUAL_AVERAGE_LANGUAGE = re.compile(
+    r"\b(?:annual|yearly)[\s-]*(?:average|avg)\b|\b(?:average|avg)[\s-]*(?:annual|yearly)\b",
+    re.IGNORECASE,
+)
+NON_ANNUAL_LANGUAGE = re.compile(
+    r"\b(?:daily|weekly|monthly|quarterly|intraday|spot|year[ -]?end|fbar)\b",
+    re.IGNORECASE,
+)
 
 KNOWN_CURRENCY_CODES = set(IRS_ROWS_BY_CODE) | set(ALIASES.values())
 
@@ -255,6 +268,59 @@ def parse_user_rate(raw: str) -> Decimal:
         raise RateError(f"Could not parse rate value '{raw}'.", 3) from exc
 
 
+def validate_manual_source_url(raw: str) -> str:
+    """Require a real web locator before recording manual-source provenance."""
+    source_url = clean_text(raw)
+    parsed = urlparse(source_url)
+    if (
+        not source_url
+        or re.search(r"\s", source_url)
+        or parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+    ):
+        raise RateError(
+            "Manual --source-url must be a nonempty absolute http:// or https:// URL.",
+            2,
+        )
+    return source_url
+
+
+def validate_manual_annual_metadata(
+    source_title_raw: str, source_note_raw: str, source_category_raw: str
+) -> tuple[str, str, str]:
+    """Require explicit annual-average provenance and reject incompatible labels."""
+    source_title = clean_text(source_title_raw)
+    source_note = clean_text(source_note_raw)
+    source_category = clean_text(source_category_raw)
+    if not source_title:
+        raise RateError("Pass a nonempty --source-title for the published source.", 2)
+    if not source_note:
+        raise RateError(
+            "Pass a nonempty --source-note confirming why the source supports yearly-average use.",
+            2,
+        )
+    if len(source_note) < 16:
+        raise RateError(
+            "--source-note must be a specific explanation of at least 16 characters.",
+            2,
+        )
+
+    source_provenance = " ".join((source_title, source_note))
+    combined = " ".join((source_provenance, source_category))
+    if NON_ANNUAL_LANGUAGE.search(combined):
+        raise RateError(
+            "This skill is for published yearly-average rates only; daily, monthly, quarterly, "
+            "spot, year-end, and FBAR sources are not valid manual inputs.",
+            2,
+        )
+    if not ANNUAL_AVERAGE_LANGUAGE.search(source_provenance):
+        raise RateError(
+            "Manual source metadata must explicitly identify a published yearly or annual average.",
+            2,
+        )
+    return source_title, source_note, source_category
+
+
 def parse_yearly_irs_table(html: str) -> list[dict[str, object]]:
     parser = TableParser()
     parser.feed(html)
@@ -320,19 +386,53 @@ def parse_yearly_irs_text_fallback(html: str) -> list[dict[str, object]]:
     return table
 
 
-def load_html(source_url: str, html_file: str | None) -> tuple[str, str]:
+def load_irs_html(html_file: str | None) -> tuple[str, str]:
+    """Load a bounded UTF-8 snapshot of the fixed IRS yearly-average page."""
     if html_file:
         path = Path(html_file)
-        return path.read_text(encoding="utf-8"), str(path.resolve())
+        source_ref = str(path.resolve())
+        try:
+            mode = path.lstat().st_mode
+            if path.is_symlink() or not stat.S_ISREG(mode):
+                raise RateError(
+                    f"Supplied IRS HTML file must be an existing regular file, not a link or device: {source_ref}",
+                    2,
+                )
+            size = path.stat().st_size
+            if size > MAX_HTML_SNAPSHOT_BYTES:
+                raise RateError(
+                    f"Supplied IRS HTML file exceeds the {MAX_HTML_SNAPSHOT_BYTES}-byte safety limit: {source_ref}",
+                    2,
+                )
+            html_bytes = path.read_bytes()
+        except FileNotFoundError as exc:
+            raise RateError(f"Could not read supplied IRS HTML file {source_ref}: {exc}", 2) from exc
+        except OSError as exc:
+            raise RateError(f"Could not read supplied IRS HTML file {source_ref}: {exc}", 2) from exc
+        if len(html_bytes) > MAX_HTML_SNAPSHOT_BYTES:
+            raise RateError(
+                f"Supplied IRS HTML file exceeds the {MAX_HTML_SNAPSHOT_BYTES}-byte safety limit: {source_ref}",
+                2,
+            )
+        try:
+            return html_bytes.decode("utf-8"), source_ref
+        except UnicodeDecodeError as exc:
+            raise RateError(f"Supplied IRS HTML file is not valid UTF-8: {source_ref}", 2) from exc
 
     request = Request(
-        source_url,
+        IRS_YEARLY_URL,
         headers={"User-Agent": "get-yearly-fx-rate/1.0 (+tax support workpaper)"},
     )
     try:
         with urlopen(request, timeout=30) as response:
             charset = response.headers.get_content_charset() or "utf-8"
-            return response.read().decode(charset, errors="replace"), source_url
+            html_bytes = response.read(MAX_HTML_SNAPSHOT_BYTES + 1)
+            if len(html_bytes) > MAX_HTML_SNAPSHOT_BYTES:
+                raise RateError(
+                    f"IRS yearly-average response exceeds the {MAX_HTML_SNAPSHOT_BYTES}-byte safety limit.",
+                    3,
+                )
+            return html_bytes.decode(charset, errors="replace"), IRS_YEARLY_URL
     except URLError as exc:
         raise RateError(f"Could not fetch IRS yearly average page: {exc}", 5) from exc
 
@@ -427,6 +527,20 @@ def today_iso() -> str:
     return _dt.date.today().isoformat()
 
 
+def resolve_retrieval_date(retrieved: str | None, today: _dt.date | None = None) -> str:
+    """Return the actual retrieval date without permitting future provenance."""
+    current_date = today or _dt.date.today()
+    value = retrieved or current_date.isoformat()
+    retrieval_date = _dt.date.fromisoformat(value)
+    if retrieval_date > current_date:
+        raise RateError(
+            f"Retrieval date {value} cannot be later than today ({current_date.isoformat()}). "
+            "Use the date the source was actually retrieved.",
+            2,
+        )
+    return value
+
+
 def create_workpaper(
     *,
     output_root: str,
@@ -484,8 +598,9 @@ def command_lookup(args: argparse.Namespace) -> int:
             4,
         )
 
-    html, _source_ref = load_html(args.source_url, args.html_file)
-    rate = find_irs_rate(code, args.year, html, args.source_url)
+    retrieval_date = resolve_retrieval_date(args.retrieved)
+    html, _source_ref = load_irs_html(args.html_file)
+    rate = find_irs_rate(code, args.year, html, IRS_YEARLY_URL)
 
     source_slug = "irs-yearly-average-currency-exchange-rates"
     folder = Path(args.output_root) / f"{code.lower()}-{args.year}-{source_slug}"
@@ -508,7 +623,7 @@ def command_lookup(args: argparse.Namespace) -> int:
         rate_direction="foreign-per-usd",
         source_title="IRS Yearly average currency exchange rates",
         source_url=rate.source_url,
-        retrieval_date=args.retrieved or today_iso(),
+        retrieval_date=retrieval_date,
         source_note=note,
         source_category="IRS yearly average table",
         saved_proofs=[html_path],
@@ -529,6 +644,11 @@ def command_manual(args: argparse.Namespace) -> int:
     if not args.annual_average_confirmed:
         raise RateError("Pass --annual-average-confirmed after verifying the source labels the value as yearly/annual average.", 2)
     rate = parse_user_rate(args.rate)
+    source_url = validate_manual_source_url(args.source_url)
+    source_title, source_note, source_category = validate_manual_annual_metadata(
+        args.source_title, args.source_note, args.source_category
+    )
+    retrieval_date = resolve_retrieval_date(args.retrieved)
     proof_path = Path(args.proof_file)
     staged_proof = stage_manual_proof(proof_path)
     try:
@@ -538,11 +658,11 @@ def command_manual(args: argparse.Namespace) -> int:
             year=args.year,
             rate=rate,
             rate_direction=args.rate_direction,
-            source_title=args.source_title,
-            source_url=args.source_url,
-            retrieval_date=args.retrieved or today_iso(),
-            source_note=args.source_note,
-            source_category=args.source_category,
+            source_title=source_title,
+            source_url=source_url,
+            retrieval_date=retrieval_date,
+            source_note=source_note,
+            source_category=source_category,
             saved_proofs=[staged_proof],
             proof_limitations=[],
         )
@@ -585,7 +705,7 @@ def stage_manual_proof(proof_path: Path) -> Path:
 
 
 def command_map_check(args: argparse.Namespace) -> int:
-    html, source_ref = load_html(args.source_url, args.html_file)
+    html, source_ref = load_irs_html(args.html_file)
     table = parse_yearly_irs_table(html)
     if not table:
         raise RateError("Could not parse the IRS yearly-average table from the source page.", 3)
@@ -683,6 +803,23 @@ def command_self_test(_args: argparse.Namespace) -> int:
         raise AssertionError("ambiguous peso should fail")
 
     try:
+        normalize_currency("ruble")
+    except RateError as exc:
+        assert exc.code == 2
+        assert "RUB" in str(exc)
+    else:
+        raise AssertionError("ambiguous ruble should fail")
+
+    assert resolve_retrieval_date("2024-01-01", _dt.date(2026, 1, 1)) == "2024-01-01"
+    try:
+        resolve_retrieval_date("2099-01-01", _dt.date(2026, 1, 1))
+    except RateError as exc:
+        assert exc.code == 2
+        assert "cannot be later than today" in str(exc)
+    else:
+        raise AssertionError("future retrieval dates should fail")
+
+    try:
         find_irs_rate("COP", 2024, sample_html, IRS_YEARLY_URL)
     except RateError as exc:
         assert exc.code == 4
@@ -700,9 +837,8 @@ def command_self_test(_args: argparse.Namespace) -> int:
             currency="CAD",
             year=2024,
             output_root=str(Path(tmp) / "proof"),
-            source_url=IRS_YEARLY_URL,
             html_file=str(html_path),
-            retrieved="2026-07-03",
+            retrieved="2024-01-01",
         )
         lookup_output = io.StringIO()
         with contextlib.redirect_stdout(lookup_output):
@@ -717,6 +853,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         data = json.loads(workpaper.read_text(encoding="utf-8"))
         assert data["skill"] == "get-yearly-fx-rate"
         assert data["foreign_per_usd"] == "1.37"
+        assert data["source"]["url"] == IRS_YEARLY_URL
         assert data["proof"]["workpaper_pdf_sha256"]
         for key in ("workpaper_pdf", "workpaper_md", "workpaper_json"):
             assert Path(data["proof"][key]).exists(), key
@@ -743,7 +880,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
             source_note="Source labels this as annual average.",
             annual_average_confirmed=True,
             allow_unknown_code=False,
-            retrieved="2026-07-03",
+            retrieved="2024-01-01",
             proof_file=str(proof_file),
             output_root=str(Path(tmp) / "manual-proof"),
         )
@@ -764,6 +901,46 @@ def command_self_test(_args: argparse.Namespace) -> int:
         assert saved_path.exists()
         assert saved_path.parent.resolve() == manual_workpaper.parent.resolve()
         assert saved_file["sha256"] == hashlib.sha256(proof_file.read_bytes()).hexdigest()
+
+        # Manual metadata is a proof gate, not a suggestion. None of these
+        # may create a workpaper folder.
+        invalid_metadata_cases = (
+            ("empty-url", {"source_url": ""}, "absolute http"),
+            ("empty-note", {"source_note": ""}, "nonempty --source-note"),
+            (
+                "daily-source",
+                {
+                    "source_title": "Daily spot quote",
+                    "source_note": "This source gives a daily spot rate.",
+                    "source_category": "daily spot rate",
+                },
+                "yearly-average rates only",
+            ),
+            (
+                "missing-annual-language",
+                {
+                    "source_title": "Central Bank Rate",
+                    "source_note": "Published exchange rate for the calendar year.",
+                    "source_category": "central bank published annual average",
+                },
+                "yearly or annual average",
+            ),
+            ("future-retrieval", {"retrieved": "2099-01-01"}, "cannot be later than today"),
+        )
+        for label, overrides, expected_message in invalid_metadata_cases:
+            rejected_args = argparse.Namespace(**vars(manual_args))
+            for key, value in overrides.items():
+                setattr(rejected_args, key, value)
+            rejected_root = Path(tmp) / f"manual-{label}"
+            rejected_args.output_root = str(rejected_root)
+            try:
+                command_manual(rejected_args)
+            except RateError as exc:
+                assert exc.code == 2
+                assert expected_message in str(exc)
+            else:
+                raise AssertionError(f"{label} manual metadata should be rejected")
+            assert not rejected_root.exists(), f"{label} should not create a packet"
 
         directory_proof = Path(tmp) / "proof-directory"
         directory_proof.mkdir()
@@ -813,6 +990,29 @@ def command_self_test(_args: argparse.Namespace) -> int:
         finally:
             shutil.copy2 = original_copy2
         assert not vanishing_root.exists(), "vanishing proof must not create an output root"
+
+        # Offline IRS replay accepts only bounded, regular UTF-8 files.
+        html_directory = Path(tmp) / "html-directory"
+        html_directory.mkdir()
+        html_link = Path(tmp) / "html-link"
+        html_link.symlink_to(html_path)
+        for label, invalid_html in (("directory", html_directory), ("symlink", html_link)):
+            try:
+                load_irs_html(str(invalid_html))
+            except RateError as exc:
+                assert exc.code == 2
+                assert "regular file" in str(exc)
+            else:
+                raise AssertionError(f"{label} IRS HTML input should be rejected")
+        oversized_html = Path(tmp) / "oversized.html"
+        oversized_html.write_bytes(b"x" * (MAX_HTML_SNAPSHOT_BYTES + 1))
+        try:
+            load_irs_html(str(oversized_html))
+        except RateError as exc:
+            assert exc.code == 2
+            assert "safety limit" in str(exc)
+        else:
+            raise AssertionError("oversized IRS HTML input should be rejected")
 
         # Once staging succeeds, later source deletion must not affect the
         # packet: the staged copy is the artifact copied and hashed by the kit.
@@ -881,7 +1081,6 @@ def command_self_test(_args: argparse.Namespace) -> int:
             raise AssertionError("unknown currency code should require --allow-unknown-code")
 
         map_check_args = argparse.Namespace(
-            source_url=IRS_YEARLY_URL,
             html_file=str(html_path),
         )
         with contextlib.redirect_stdout(io.StringIO()):
@@ -924,7 +1123,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     lookup = subparsers.add_parser("lookup", help="Fetch/parse IRS yearly-average table and create proof workpaper.")
     add_common_args(lookup)
-    lookup.add_argument("--source-url", default=IRS_YEARLY_URL, help="IRS yearly-average source URL.")
     lookup.add_argument("--html-file", help="Use a local HTML file instead of fetching the IRS page.")
     lookup.set_defaults(func=command_lookup)
 
@@ -951,7 +1149,6 @@ def build_parser() -> argparse.ArgumentParser:
     manual.set_defaults(func=command_manual)
 
     map_check = subparsers.add_parser("map-check", help="Compare parsed IRS table rows with the hard-coded IRS currency map.")
-    map_check.add_argument("--source-url", default=IRS_YEARLY_URL, help="IRS yearly-average source URL.")
     map_check.add_argument("--html-file", help="Use a local HTML file instead of fetching the IRS page.")
     map_check.set_defaults(func=command_map_check)
 
