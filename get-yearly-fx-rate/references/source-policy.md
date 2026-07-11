@@ -27,8 +27,10 @@ Do not use:
 
 - Agent-calculated averages from daily/monthly/quarterly data.
 - Treasury quarterly reporting rates as a silent annual average.
-- Spot rates unless the user explicitly asks for spot-rate support instead of a yearly average.
+- Spot rates; they are outside this yearly-average workflow.
 - Unsourced search snippets, LLM memory, or a page that does not expose the actual year/rate.
+
+For an IRS lookup, use the canonical IRS yearly-average page. A saved `--html-file` is only a retained offline replay of that page; do not substitute a different URL or label another table as IRS data.
 
 Treasury reporting rates are government data, but they are quarterly reporting rates for U.S. government agency reporting and are not annual averages. Use them only with an explicit caveat and only when the user or preparer accepts that source.
 
@@ -78,8 +80,12 @@ For non-IRS/manual sources, require both:
 
 - Explicit confirmation that the source labels the rate as a yearly/annual average.
 - A local proof file saved before the workpaper is created.
+- A nonempty absolute `http://` or `https://` source URL.
+- A specific source note of at least 16 characters that identifies yearly/annual-average support.
 
 Do not accept a bare URL as the only proof for a manual non-IRS source.
+
+The retrieval date must be the actual date the source was retrieved, never a future date. Stop when manual source metadata identifies a daily, weekly, monthly, quarterly, intraday, spot, year-end, or FBAR rate rather than a yearly/annual average.
 
 ## IRS Map Refresh
 
@@ -89,7 +95,7 @@ The helper script intentionally uses an IRS row-to-ISO map because the IRS table
 
 Ask for clarification when:
 
-- The currency term is ambiguous: `peso`, `dollar`, `pound`, `krone/krona`, etc.
+- The currency term is ambiguous: `peso`, `dollar`, `pound`, `ruble`, `krone/krona`, etc.
 - The requested year is not published yet.
 - The source provides multiple rates for the same currency/year and the correct rate is unclear.
 
@@ -99,5 +105,6 @@ Stop instead of answering when:
 - Only daily/monthly/quarterly data is available and no user/preparer custom rate was supplied.
 - A manual non-IRS source has no saved local proof artifact.
 - A manual non-IRS source has not been explicitly confirmed as a published yearly/annual average.
+- A manual source URL/note is empty or malformed, its retrieval date is in the future, or its metadata identifies a non-annual rate.
 - Rate direction cannot be determined.
 - The result would require tax advice beyond identifying and documenting a published rate.

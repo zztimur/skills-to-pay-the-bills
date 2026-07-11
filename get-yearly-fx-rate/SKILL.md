@@ -17,7 +17,7 @@ Collect or infer:
 - Calendar/tax year.
 - Output root, defaulting to `work/fx-rate-proof/`.
 
-Ask for clarification when the currency is ambiguous, for example `peso`, `dollar`, or `pound` without country/ISO code.
+Ask for clarification when the currency is ambiguous, for example `peso`, `dollar`, `pound`, or `ruble` without country/ISO code.
 
 ## Source Search
 
@@ -37,7 +37,7 @@ python3 "<package-root>/scripts/get_yearly_fx_rate.py" lookup \
   --output-root work/fx-rate-proof
 ```
 
-If the script cannot reach the IRS page (exit code 5, common in sandboxed or proxied environments), fetch the IRS yearly-average page with your web tool, save the raw HTML locally, and rerun `lookup` with `--html-file <saved.html>`. The workpaper records whether the snapshot was fetched live or supplied from a file.
+If the script cannot reach the IRS page (exit code 5, common in sandboxed or proxied environments), fetch the IRS yearly-average page with your web tool, save its raw HTML as a regular UTF-8 file no larger than 5 MiB, and rerun `lookup` with `--html-file <saved.html>`. The lookup always records the canonical IRS page as its source; `--html-file` is only an offline snapshot replay.
 
 Manual published-source workpaper after the agent has found a non-IRS annual source:
 
@@ -57,7 +57,7 @@ python3 "<package-root>/scripts/get_yearly_fx_rate.py" manual \
 
 Use `foreign-per-usd` when the rate means one U.S. dollar equals the foreign-currency amount. Use `usd-per-foreign` only when the published rate means one unit of foreign currency equals the U.S. dollar amount.
 
-For manual non-IRS workpapers, do not run the script until there is a local proof file and the source explicitly labels the rate as a yearly/annual average. The proof file can be a screenshot, PDF save/print, HTML snapshot, downloaded source data file, or another retained source artifact.
+For manual non-IRS workpapers, do not run the script until there is a local proof file and the source explicitly labels the rate as a yearly/annual average. The proof file can be a screenshot, PDF save/print, HTML snapshot, downloaded source data file, or another retained source artifact. `--source-url` must be a nonempty absolute `http://` or `https://` URL, `--source-note` must explain annual-average support, and `--retrieved` must be today or earlier. The helper refuses metadata that identifies daily, weekly, monthly, quarterly, intraday, spot, year-end, or FBAR use.
 
 ## Proof Packet
 
@@ -109,6 +109,8 @@ Add one short caveat only when needed, such as `The IRS table did not list this 
 ## Runtime And Validation
 
 The script uses only Python standard-library modules. Use `python3` unless the active environment provides `python`.
+
+`scripts/get_yearly_fx_rate.py` imports `scripts/_workpaper.py`, a generated, byte-identical copy of the shared `workpaper-kit/workpaper.py` proof-packet engine. Do not hand-edit `_workpaper.py`; update the canonical kit and run `workpaper-kit/sync.sh` to regenerate both FX skills.
 
 After changing this skill, run:
 
