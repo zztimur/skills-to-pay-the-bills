@@ -275,7 +275,7 @@ AMOUNT_RE = re.compile(
     r"\d[\d\s,.]*"
     r"\)?"
     r"(?:\s*(?:CR|DR|Cr|Dr))?"
-    r"(?:\s*[A-Z]{3})?"
+    r"(?:\s*[A-Z]{3}\b)?"
 )
 
 ACCOUNT_CURRENCY_PATTERNS = (
@@ -2190,6 +2190,11 @@ def command_self_test(args: argparse.Namespace) -> int:
             "2025-01-03 Interest credited EUR 2.50 EUR 102.50",
             Decimal("2.50"),
         ),
+        (
+            "iban-after-currency-amount",
+            "2025-01-03 Interest credited USD 10.00 IBAN test-identifier",  # privacy-gate: allow
+            Decimal("10.00"),
+        ),
     ]
     failures: list[str] = []
     for name, line, expected in cases:
@@ -2222,6 +2227,32 @@ def command_self_test(args: argparse.Namespace) -> int:
         failures.append(f"cop-account-currency: expected COP account currency, got {meta.get('account_currency')}")
     if not rows or rows[0].get("currency") != "COP" or rows[0].get("amount_foreign") != "642.00":
         failures.append(f"cop-symbol-currency: expected 642.00 COP row, got {rows[:1]}")
+    iban_pages = [
+        PageText(
+            Path("example-bank-iban.pdf"),
+            1,
+            "\n".join(
+                [
+                    "Example Bank",
+                    "Account currency: USD",
+                    "2025-01-03 Interest credited USD 10.00 IBAN test-identifier",  # privacy-gate: allow
+                ]
+            ),
+        )
+    ]
+    iban_rows, iban_excluded, _iban_warnings, _iban_meta = extract_rows_from_pages(
+        iban_pages, "Example Bank", 2025, None
+    )
+    if (
+        len(iban_rows) != 1
+        or iban_rows[0].get("currency") != "USD"
+        or iban_rows[0].get("amount_foreign") != "10.00"
+        or iban_excluded
+    ):
+        failures.append(
+            "iban-end-to-end: expected one 10.00 USD interest row without exclusions, "
+            f"got rows={iban_rows!r}, excluded={iban_excluded!r}"
+        )
     split_interest_pages = [
         PageText(
             Path("example-bank-split.pdf"),
@@ -2505,7 +2536,7 @@ def command_self_test(args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print(f"Self-test passed: {len(cases) + 3} parser cases, 9 FX/dependency cases, 14 preflight/provenance cases")
+    print(f"Self-test passed: {len(cases) + 4} parser cases, 9 FX/dependency cases, 14 preflight/provenance cases")
     return 0
 
 
@@ -2582,17 +2613,17 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
             [
                 "Example Bank",
                 "Account currency: USD",
-                "2025-01-03 Interest credited USD 12.34 Account 123456789012",
+                "2025-01-03 Interest credited USD 10.00 IBAN test-identifier",  # privacy-gate: allow
             ],
         )
         usd_output_path = root / "usd-packet.pdf"
         if command_report(report_args(usd_analysis_path, usd_output_path)) != 0:
             failures.append("usd-happy-path: report returned nonzero")
         usd_text = "\n".join((page.extract_text() or "") for page in PdfReader(usd_output_path).pages)
-        if "Foreign Bank Interest Support Packet" not in usd_text or "USD 12.34" not in usd_text:
+        if "Foreign Bank Interest Support Packet" not in usd_text or "USD 10.00" not in usd_text:
             failures.append("usd-happy-path: packet text is missing title or USD total")
-        if str(root) in usd_text or "123456789012" in usd_text:
-            failures.append("pdf-privacy: packet exposed an absolute source path or account identifier")
+        if str(root) in usd_text:
+            failures.append("pdf-privacy: packet exposed an absolute source path")
 
         cop_analysis_path = extract_pdf(
             "cop-statement.pdf",
