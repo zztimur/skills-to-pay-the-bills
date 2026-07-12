@@ -140,6 +140,16 @@ ACCOUNT_BARE_RE = re.compile(
     r"kontonummer|konto|compte|num[eé]ro de compte)\b[\s:#-]*([*Xx0-9][*Xx0-9.\- ]{3,33})",
     re.I,
 )
+# Some Spanish statement headers split the product and identifier across two
+# lines (for example, ``CUENTA DE AHORROS`` then ``NÚMERO 12345678``).  Keep
+# this narrow: a bare "NÚMERO" elsewhere is too easily a page, transaction,
+# phone, branch, or address number.
+STANDALONE_ACCOUNT_NUMBER_RE = re.compile(
+    r"^\s*(?:n[uú]mero|nro|n[uú]m)\.?\s*[:#-]?\s*([*Xx0-9][*Xx0-9.\- ]{3,33})\s*$",
+    re.I,
+)
+ACCOUNT_PRODUCT_HEADER_RE = re.compile(r"^\s*cuenta(?:\s+de\s+(?:ahorros|corriente))?\s*$", re.I)
+ACCOUNT_HEADER_CONTEXT_LINES = 3
 ACCOUNT_IBAN_RE = re.compile(r"\bIBAN\b[\s:#-]*([A-Z]{2}\d{2}[A-Z0-9 ]{6,40})", re.I)
 ACCOUNT_ENDING_RE = re.compile(r"\b(?:ending in|ends in|termina en)\s*([*Xx0-9]{2,8})", re.I)
 
@@ -1213,7 +1223,8 @@ def _dedupe_accounts(raw: list[tuple[str, str, bool]], limit: int = 20) -> list[
 
 def detect_account_hints(lines: Iterable[str]) -> list[str]:
     raw: list[tuple[str, str, bool]] = []
-    for line in lines:
+    cleaned_lines = [clean_line(line) for line in lines]
+    for line in cleaned_lines:
         if COUNTERPARTY_RE.search(line):
             # A transfer/counterparty line names the other party's account or
             # IBAN, not the statement holder's; skip it entirely.
@@ -1236,6 +1247,20 @@ def detect_account_hints(lines: Iterable[str]) -> list[str]:
             fragment = clean_line(match.group(1))
             # An "ending in N" fragment is inherently a partial (suffix) hint.
             raw.append((fragment, _account_compact(fragment), True))
+
+    for index, line in enumerate(cleaned_lines):
+        if COUNTERPARTY_RE.search(line):
+            continue
+        match = STANDALONE_ACCOUNT_NUMBER_RE.match(line)
+        if not match:
+            continue
+        context_start = max(0, index - ACCOUNT_HEADER_CONTEXT_LINES)
+        if not any(ACCOUNT_PRODUCT_HEADER_RE.match(item) for item in cleaned_lines[context_start:index]):
+            continue
+        token = account_token(match.group(1))
+        if token:
+            compact = _account_compact(token)
+            raw.append((token, compact, "*" in compact or "X" in compact))
     return _dedupe_accounts(raw)
 
 
@@ -2656,6 +2681,21 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("account-label: a label followed by a word must not yield a hint")
         if detect_account_hints(["Account No. 12 of 34 pages"]):
             failures.append("account-label: a short number embedded in text after a label must not be captured as an account")
+
+        standalone_spanish_header = [
+            "ESTADO DE CUENTA",
+            "CUENTA DE AHORROS",
+            "NÚMERO 76543210",
+            "SUCURSAL PRINCIPAL",
+        ]
+        if detect_account_hints(standalone_spanish_header) != ["76543210"]:
+            failures.append("account-header: standalone Spanish NÚMERO after an account product must yield the account")
+        if detect_account_hints(["NÚMERO 76543210"]):
+            failures.append("account-header: standalone NÚMERO without account-header context must not yield an account")
+        if detect_account_hints(["CUENTA DE AHORROS", "NÚMERO DE PÁGINA 76543210"]):
+            failures.append("account-header: page-number wording must not yield an account")
+        if detect_account_hints(["CUENTA DE AHORROS", "NÚMERO 123"]):
+            failures.append("account-header: too-short standalone numbers must not yield an account")
 
         # IBAN captures trim a trailing holder name to the checksum-valid IBAN,
         # and grouped vs compact spellings collapse to one hint.
