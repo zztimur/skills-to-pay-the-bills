@@ -110,7 +110,7 @@ Add one short caveat only when needed, such as `The IRS table did not list this 
 
 The script uses only Python standard-library modules. Use `python3` unless the active environment provides `python`.
 
-`scripts/get_yearly_fx_rate.py` imports `scripts/_workpaper.py`, a generated, byte-identical copy of the shared proof-packet engine. Do not hand-edit `_workpaper.py`. In the source repository, update `workpaper-kit/workpaper.py` and run `workpaper-kit/sync.sh` to regenerate both FX skills. A standalone installed package is runtime-only and does not include the canonical kit.
+`scripts/get_yearly_fx_rate.py` imports `scripts/_workpaper.py`, a generated, byte-identical vendored copy of the shared proof-packet engine. This installed skill runs standalone and never imports `workpaper-kit` at runtime. Do not hand-edit `_workpaper.py`. To change shared proof-packet behavior in the source repository, edit `workpaper-kit/workpaper.py` and run `workpaper-kit/sync.sh` to regenerate both FX skills; the canonical kit is not included in standalone installs.
 
 After changing this skill, run:
 

@@ -113,7 +113,7 @@ Add one short caveat only when needed, such as `Treasury/Fiscal Data did not lis
 
 The script uses only Python standard-library modules. Use `python3` unless the active environment provides `python`.
 
-`scripts/get_year_end_fx_rate.py` imports `scripts/_workpaper.py`, a generated, byte-identical copy of the shared `workpaper-kit/workpaper.py` engine (the same copy `get-yearly-fx-rate` carries, so both proof packets look the same). Do not hand-edit `scripts/_workpaper.py`; edit the canonical `workpaper-kit/workpaper.py` and let the pre-commit hook or `workpaper-kit/sync.sh` regenerate it.
+`scripts/get_year_end_fx_rate.py` imports `scripts/_workpaper.py`, a generated, byte-identical vendored copy of the shared proof-packet engine (the same copy `get-yearly-fx-rate` carries, so both proof packets look the same). This installed skill runs standalone and never imports `workpaper-kit` at runtime. Do not hand-edit `scripts/_workpaper.py`. To change shared proof-packet behavior in the source repository, edit `workpaper-kit/workpaper.py` and let the pre-commit hook or `workpaper-kit/sync.sh` regenerate both FX skills; the canonical kit is not included in standalone installs.
 
 After changing this skill, run:
 
