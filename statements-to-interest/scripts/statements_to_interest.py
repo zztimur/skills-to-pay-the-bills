@@ -46,6 +46,7 @@ MIN_TEXT_CHARS = 40
 PREFLIGHT_SKILL = "statement-intake-preflight"
 PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0"}
 PREFLIGHT_READY_STATUS = "ready-for-domain-extraction"
+PREFLIGHT_REVIEWED_HANDOFF_STATUS = "reviewed-for-domain-extraction"
 ANALYSIS_READY_STATUS = "ready-for-reporting"
 ANALYSIS_REVIEW_REQUIRED_STATUS = "review-required"
 ANALYSIS_ZERO_CONFIRMATION_STATUS = "zero-interest-confirmation-required"
@@ -1035,6 +1036,80 @@ def sha256_file(path: Path, label: str) -> str:
     return digest.hexdigest()
 
 
+def preflight_file_bytes(path: Path, label: str) -> int:
+    try:
+        return path.stat().st_size
+    except OSError as exc:
+        raise SystemExit(f"Could not stat {label} {path}: {exc}") from exc
+
+
+def preflight_statement_fingerprints(data: dict) -> list[dict[str, object]]:
+    statement_files = data.get("statement_files")
+    if not isinstance(statement_files, list) or not statement_files:
+        raise SystemExit("Preflight JSON has no statement_files list.")
+    fingerprints: list[dict[str, object]] = []
+    seen_paths: set[str] = set()
+    seen_digests: set[str] = set()
+    for index, item in enumerate(statement_files, start=1):
+        if not isinstance(item, dict):
+            raise SystemExit(f"Preflight statement_files entry {index} is not an object.")
+        source_path = item.get("resolved_file") or item.get("file")
+        if not source_path:
+            raise SystemExit(f"Preflight statement_files entry {index} has no file path.")
+        normalized_path = normalize_preflight_path(str(source_path))
+        if normalized_path in seen_paths:
+            raise SystemExit("Preflight contains duplicate statement paths; remove duplicates and rerun preflight.")
+        seen_paths.add(normalized_path)
+        digest = str(item.get("content_sha256") or "")
+        if not SHA256_PATTERN.fullmatch(digest):
+            raise SystemExit(
+                f"Preflight statement {Path(normalized_path).name} lacks a valid SHA-256 fingerprint; rerun preflight."
+            )
+        if digest in seen_digests:
+            raise SystemExit("Preflight contains byte-identical statement PDFs; remove duplicates and rerun preflight.")
+        seen_digests.add(digest)
+        try:
+            content_bytes = int(str(item.get("content_bytes")))
+        except (TypeError, ValueError) as exc:
+            raise SystemExit(
+                f"Preflight statement {Path(normalized_path).name} lacks a valid byte-size fingerprint; rerun preflight."
+            ) from exc
+        if content_bytes <= 0:
+            raise SystemExit(
+                f"Preflight statement {Path(normalized_path).name} has a non-positive byte-size fingerprint; rerun preflight."
+            )
+        fingerprints.append(
+            {
+                "resolved_file": normalized_path,
+                "content_sha256": digest,
+                "content_bytes": content_bytes,
+            }
+        )
+    return fingerprints
+
+
+def verify_preflight_statement_fingerprints(data: dict, pdf_paths: list[str]) -> list[dict[str, object]]:
+    expected_paths = [normalize_preflight_path(path_item) for path_item in pdf_paths]
+    if len(set(expected_paths)) != len(expected_paths):
+        raise SystemExit("Duplicate statement PDFs were supplied to extraction; remove duplicates and rerun preflight.")
+    fingerprints = preflight_statement_fingerprints(data)
+    actual_paths = [str(item["resolved_file"]) for item in fingerprints]
+    if expected_paths != actual_paths:
+        raise SystemExit(
+            "Preflight PDF sequence does not match extraction PDFs. "
+            f"Expected {expected_paths}; preflight has {actual_paths}."
+        )
+    for expected, fingerprint in zip(expected_paths, fingerprints, strict=True):
+        current_path = Path(expected)
+        current_bytes = preflight_file_bytes(current_path, "statement PDF")
+        current_digest = sha256_file(current_path, "statement PDF")
+        if current_bytes != fingerprint["content_bytes"] or current_digest != fingerprint["content_sha256"]:
+            raise SystemExit(
+                f"Statement PDF {current_path.name} changed after preflight; rerun preflight before interest extraction."
+            )
+    return fingerprints
+
+
 def verify_retained_proof_file(path_value: object, digest_value: object, label: str) -> Path:
     """Require a retained local proof artifact and verify its SHA-256 digest."""
     if not isinstance(path_value, str) or not path_value.strip():
@@ -1091,6 +1166,12 @@ def load_preflight_json(
     if data.get("scope") != expected_scope:
         raise SystemExit(f"Preflight scope {data.get('scope')!r} does not match required scope {expected_scope!r}.")
 
+    if data.get("status") == PREFLIGHT_REVIEWED_HANDOFF_STATUS:
+        raise SystemExit(
+            "Reviewed preflight handoffs are accepted only by fbar-threshold-check; "
+            "statements-to-interest requires a ready preflight with no review gates."
+        )
+
     review_gates = data.get("review_gates")
     if not isinstance(review_gates, list):
         raise SystemExit("Preflight JSON has no review_gates list.")
@@ -1106,22 +1187,7 @@ def load_preflight_json(
             "rerun statement-intake-preflight after resolving its review gates."
         )
 
-    expected = {normalize_preflight_path(path_item) for path_item in pdf_paths}
-    statement_files = data.get("statement_files")
-    if not isinstance(statement_files, list):
-        raise SystemExit("Preflight JSON has no statement_files list.")
-    actual: set[str] = set()
-    for item in statement_files:
-        if not isinstance(item, dict):
-            continue
-        file_value = item.get("resolved_file") or item.get("file")
-        if file_value:
-            actual.add(normalize_preflight_path(str(file_value)))
-    if expected != actual:
-        raise SystemExit(
-            "Preflight PDF set does not match extraction PDFs. "
-            f"Expected {sorted(expected)}; preflight has {sorted(actual)}."
-        )
+    verified_files = verify_preflight_statement_fingerprints(data, pdf_paths)
     profile = data.get("profile")
     primary_institution = profile.get("primary_institution") if isinstance(profile, dict) else ""
     if not isinstance(primary_institution, str) or not primary_institution.strip():
@@ -1131,7 +1197,9 @@ def load_preflight_json(
             f"Preflight institution {primary_institution!r} does not match extraction institution "
             f"{expected_institution!r}."
         )
+    data = dict(data)
     data["_source_sha256"] = sha256_file(preflight_path, "preflight JSON")
+    data["verified_statement_files"] = verified_files
     return data
 
 
@@ -1164,6 +1232,7 @@ def preflight_profile(preflight: dict, source_path: str) -> dict:
         "profile": preflight.get("profile"),
         "review_gates": preflight.get("review_gates", []),
         "review_csv": artifacts.get("review_csv") if isinstance(artifacts, dict) else None,
+        "verified_statement_files": preflight.get("verified_statement_files", []),
     }
 
 
@@ -1222,21 +1291,27 @@ def command_extract(args: argparse.Namespace) -> int:
         args.pdf,
         args.institution,
     )
+    loaded_pdfs = [(pdf_path, load_pdf_text(pdf_path)) for pdf_path in pdf_paths]
+    verify_preflight_statement_fingerprints(preflight, args.pdf)
+    fingerprints_by_path = {
+        str(item["resolved_file"]): item for item in preflight["verified_statement_files"]
+    }
     all_rows: list[dict] = []
     all_excluded: list[dict] = []
     all_warnings: list[str] = preflight_warning_lines(preflight)
     statement_files: list[dict] = []
-    for pdf_path in pdf_paths:
-        pages = load_pdf_text(pdf_path)
+    for pdf_path, pages in loaded_pdfs:
         rows, excluded, warnings, meta = extract_rows_from_pages(pages, args.institution, tax_year, account_currency_override)
         all_rows.extend(rows)
         all_excluded.extend(excluded)
         all_warnings.extend(warnings)
+        fingerprint = fingerprints_by_path[normalize_preflight_path(pdf_path)]
         statement_files.append(
             {
                 "file": str(pdf_path),
                 "resolved_file": normalize_preflight_path(pdf_path),
-                "content_sha256": sha256_file(pdf_path, "statement PDF"),
+                "content_sha256": fingerprint["content_sha256"],
+                "content_bytes": fingerprint["content_bytes"],
                 "page_count": meta["page_count"],
                 "character_count": meta["character_count"],
                 "detected_periods": meta["periods"],
@@ -1888,6 +1963,8 @@ def validate_analysis_contract(analysis: dict, input_path: Path) -> None:
     )
     if refreshed_preflight.get("_source_sha256") != recorded_preflight_sha256:
         raise SystemExit("Preflight proof changed after extraction; re-run extract before reporting.")
+    if preflight.get("verified_statement_files") != refreshed_preflight.get("verified_statement_files"):
+        raise SystemExit("Input analysis JSON has incomplete preflight statement-file proof; re-run extract before reporting.")
 
     for source_file, recorded_sha256 in normalized_files:
         current_sha256 = sha256_file(Path(source_file), "statement PDF")
@@ -2557,16 +2634,31 @@ def command_self_test(args: argparse.Namespace) -> int:
         profile = preflight_profile(preflight, str(preflight_path))
         if len(str(profile.get("source_sha256", ""))) != 64:
             failures.append("preflight-source-digest: expected SHA-256 digest")
+        verified_files = profile.get("verified_statement_files")
+        if (
+            not isinstance(verified_files, list)
+            or verified_files
+            != [
+                {
+                    "resolved_file": normalize_preflight_path(pdf_path),
+                    "content_sha256": sha256_file(pdf_path, "statement PDF"),
+                    "content_bytes": preflight_file_bytes(pdf_path, "statement PDF"),
+                }
+            ]
+        ):
+            failures.append(f"preflight-fingerprints: expected retained verified fingerprints, got {verified_files!r}")
         try:
             load_preflight_json(None, "one-institution", 2025, [str(pdf_path)], "Preflight Bank")
             failures.append("missing-preflight: expected preflight rejection")
         except SystemExit as exc:
             if "requires --preflight-json" not in str(exc):
                 failures.append(f"missing-preflight: unexpected rejection {exc}")
+        other_pdf = tmp_path / "other.pdf"
+        other_pdf.write_bytes(b"second synthetic statement fixture")
         for name, year, scope, pdfs, expected in (
             ("bad-year", 2024, "one-institution", [pdf_path], "tax_year"),
             ("bad-scope", 2025, "one-account", [pdf_path], "scope"),
-            ("bad-pdfs", 2025, "one-institution", [tmp_path / "other.pdf"], "PDF set"),
+            ("bad-pdfs", 2025, "one-institution", [other_pdf], "sequence"),
         ):
             bad_preflight = write_preflight_fixture(tmp_path, name, year, scope, pdfs)
             try:
@@ -2577,6 +2669,123 @@ def command_self_test(args: argparse.Namespace) -> int:
             except SystemExit as exc:
                 if expected not in str(exc):
                     failures.append(f"{name}: expected {expected!r} in rejection, got {exc}")
+        reordered_preflight = write_preflight_fixture(
+            tmp_path, "preflight-reordered", 2025, "one-institution", [pdf_path, other_pdf]
+        )
+        try:
+            load_preflight_json(
+                str(reordered_preflight),
+                "one-institution",
+                2025,
+                [str(other_pdf), str(pdf_path)],
+                "Preflight Bank",
+            )
+            failures.append("preflight-reordered: expected sequence rejection")
+        except SystemExit as exc:
+            if "sequence" not in str(exc):
+                failures.append(f"preflight-reordered: unexpected rejection {exc}")
+        try:
+            load_preflight_json(
+                str(preflight_path), "one-institution", 2025, [str(pdf_path), str(pdf_path)], "Preflight Bank"
+            )
+            failures.append("duplicate-extraction-pdfs: expected duplicate rejection")
+        except SystemExit as exc:
+            if "Duplicate statement PDFs" not in str(exc):
+                failures.append(f"duplicate-extraction-pdfs: unexpected rejection {exc}")
+        duplicate_path_preflight = write_preflight_fixture(
+            tmp_path, "preflight-duplicate-path", 2025, "one-institution", [pdf_path, pdf_path]
+        )
+        try:
+            load_preflight_json(
+                str(duplicate_path_preflight),
+                "one-institution",
+                2025,
+                [str(pdf_path)],
+                "Preflight Bank",
+            )
+            failures.append("preflight-duplicate-path: expected duplicate-path rejection")
+        except SystemExit as exc:
+            if "duplicate statement paths" not in str(exc):
+                failures.append(f"preflight-duplicate-path: unexpected rejection {exc}")
+        duplicate_content_pdf = tmp_path / "duplicate-content.pdf"
+        duplicate_content_pdf.write_bytes(pdf_path.read_bytes())
+        duplicate_content_preflight = write_preflight_fixture(
+            tmp_path,
+            "preflight-duplicate-content",
+            2025,
+            "one-institution",
+            [pdf_path, duplicate_content_pdf],
+        )
+        try:
+            load_preflight_json(
+                str(duplicate_content_preflight),
+                "one-institution",
+                2025,
+                [str(pdf_path), str(duplicate_content_pdf)],
+                "Preflight Bank",
+            )
+            failures.append("preflight-duplicate-content: expected byte-identical rejection")
+        except SystemExit as exc:
+            if "byte-identical" not in str(exc):
+                failures.append(f"preflight-duplicate-content: unexpected rejection {exc}")
+        legacy_preflight = write_preflight_fixture(
+            tmp_path,
+            "preflight-legacy-no-fingerprints",
+            2025,
+            "one-institution",
+            [pdf_path],
+            include_fingerprints=False,
+        )
+        try:
+            load_preflight_json(str(legacy_preflight), "one-institution", 2025, [str(pdf_path)], "Preflight Bank")
+            failures.append("preflight-legacy-no-fingerprints: expected fingerprint rejection")
+        except SystemExit as exc:
+            if "SHA-256 fingerprint" not in str(exc):
+                failures.append(f"preflight-legacy-no-fingerprints: unexpected rejection {exc}")
+        uppercase_fingerprint_preflight = write_preflight_fixture(
+            tmp_path, "preflight-uppercase-fingerprint", 2025, "one-institution", [pdf_path]
+        )
+        uppercase_payload = json.loads(uppercase_fingerprint_preflight.read_text(encoding="utf-8"))
+        uppercase_payload["statement_files"][0]["content_sha256"] = uppercase_payload["statement_files"][0][
+            "content_sha256"
+        ].upper()
+        uppercase_fingerprint_preflight.write_text(json.dumps(uppercase_payload), encoding="utf-8")
+        try:
+            load_preflight_json(
+                str(uppercase_fingerprint_preflight), "one-institution", 2025, [str(pdf_path)], "Preflight Bank"
+            )
+            failures.append("preflight-uppercase-fingerprint: expected lower-case fingerprint rejection")
+        except SystemExit as exc:
+            if "valid SHA-256 fingerprint" not in str(exc):
+                failures.append(f"preflight-uppercase-fingerprint: unexpected rejection {exc}")
+        mutated_pdf = tmp_path / "mutated-after-preflight.pdf"
+        mutated_pdf.write_bytes(b"original statement fixture")
+        mutated_preflight = write_preflight_fixture(
+            tmp_path, "preflight-mutated-pdf", 2025, "one-institution", [mutated_pdf]
+        )
+        mutated_pdf.write_bytes(b"replacement statement fixture")
+        try:
+            load_preflight_json(
+                str(mutated_preflight), "one-institution", 2025, [str(mutated_pdf)], "Preflight Bank"
+            )
+            failures.append("preflight-mutated-pdf: expected changed-file rejection")
+        except SystemExit as exc:
+            if "changed after preflight" not in str(exc):
+                failures.append(f"preflight-mutated-pdf: unexpected rejection {exc}")
+        reviewed_handoff = write_preflight_fixture(
+            tmp_path,
+            "preflight-reviewed-handoff",
+            2025,
+            "one-institution",
+            [pdf_path],
+            status=PREFLIGHT_REVIEWED_HANDOFF_STATUS,
+        )
+        try:
+            load_preflight_json(str(reviewed_handoff), "one-institution", 2025, [str(pdf_path)], "Preflight Bank")
+            failures.append("preflight-reviewed-handoff: expected FBAR-only rejection")
+        except SystemExit as exc:
+            if "fbar-threshold-check" not in str(exc):
+                failures.append(f"preflight-reviewed-handoff: unexpected rejection {exc}")
         try:
             load_preflight_json(str(preflight_path), "one-institution", 2025, [str(pdf_path)], "Other Bank")
             failures.append("institution-mismatch: expected preflight rejection")
@@ -2617,6 +2826,37 @@ def command_self_test(args: argparse.Namespace) -> int:
             if "status" not in str(exc):
                 failures.append(f"preflight-status: unexpected rejection {exc}")
 
+        post_read_pdf = tmp_path / "mutated-during-read.pdf"
+        post_read_pdf.write_bytes(b"original during-read statement fixture")
+        post_read_preflight = write_preflight_fixture(
+            tmp_path, "preflight-mutated-during-read", 2025, "one-institution", [post_read_pdf]
+        )
+        original_load_pdf_text = globals()["load_pdf_text"]
+
+        def replace_pdf_during_read(path: Path) -> list[PageText]:
+            post_read_pdf.write_bytes(b"replacement during-read statement fixture")
+            return [PageText(path, 1, "Preflight Bank\nAccount currency: USD\n2025-01-03 Interest credited USD 1.00")]
+
+        globals()["load_pdf_text"] = replace_pdf_during_read
+        try:
+            command_extract(
+                argparse.Namespace(
+                    pdf=[str(post_read_pdf)],
+                    tax_year=2025,
+                    institution="Preflight Bank",
+                    account_currency=None,
+                    preflight_json=str(post_read_preflight),
+                    out=str(tmp_path / "mutated-during-read-analysis.json"),
+                    csv=None,
+                )
+            )
+            failures.append("preflight-mutated-during-read: expected post-read fingerprint rejection")
+        except SystemExit as exc:
+            if "changed after preflight" not in str(exc):
+                failures.append(f"preflight-mutated-during-read: unexpected rejection {exc}")
+        finally:
+            globals()["load_pdf_text"] = original_load_pdf_text
+
         source_pdf_sha256 = sha256_file(pdf_path, "statement PDF")
         valid_analysis = {
             "skill": SKILL_NAME,
@@ -2631,6 +2871,7 @@ def command_self_test(args: argparse.Namespace) -> int:
                     "file": str(pdf_path),
                     "resolved_file": normalize_preflight_path(pdf_path),
                     "content_sha256": source_pdf_sha256,
+                    "content_bytes": preflight_file_bytes(pdf_path, "statement PDF"),
                     "page_count": 1,
                     "character_count": 100,
                 }
@@ -2891,7 +3132,7 @@ def command_self_test(args: argparse.Namespace) -> int:
     print(
         f"Self-test passed: {layout_fixture_count} deidentified layout fixtures, "
         f"{len(cases) + 6} parser/review cases, 5 privacy cases, "
-        "15 FX/dependency/proof cases, 17 preflight/provenance cases"
+        "15 FX/dependency/proof cases, strict preflight/provenance identity checks"
     )
     return 0
 
@@ -3325,15 +3566,31 @@ def write_preflight_fixture(
     status: str = PREFLIGHT_READY_STATUS,
     review_gates: list[dict] | None = None,
     primary_institution: str = "Preflight Bank",
+    include_fingerprints: bool = True,
 ) -> Path:
     path = root / f"{name}.json"
+    statement_files = [
+        {
+            "file": str(pdf),
+            "resolved_file": normalize_preflight_path(pdf),
+            **(
+                {
+                    "content_sha256": sha256_file(pdf, "statement PDF"),
+                    "content_bytes": preflight_file_bytes(pdf, "statement PDF"),
+                }
+                if include_fingerprints
+                else {}
+            ),
+        }
+        for pdf in pdf_paths
+    ]
     data = {
         "schema_version": "1.0",
         "skill": PREFLIGHT_SKILL,
         "status": status,
         "tax_year": tax_year,
         "scope": scope,
-        "statement_files": [{"file": str(pdf), "resolved_file": normalize_preflight_path(pdf)} for pdf in pdf_paths],
+        "statement_files": statement_files,
         "currency": {"code": "USD", "candidates": ["USD"]},
         "profile": {"primary_institution": primary_institution},
         "warnings": ["sample review warning"],
