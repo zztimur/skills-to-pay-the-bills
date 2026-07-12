@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""Run real-PDF statement-intake-preflight handoff regressions for interest extraction.
+
+This suite generates synthetic PDFs, then invokes the sibling preflight CLI and
+this package's extraction CLI as independent subprocesses. It proves the
+ordered file-fingerprint handoff is enforced across the package boundary.
+
+Run with the bundled Codex Python when available:
+
+    "$PYTHON" statements-to-interest/tests/run_preflight_integration.py
+
+Exit 0 when every scenario passes or the required PDF dependencies are absent;
+exit 1 on a regression. All PDFs and JSON artifacts are temporary.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+
+try:  # Test-only dependencies; skip cleanly when a compatible PDF runtime is unavailable.
+    import pdfplumber  # noqa: F401
+    from pypdf import PdfReader  # noqa: F401
+    from reportlab.pdfgen import canvas
+except BaseException as exc:  # noqa: BLE001 - a broken native dependency can raise more than ImportError.
+    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+        raise
+    print(f"SKIP: preflight integration needs reportlab, pdfplumber, and pypdf ({type(exc).__name__}); not run.")
+    raise SystemExit(0)
+
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+REPOSITORY_ROOT = PACKAGE_ROOT.parent
+PREFLIGHT_SCRIPT = REPOSITORY_ROOT / "statement-intake-preflight" / "scripts" / "statement_intake_preflight.py"
+INTEREST_SCRIPT = PACKAGE_ROOT / "scripts" / "statements_to_interest.py"
+
+
+def command(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, cwd=REPOSITORY_ROOT, capture_output=True, text=True, check=False)
+
+
+def command_output(process: subprocess.CompletedProcess[str]) -> str:
+    return "\n".join(part for part in (process.stdout.strip(), process.stderr.strip()) if part)
+
+
+def make_pdf(root: Path, name: str, lines: list[str]) -> Path:
+    path = root / name
+    document = canvas.Canvas(str(path))
+    y = 760
+    for line in lines:
+        document.drawString(48, y, line)
+        y -= 18
+    document.save()
+    return path
+
+
+def preflight(root: Path, tag: str, pdfs: list[Path]) -> tuple[subprocess.CompletedProcess[str], Path, dict | None]:
+    output = root / f"{tag}-preflight.json"
+    process = command(
+        [
+            sys.executable,
+            str(PREFLIGHT_SCRIPT),
+            "preflight",
+            "--pdf",
+            *(str(pdf) for pdf in pdfs),
+            "--tax-year",
+            "2025",
+            "--scope",
+            "one-institution",
+            "--out",
+            str(output),
+        ]
+    )
+    if not output.is_file():
+        return process, output, None
+    try:
+        return process, output, json.loads(output.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return process, output, None
+
+
+def extract(pdf_paths: list[Path], preflight_json: Path, output: Path) -> subprocess.CompletedProcess[str]:
+    return command(
+        [
+            sys.executable,
+            str(INTEREST_SCRIPT),
+            "extract",
+            "--pdf",
+            *(str(pdf) for pdf in pdf_paths),
+            "--tax-year",
+            "2025",
+            "--institution",
+            "Example Bank",
+            "--preflight-json",
+            str(preflight_json),
+            "--out",
+            str(output),
+        ]
+    )
+
+
+def ready_statement_lines(interest: str = "1.25") -> list[str]:
+    return [
+        "Example Bank Monthly Statement",
+        "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+        "Statement period January 1 2025 to January 31 2025",
+        "Currency USD",
+        "Closing balance 100.00 USD",
+        f"2025-01-03 Interest credited USD {interest}",
+    ]
+
+
+def main() -> int:
+    failures: list[str] = []
+
+    def check(name: str, condition: bool, detail: str = "") -> None:
+        if condition:
+            print(f"PASS: {name}")
+        else:
+            failures.append(f"{name}: {detail}".rstrip())
+            print(f"FAIL: {name}: {detail}", file=sys.stderr)
+
+    with tempfile.TemporaryDirectory(prefix="statements-to-interest-preflight-") as temporary:
+        root = Path(temporary)
+
+        ready_pdf = make_pdf(root, "ready.pdf", ready_statement_lines())
+        ready_process, ready_preflight_path, ready_preflight = preflight(root, "ready", [ready_pdf])
+        ready_valid = (
+            ready_process.returncode == 0
+            and isinstance(ready_preflight, dict)
+            and ready_preflight.get("status") == "ready-for-domain-extraction"
+            and ready_preflight.get("review_gates") == []
+        )
+        check("ready preflight accepts one-institution USD PDF", ready_valid, command_output(ready_process))
+
+        if ready_valid:
+            ready_analysis_path = root / "ready-analysis.json"
+            ready_extract = extract([ready_pdf], ready_preflight_path, ready_analysis_path)
+            analysis = json.loads(ready_analysis_path.read_text(encoding="utf-8")) if ready_analysis_path.is_file() else {}
+            rows = analysis.get("rows") if isinstance(analysis, dict) else None
+            expected_fingerprints = [
+                {
+                    "resolved_file": ready_preflight["statement_files"][0]["resolved_file"],
+                    "content_sha256": ready_preflight["statement_files"][0]["content_sha256"],
+                    "content_bytes": ready_preflight["statement_files"][0]["content_bytes"],
+                }
+            ]
+            verified_fingerprints = analysis.get("preflight", {}).get("verified_statement_files") if isinstance(analysis, dict) else None
+            check(
+                "ready preflight extracts one USD interest row and retains verified fingerprints",
+                (
+                    ready_extract.returncode == 0
+                    and analysis.get("status") == "ready-for-reporting"
+                    and isinstance(rows, list)
+                    and len(rows) == 1
+                    and rows[0].get("amount_foreign") == "1.25"
+                    and rows[0].get("currency") == "USD"
+                    and verified_fingerprints == expected_fingerprints
+                ),
+                command_output(ready_extract),
+            )
+
+            legacy_preflight = dict(ready_preflight)
+            legacy_statement_files = [dict(item) for item in ready_preflight["statement_files"]]
+            for item in legacy_statement_files:
+                item.pop("content_bytes", None)
+                item.pop("content_sha256", None)
+            legacy_preflight["statement_files"] = legacy_statement_files
+            legacy_preflight_path = root / "legacy-preflight.json"
+            legacy_preflight_path.write_text(json.dumps(legacy_preflight, indent=2), encoding="utf-8")
+            legacy_extract = extract([ready_pdf], legacy_preflight_path, root / "legacy-analysis.json")
+            check(
+                "legacy preflight without file fingerprints is rejected",
+                legacy_extract.returncode != 0 and "SHA-256 fingerprint" in command_output(legacy_extract),
+                command_output(legacy_extract),
+            )
+
+        first_pdf = make_pdf(root, "first.pdf", ready_statement_lines("1.00"))
+        second_lines = ready_statement_lines("2.00")
+        second_lines[2] = "Statement period February 1 2025 to February 28 2025"
+        second_pdf = make_pdf(root, "second.pdf", second_lines)
+        ordered_process, ordered_preflight_path, ordered_preflight = preflight(root, "ordered", [first_pdf, second_pdf])
+        ordered_valid = (
+            ordered_process.returncode == 0
+            and isinstance(ordered_preflight, dict)
+            and ordered_preflight.get("status") == "ready-for-domain-extraction"
+            and ordered_preflight.get("review_gates") == []
+        )
+        check("two-PDF ordered preflight is ready", ordered_valid, command_output(ordered_process))
+        if ordered_valid:
+            reordered_extract = extract([second_pdf, first_pdf], ordered_preflight_path, root / "reordered-analysis.json")
+            check(
+                "reordered PDFs are rejected before extraction",
+                reordered_extract.returncode != 0 and "PDF sequence" in command_output(reordered_extract),
+                command_output(reordered_extract),
+            )
+
+        changed_pdf = make_pdf(root, "changed.pdf", ready_statement_lines("3.00"))
+        changed_process, changed_preflight_path, changed_preflight = preflight(root, "changed", [changed_pdf])
+        changed_valid = (
+            changed_process.returncode == 0
+            and isinstance(changed_preflight, dict)
+            and changed_preflight.get("status") == "ready-for-domain-extraction"
+            and changed_preflight.get("review_gates") == []
+        )
+        check("changed-PDF preflight is ready before replacement", changed_valid, command_output(changed_process))
+        if changed_valid:
+            make_pdf(root, "changed.pdf", ready_statement_lines("4.00"))
+            changed_extract = extract([changed_pdf], changed_preflight_path, root / "changed-analysis.json")
+            check(
+                "PDF changed after preflight is rejected before extraction",
+                changed_extract.returncode != 0 and "changed after preflight" in command_output(changed_extract),
+                command_output(changed_extract),
+            )
+
+        review_lines = ready_statement_lines("5.00") + ["Currency EUR", "Closing balance 100.00 EUR"]
+        review_pdf = make_pdf(root, "review-required.pdf", review_lines)
+        review_process, review_preflight_path, review_preflight = preflight(root, "review", [review_pdf])
+        review_ready = (
+            review_process.returncode == 0
+            and isinstance(review_preflight, dict)
+            and review_preflight.get("status") == "review-required"
+            and [gate.get("code") for gate in review_preflight.get("review_gates", [])] == ["mixed-currencies"]
+        )
+        check("mixed-currency preflight can produce a review handoff", review_ready, command_output(review_process))
+        if review_ready:
+            reviewed_handoff_path = root / "reviewed-handoff.json"
+            handoff = command(
+                [
+                    sys.executable,
+                    str(PREFLIGHT_SCRIPT),
+                    "review-handoff",
+                    "--input",
+                    str(review_preflight_path),
+                    "--out",
+                    str(reviewed_handoff_path),
+                    "--accept-gate",
+                    "mixed-currencies",
+                    "--user-review-confirmed",
+                ]
+            )
+            handoff_data = json.loads(reviewed_handoff_path.read_text(encoding="utf-8")) if reviewed_handoff_path.is_file() else {}
+            handoff_valid = handoff.returncode == 0 and handoff_data.get("status") == "reviewed-for-domain-extraction"
+            check("preflight CLI creates an FBAR-style reviewed handoff", handoff_valid, command_output(handoff))
+            if handoff_valid:
+                reviewed_extract = extract([review_pdf], reviewed_handoff_path, root / "reviewed-analysis.json")
+                check(
+                    "reviewed-for-domain-extraction handoff is rejected for interest extraction",
+                    reviewed_extract.returncode != 0 and "fbar-threshold-check" in command_output(reviewed_extract),
+                    command_output(reviewed_extract),
+                )
+
+    if failures:
+        print(f"Integration suite failed: {len(failures)} scenario(s).", file=sys.stderr)
+        return 1
+    print("Preflight integration passed: ready workflow, fingerprints, reordered and changed PDFs, legacy handoff, and FBAR-only review handoff.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

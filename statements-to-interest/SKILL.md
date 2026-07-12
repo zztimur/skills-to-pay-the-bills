@@ -25,7 +25,7 @@ Use `references/workflow.md` progressively:
 - Read Sections 1-5 for intake, runtime, extraction, and result review before analysis.
 - Read Section 6 only when counted rows are non-USD or the user requests daily spot FX.
 - Read Section 7 immediately before generating or verifying a packet.
-- Read Sections 8-9 only for handoff wording or troubleshooting.
+- Read Sections 8-10 only for handoff wording, troubleshooting, or maintenance.
 
 The reference contains the detailed commands, review gates, FX decision rules, troubleshooting, and final-response template.
 
@@ -41,7 +41,7 @@ python3 "<preflight-root>/scripts/statement_intake_preflight.py" preflight \
   --out work/statement-preflight.json
 ```
 
-Then use `scripts/statements_to_interest.py` for the deterministic extraction and pass the reviewed preflight JSON:
+Then use `scripts/statements_to_interest.py` for the deterministic extraction and pass the ready preflight JSON:
 
 ```bash
 python "<package-root>/scripts/statements_to_interest.py" extract \
@@ -53,7 +53,9 @@ python "<package-root>/scripts/statements_to_interest.py" extract \
   --out work/interest-analysis.json
 ```
 
-Review the JSON and review CSV before reporting. Treat the CSV as an internal row-review artifact, not the user-facing deliverable unless the user asks for it. Confirm the ready `preflight` summary and its SHA-256 digest are present, then focus this skill's review on counted interest rows, excluded interest-like candidates, totals, and FX readiness. Do not invent missing rows. Clear exclusions such as withholding remain documented but do not block reporting. Any ambiguous excluded candidate makes the analysis `review-required`, even with counted rows: review every candidate, correct the source and rerun extraction when one is countable, or create `resolve-exclusions` JSON after a reviewer confirms all are non-interest. Pass that digest-bound file to `report` with `--excluded-candidates-resolution-json`. A zero-row packet also needs explicit preparer confirmation (`--zero-interest-confirmed` plus a non-empty note).
+Pass the same ordered `--pdf` paths used for preflight. Before reading PDFs and again immediately after all reads, extraction verifies each normalized path, byte size, and lower-case SHA-256 against the ready preflight. It rejects legacy no-fingerprint preflights, changed/reordered PDFs, and `reviewed-for-domain-extraction` handoffs; reviewed handoffs are only for `fbar-threshold-check`.
+
+Review the JSON and review CSV before reporting. Treat the CSV as an internal row-review artifact, not the user-facing deliverable unless the user asks for it. Confirm the ready `preflight` summary, source SHA-256 digest, and `verified_statement_files` list are present, then focus this skill's review on counted interest rows, excluded interest-like candidates, totals, and FX readiness. Do not invent missing rows. Clear exclusions such as withholding remain documented but do not block reporting. Any ambiguous excluded candidate makes the analysis `review-required`, even with counted rows: review every candidate, correct the source and rerun extraction when one is countable, or create `resolve-exclusions` JSON after a reviewer confirms all are non-interest. Pass that digest-bound file to `report` with `--excluded-candidates-resolution-json`. A zero-row packet also needs explicit preparer confirmation (`--zero-interest-confirmed` plus a non-empty note).
 
 For non-USD rows, default to `get-yearly-fx-rate` for the published yearly average exchange rate and retained proof. Do not calculate the yearly average yourself from daily/monthly data. If `get-yearly-fx-rate` cannot produce a published annual workpaper, ask the user for a custom rate, with an optional source, instead of deriving one. Prompt the user with the workpaper rate, source, proof documents, direction, and resulting USD total; ask them to confirm that rate or provide a custom rate before generating the PDF. Use the `fx-prompt` command to produce the exact user-facing confirmation question when a candidate workpaper is available:
 
@@ -113,6 +115,7 @@ After changing the parser, run:
 ```bash
 python "<package-root>/scripts/statements_to_interest.py" self-test
 python "<package-root>/scripts/statements_to_interest.py" smoke-test
+python "<package-root>/tests/run_preflight_integration.py"
 ```
 
 To check the required preflight skill, optional FX workpaper skill, and the active PDF runtime, run:
