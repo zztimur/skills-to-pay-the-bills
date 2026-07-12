@@ -14,7 +14,7 @@ It leaves behind a JSON/CSV handoff so the next skill does not have to rediscove
 
 One statement set. One tax year. One intended downstream scope.
 
-Use `one-account` when the next step is `fbar-threshold-check`. Use `one-institution` when the next step is `statements-to-interest`.
+Use `one-account --require-institution` when the next step is `fbar-threshold-check`; that keeps the one-account scope while requiring source-backed issuer evidence or a reviewed typed institution selection. Use `one-institution` when the next step is `statements-to-interest`.
 
 Do not OCR screenshots. Do not smooth over a mystery `$`. Do not pretend a folder name proves the bank, account, currency, or year. If the text layer is weak, the years are mixed, account hints multiply, or currency is fuzzy, the output should say that plainly before any downstream skill starts doing more expensive work.
 
@@ -29,7 +29,7 @@ human answer is needed, it uses these prompts:
 - Weak currency evidence: “We could not corroborate the account currency from the statement text. Please confirm the ISO currency code (for example, `COP`).”
 - Contextual prior-year date with unclear period coverage: “We found `2024-12-31` in the Q1 statement. It appears to be a prior-year opening balance, while the statement period appears to be 2025. Please confirm that all supplied statements cover 2025 and that this date is contextual.”
 - No extractable account identity for an FBAR account set: “We could not extract a reliable account identifier from these statements. Please confirm that the supplied PDFs represent one account. You do not need to provide the account number.”
-- No extractable issuer for an interest set: “We could not extract a reliable institution name from these statements. Please confirm the institution name shown on the statements.”
+- No extractable issuer for an interest set, or an FBAR `one-account --require-institution` run: “We could not extract a reliable institution name from these statements. Please confirm the institution name shown on the statements.”
 
 If a currency is corroborated, it proceeds without asking. If a prior-year date
 is clearly an opening/prior balance, including an exact prior December 31
@@ -88,6 +88,7 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py preflig
   --pdf statement-01.pdf statement-02.pdf \
   --tax-year 2025 \
   --scope one-account \
+  --require-institution \
   --out work/statement-preflight.json
 ```
 
@@ -113,7 +114,7 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-
 
 Repeat `--accept-gate` for each gate. Structural `stop` gates cannot be accepted: correct the inputs and rerun preflight. For a reviewed handoff, use the new JSON path below:
 
-Add only the resolution flags required by the source gates: `--confirm-currency COP` for weak or unknown currency evidence, `--confirm-one-account` when no account identifier can be extracted, `--confirm-institution "Example Bank"` for an unknown one-institution issuer, and `--confirm-statement-year 2025` (plus `--classify-contextual-year 2024` when applicable) for unresolved year coverage. Do not provide a full account number by default. A genuine mixed statement year or conflicting institution evidence cannot be accepted. <!-- privacy-gate: allow -->
+Add only the resolution flags required by the source gates: `--confirm-currency COP` for weak or unknown currency evidence, `--confirm-one-account` when no account identifier can be extracted, `--confirm-institution "Example Bank"` for an unknown one-institution issuer or an opt-in FBAR `one-account --require-institution` issuer gate, and `--confirm-statement-year 2025` (plus `--classify-contextual-year 2024` when applicable) for unresolved year coverage. Do not provide a full account number by default. A genuine mixed statement year or conflicting institution evidence cannot be accepted. <!-- privacy-gate: allow -->
 
 ```bash
 python3 fbar-threshold-check/scripts/fbar_threshold_check.py extract-account \
@@ -144,7 +145,7 @@ The skill should stop or ask for review when:
 - `$` appears without enough context to know the currency;
 - multiple currencies appear in one supposed currency bucket;
 - multiple account hints appear before an FBAR account run;
-- multiple institution hints appear before an interest run;
+- multiple institution hints appear before an interest run or an FBAR run that opted into `--require-institution`;
 - the user wants a final FBAR or tax-support result without running the downstream skill.
 
 This is the good kind of early annoyance. Finding a scope problem here is cheaper than finding it inside a finished-looking support packet.
