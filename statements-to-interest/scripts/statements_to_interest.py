@@ -44,9 +44,10 @@ ANALYSIS_SUPPORTED_SCHEMA_VERSIONS = {"1.1", SCHEMA_VERSION}
 EXCLUSION_RESOLUTION_SCHEMA_VERSION = "1.0"
 MIN_TEXT_CHARS = 40
 PREFLIGHT_SKILL = "statement-intake-preflight"
-PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0"}
+PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0", "1.1"}
 PREFLIGHT_READY_STATUS = "ready-for-domain-extraction"
 PREFLIGHT_REVIEWED_HANDOFF_STATUS = "reviewed-for-domain-extraction"
+PREFLIGHT_REVIEWED_HANDOFF_TYPE = "reviewed-handoff"
 ANALYSIS_READY_STATUS = "ready-for-reporting"
 ANALYSIS_REVIEW_REQUIRED_STATUS = "review-required"
 ANALYSIS_ZERO_CONFIRMATION_STATUS = "zero-interest-confirmation-required"
@@ -706,6 +707,7 @@ def extract_rows_from_pages(
     institution: str,
     tax_year: int,
     account_currency_override: str | None = None,
+    institution_user_confirmed: bool = False,
 ) -> tuple[list[dict], list[dict], list[str], dict]:
     rows: list[dict] = []
     excluded: list[dict] = []
@@ -733,6 +735,12 @@ def extract_rows_from_pages(
                 f"Institution label '{institution}' was not found in the PDF text layer for "
                 f"{pages[0].file.name}, but it appears in the file path. Verify the statements "
                 "are all from one institution."
+            )
+        elif institution_user_confirmed:
+            institution_label_basis = "reviewed-preflight-confirmation"
+            warnings.append(
+                f"Institution label '{institution}' was not found in the PDF text layer for "
+                f"{pages[0].file.name}; it is bound to a user-confirmed reviewed preflight handoff."
             )
         else:
             raise SystemExit(
@@ -1135,6 +1143,173 @@ def preflight_gate_codes(review_gates: list[object]) -> list[str]:
     )
 
 
+def read_preflight_artifact(path: Path, label: str) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise SystemExit(f"Could not read {label} {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{label.capitalize()} {path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SystemExit(f"{label.capitalize()} must be an object.")
+    return data
+
+
+def reviewed_resolution_object(resolutions: dict, key: str) -> dict:
+    value = resolutions.get(key)
+    if not isinstance(value, dict):
+        raise SystemExit(f"Reviewed handoff user_resolutions.{key} must be an object.")
+    return value
+
+
+def reviewed_resolution_gate_codes(resolution: dict, expected: set[str], key: str) -> None:
+    raw_codes = resolution.get("resolved_gate_codes")
+    if not isinstance(raw_codes, list):
+        raise SystemExit(f"Reviewed handoff user_resolutions.{key}.resolved_gate_codes must be a list.")
+    actual = {str(code).strip() for code in raw_codes if str(code).strip()}
+    if actual != expected:
+        raise SystemExit(
+            f"Reviewed handoff user_resolutions.{key}.resolved_gate_codes must exactly match the source review gates."
+        )
+
+
+def validate_reviewed_interest_resolutions(
+    handoff: dict, source: dict, source_sha256: str, expected_institution: str
+) -> dict:
+    gates = source.get("review_gates")
+    if not isinstance(gates, list):
+        raise SystemExit("Reviewed handoff source preflight has no review_gates list.")
+    gate_codes = set(preflight_gate_codes(gates))
+    raw_resolutions = handoff.get("user_resolutions")
+    if not isinstance(raw_resolutions, dict):
+        raise SystemExit("Reviewed handoff user_resolutions must be an object.")
+    if str(raw_resolutions.get("source_preflight_sha256") or "") != source_sha256:
+        raise SystemExit("Reviewed handoff user resolutions are not bound to the reviewed source preflight SHA-256.")
+
+    try:
+        source_year = int(source.get("tax_year", 0))
+    except (TypeError, ValueError) as exc:
+        raise SystemExit("Reviewed handoff source preflight has an invalid tax year.") from exc
+
+    year_gate_codes = {"mixed-years", "unresolved-year-evidence", "unknown-year-coverage"} & gate_codes
+    statement_years = reviewed_resolution_object(raw_resolutions, "statement_years")
+    if "mixed-years" in year_gate_codes:
+        raise SystemExit("Reviewed handoff cannot resolve mixed-years; rerun preflight with the corrected tax year or statement set.")
+    if year_gate_codes:
+        raw_years = statement_years.get("confirmed_years")
+        if statement_years.get("status") != "user-confirmed" or not isinstance(raw_years, list):
+            raise SystemExit("Reviewed handoff does not contain a user-confirmed statement-year resolution.")
+        try:
+            confirmed_years = sorted({int(year) for year in raw_years})
+        except (TypeError, ValueError) as exc:
+            raise SystemExit("Reviewed handoff statement-year resolution contains an invalid year.") from exc
+        if confirmed_years != [source_year]:
+            raise SystemExit(
+                f"Reviewed handoff statement-year resolution must confirm only the extraction year {source_year}."
+            )
+    elif statement_years.get("status") != "not-required":
+        raise SystemExit("Reviewed handoff has an unexpected statement-year resolution.")
+
+    currency_gate_codes = {"ambiguous-dollar", "unknown-currency"} & gate_codes
+    currency = reviewed_resolution_object(raw_resolutions, "currency")
+    source_currency = source.get("currency") if isinstance(source.get("currency"), dict) else {}
+    if "mixed-currencies" in gate_codes:
+        raise SystemExit("Reviewed handoff cannot resolve mixed-currencies; split the statement set and rerun preflight.")
+    if currency_gate_codes:
+        if str(source_currency.get("code") or "").upper() != "UNKNOWN":
+            raise SystemExit("Reviewed handoff currency resolution is only valid when source preflight currency is UNKNOWN.")
+        if currency.get("status") != "user-confirmed":
+            raise SystemExit("Reviewed handoff does not contain a user-confirmed currency resolution.")
+        reviewed_resolution_gate_codes(currency, currency_gate_codes, "currency")
+        if normalize_currency_code(str(currency.get("code") or ""), "reviewed preflight currency") is None:
+            raise SystemExit("Reviewed handoff currency resolution must use a supported ISO currency code.")
+    elif currency.get("status") != "not-required":
+        raise SystemExit("Reviewed handoff has an unexpected currency resolution.")
+
+    institution_gate_codes = {"unknown-institution"} & gate_codes
+    institution = reviewed_resolution_object(raw_resolutions, "institution")
+    if "possible-mixed-institutions" in gate_codes:
+        raise SystemExit(
+            "Reviewed handoff cannot resolve possible-mixed-institutions; split the statement set or correct the source PDFs."
+        )
+    if institution_gate_codes:
+        name = str(institution.get("name") or "").strip()
+        if institution.get("status") != "user-confirmed" or not name:
+            raise SystemExit("Reviewed handoff does not contain a user-confirmed institution resolution.")
+        reviewed_resolution_gate_codes(institution, institution_gate_codes, "institution")
+        if not (text_contains_label(name, expected_institution) or text_contains_label(expected_institution, name)):
+            raise SystemExit(
+                f"Reviewed preflight institution {name!r} does not match extraction institution {expected_institution!r}."
+            )
+    elif institution.get("status") != "not-required":
+        raise SystemExit("Reviewed handoff has an unexpected institution resolution.")
+
+    return raw_resolutions
+
+
+def resolve_reviewed_preflight_handoff(handoff: dict, handoff_path: Path, expected_institution: str) -> dict:
+    if handoff.get("artifact_type") != PREFLIGHT_REVIEWED_HANDOFF_TYPE:
+        raise SystemExit("Preflight JSON is neither a ready preflight nor a reviewed-handoff artifact.")
+    source_meta = handoff.get("source_preflight")
+    review = handoff.get("review")
+    if not isinstance(source_meta, dict) or not isinstance(review, dict):
+        raise SystemExit("Reviewed handoff is missing source_preflight or review metadata.")
+    if review.get("user_review_confirmed") is not True:
+        raise SystemExit("Reviewed handoff does not record explicit user review confirmation.")
+    source_path_value = source_meta.get("resolved_path") or source_meta.get("path")
+    if not source_path_value:
+        raise SystemExit("Reviewed handoff has no source preflight path.")
+    source_path = Path(str(source_path_value))
+    if normalize_preflight_path(source_path) == normalize_preflight_path(handoff_path):
+        raise SystemExit("Reviewed handoff must preserve a separate source preflight JSON.")
+    expected_source_hash = str(source_meta.get("sha256") or "")
+    if not SHA256_PATTERN.fullmatch(expected_source_hash):
+        raise SystemExit("Reviewed handoff has no valid source preflight SHA-256.")
+    if sha256_file(source_path, "source preflight JSON") != expected_source_hash:
+        raise SystemExit("Source preflight changed after review; rerun preflight and create a new reviewed handoff.")
+    source = read_preflight_artifact(source_path, "source preflight JSON")
+    if source.get("status") != "review-required":
+        raise SystemExit("Reviewed handoff source must retain status review-required.")
+    for key in ("schema_version", "tax_year", "scope", "statement_files", "review_gates"):
+        if handoff.get(key) != source.get(key):
+            raise SystemExit(f"Reviewed handoff {key} does not match its source preflight.")
+    for key in ("schema_version", "tax_year", "scope", "status"):
+        if source_meta.get(key) != source.get(key):
+            raise SystemExit(f"Reviewed handoff source_preflight.{key} does not match its source preflight.")
+
+    raw_gates = source.get("review_gates")
+    if not isinstance(raw_gates, list) or not raw_gates:
+        raise SystemExit("Reviewed handoff source preflight has no review_gates list.")
+    gate_codes: set[str] = set()
+    for gate in raw_gates:
+        if not isinstance(gate, dict):
+            raise SystemExit("Reviewed handoff source preflight has an invalid review gate.")
+        code = str(gate.get("code") or "").strip()
+        severity = str(gate.get("severity") or "").strip()
+        if not code or severity != "review" or code in gate_codes:
+            raise SystemExit("Reviewed handoff source preflight has invalid review gates; rerun preflight.")
+        gate_codes.add(code)
+    accepted_raw = review.get("accepted_gate_codes")
+    if not isinstance(accepted_raw, list):
+        raise SystemExit("Reviewed handoff has no accepted_gate_codes list.")
+    accepted = {str(code).strip() for code in accepted_raw if str(code).strip()}
+    if len(accepted) != len(accepted_raw) or accepted != gate_codes:
+        raise SystemExit("Reviewed handoff must accept every and only the source preflight review gates.")
+
+    resolutions = validate_reviewed_interest_resolutions(handoff, source, expected_source_hash, expected_institution)
+    resolved = dict(source)
+    resolved["status"] = PREFLIGHT_REVIEWED_HANDOFF_STATUS
+    resolved["review_handoff"] = {
+        "artifact_json": str(handoff_path),
+        "source_preflight_json": str(source_path),
+        "source_preflight_sha256": expected_source_hash,
+        "accepted_gate_codes": sorted(accepted),
+        "confirmed_at": review.get("confirmed_at"),
+    }
+    resolved["user_resolutions"] = resolutions
+    return resolved
+
+
 def load_preflight_json(
     path: str | None,
     expected_scope: str,
@@ -1148,15 +1323,7 @@ def load_preflight_json(
             f"{PREFLIGHT_READY_STATUS!r} and no review_gates."
         )
     preflight_path = Path(path)
-    try:
-        data = json.loads(preflight_path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise SystemExit(f"Could not read preflight JSON {preflight_path}: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"Preflight JSON {preflight_path} is not valid JSON: {exc}") from exc
-
-    if not isinstance(data, dict):
-        raise SystemExit("Preflight JSON must be an object.")
+    data = read_preflight_artifact(preflight_path, "preflight JSON")
     if data.get("skill") != PREFLIGHT_SKILL:
         raise SystemExit(f"Preflight JSON must come from {PREFLIGHT_SKILL}.")
     if str(data.get("schema_version", "")) not in PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS:
@@ -1166,30 +1333,33 @@ def load_preflight_json(
     if data.get("scope") != expected_scope:
         raise SystemExit(f"Preflight scope {data.get('scope')!r} does not match required scope {expected_scope!r}.")
 
-    if data.get("status") == PREFLIGHT_REVIEWED_HANDOFF_STATUS:
-        raise SystemExit(
-            "Reviewed preflight handoffs are accepted only by fbar-threshold-check; "
-            "statements-to-interest requires a ready preflight with no review gates."
-        )
-
-    review_gates = data.get("review_gates")
-    if not isinstance(review_gates, list):
-        raise SystemExit("Preflight JSON has no review_gates list.")
-    if review_gates:
-        gate_codes = preflight_gate_codes(review_gates)
-        detail = f" ({', '.join(gate_codes)})" if gate_codes else ""
-        raise SystemExit(
-            "Preflight review_gates must be resolved before interest extraction" f"{detail}."
-        )
-    if data.get("status") != PREFLIGHT_READY_STATUS:
-        raise SystemExit(
-            f"Preflight status {data.get('status')!r} is not {PREFLIGHT_READY_STATUS!r}; "
-            "rerun statement-intake-preflight after resolving its review gates."
-        )
+    reviewed_handoff = data.get("status") == PREFLIGHT_REVIEWED_HANDOFF_STATUS
+    if reviewed_handoff:
+        data = resolve_reviewed_preflight_handoff(data, preflight_path, expected_institution)
+    else:
+        review_gates = data.get("review_gates")
+        if not isinstance(review_gates, list):
+            raise SystemExit("Preflight JSON has no review_gates list.")
+        if review_gates:
+            gate_codes = preflight_gate_codes(review_gates)
+            detail = f" ({', '.join(gate_codes)})" if gate_codes else ""
+            raise SystemExit(
+                "Preflight review_gates must be resolved before interest extraction" f"{detail}."
+            )
+        if data.get("status") != PREFLIGHT_READY_STATUS:
+            raise SystemExit(
+                f"Preflight status {data.get('status')!r} is not {PREFLIGHT_READY_STATUS!r}; "
+                "rerun statement-intake-preflight after resolving its review gates."
+            )
 
     verified_files = verify_preflight_statement_fingerprints(data, pdf_paths)
     profile = data.get("profile")
     primary_institution = profile.get("primary_institution") if isinstance(profile, dict) else ""
+    if reviewed_handoff:
+        resolutions = data.get("user_resolutions") if isinstance(data.get("user_resolutions"), dict) else {}
+        institution = resolutions.get("institution") if isinstance(resolutions.get("institution"), dict) else {}
+        if institution.get("status") == "user-confirmed":
+            primary_institution = str(institution.get("name") or "")
     if not isinstance(primary_institution, str) or not primary_institution.strip():
         raise SystemExit("Preflight JSON has no primary institution for extraction binding.")
     if not text_contains_label(primary_institution, expected_institution):
@@ -1200,6 +1370,7 @@ def load_preflight_json(
     data = dict(data)
     data["_source_sha256"] = sha256_file(preflight_path, "preflight JSON")
     data["verified_statement_files"] = verified_files
+    data["resolved_institution"] = primary_institution
     return data
 
 
@@ -1291,6 +1462,19 @@ def command_extract(args: argparse.Namespace) -> int:
         args.pdf,
         args.institution,
     )
+    user_resolutions = preflight.get("user_resolutions") if isinstance(preflight.get("user_resolutions"), dict) else {}
+    reviewed_currency = user_resolutions.get("currency") if isinstance(user_resolutions.get("currency"), dict) else {}
+    if reviewed_currency.get("status") == "user-confirmed":
+        confirmed_currency = normalize_currency_code(
+            str(reviewed_currency.get("code") or ""), "reviewed preflight currency"
+        )
+        if account_currency_override and account_currency_override != confirmed_currency:
+            raise SystemExit(
+                "--account-currency conflicts with the user-confirmed currency in the reviewed preflight handoff."
+            )
+        account_currency_override = confirmed_currency
+    reviewed_institution = user_resolutions.get("institution") if isinstance(user_resolutions.get("institution"), dict) else {}
+    institution_user_confirmed = reviewed_institution.get("status") == "user-confirmed"
     loaded_pdfs = [(pdf_path, load_pdf_text(pdf_path)) for pdf_path in pdf_paths]
     verify_preflight_statement_fingerprints(preflight, args.pdf)
     fingerprints_by_path = {
@@ -1301,7 +1485,13 @@ def command_extract(args: argparse.Namespace) -> int:
     all_warnings: list[str] = preflight_warning_lines(preflight)
     statement_files: list[dict] = []
     for pdf_path, pages in loaded_pdfs:
-        rows, excluded, warnings, meta = extract_rows_from_pages(pages, args.institution, tax_year, account_currency_override)
+        rows, excluded, warnings, meta = extract_rows_from_pages(
+            pages,
+            args.institution,
+            tax_year,
+            account_currency_override,
+            institution_user_confirmed,
+        )
         all_rows.extend(rows)
         all_excluded.extend(excluded)
         all_warnings.extend(warnings)
@@ -2782,9 +2972,9 @@ def command_self_test(args: argparse.Namespace) -> int:
         )
         try:
             load_preflight_json(str(reviewed_handoff), "one-institution", 2025, [str(pdf_path)], "Preflight Bank")
-            failures.append("preflight-reviewed-handoff: expected FBAR-only rejection")
+            failures.append("preflight-reviewed-handoff: expected malformed-handoff rejection")
         except SystemExit as exc:
-            if "fbar-threshold-check" not in str(exc):
+            if "reviewed-handoff" not in str(exc):
                 failures.append(f"preflight-reviewed-handoff: unexpected rejection {exc}")
         try:
             load_preflight_json(str(preflight_path), "one-institution", 2025, [str(pdf_path)], "Other Bank")

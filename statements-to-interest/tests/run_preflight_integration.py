@@ -83,7 +83,9 @@ def preflight(root: Path, tag: str, pdfs: list[Path]) -> tuple[subprocess.Comple
         return process, output, None
 
 
-def extract(pdf_paths: list[Path], preflight_json: Path, output: Path) -> subprocess.CompletedProcess[str]:
+def extract(
+    pdf_paths: list[Path], preflight_json: Path, output: Path, institution: str = "Example Bank"
+) -> subprocess.CompletedProcess[str]:
     return command(
         [
             sys.executable,
@@ -94,7 +96,7 @@ def extract(pdf_paths: list[Path], preflight_json: Path, output: Path) -> subpro
             "--tax-year",
             "2025",
             "--institution",
-            "Example Bank",
+            institution,
             "--preflight-json",
             str(preflight_json),
             "--out",
@@ -179,9 +181,12 @@ def main() -> int:
                 command_output(legacy_extract),
             )
 
-        first_pdf = make_pdf(root, "first.pdf", ready_statement_lines("1.00"))
+        first_lines = ready_statement_lines("1.00")
+        first_lines[2] = "Statement period January 1 2025 to September 30 2025"
+        first_pdf = make_pdf(root, "first.pdf", first_lines)
         second_lines = ready_statement_lines("2.00")
-        second_lines[2] = "Statement period February 1 2025 to February 28 2025"
+        second_lines[2] = "Statement period October 1 2025 to December 31 2025"
+        second_lines[5] = "2025-10-03 Interest credited USD 2.00"
         second_pdf = make_pdf(root, "second.pdf", second_lines)
         ordered_process, ordered_preflight_path, ordered_preflight = preflight(root, "ordered", [first_pdf, second_pdf])
         ordered_valid = (
@@ -249,15 +254,104 @@ def main() -> int:
             if handoff_valid:
                 reviewed_extract = extract([review_pdf], reviewed_handoff_path, root / "reviewed-analysis.json")
                 check(
-                    "reviewed-for-domain-extraction handoff is rejected for interest extraction",
-                    reviewed_extract.returncode != 0 and "fbar-threshold-check" in command_output(reviewed_extract),
+                    "reviewed handoff with unresolved mixed currencies is rejected for interest extraction",
+                    reviewed_extract.returncode != 0 and "mixed-currencies" in command_output(reviewed_extract),
                     command_output(reviewed_extract),
+                )
+
+        unknown_institution_pdf = make_pdf(
+            root,
+            "unknown-institution.pdf",
+            [
+                "Monthly Savings Statement",
+                "Statement period January 1 2025 to January 31 2025",
+                "Currency USD",
+                "2025-01-03 Interest credited USD 6.00",
+            ],
+        )
+        unknown_process, unknown_preflight_path, unknown_preflight = preflight(
+            root, "unknown-institution", [unknown_institution_pdf]
+        )
+        unknown_valid = (
+            unknown_process.returncode == 0
+            and isinstance(unknown_preflight, dict)
+            and unknown_preflight.get("status") == "review-required"
+            and [gate.get("code") for gate in unknown_preflight.get("review_gates", [])] == ["unknown-institution"]
+        )
+        check("unknown institution preflight requires a typed confirmation", unknown_valid, command_output(unknown_process))
+        if unknown_valid:
+            missing_confirmation = command(
+                [
+                    sys.executable,
+                    str(PREFLIGHT_SCRIPT),
+                    "review-handoff",
+                    "--input",
+                    str(unknown_preflight_path),
+                    "--out",
+                    str(root / "missing-institution-confirmation.json"),
+                    "--accept-gate",
+                    "unknown-institution",
+                    "--user-review-confirmed",
+                ]
+            )
+            check(
+                "unknown institution cannot create a reviewed handoff without its confirmation",
+                missing_confirmation.returncode != 0 and "--confirm-institution" in command_output(missing_confirmation),
+                command_output(missing_confirmation),
+            )
+
+            reviewed_unknown_path = root / "unknown-institution-reviewed.json"
+            reviewed_unknown = command(
+                [
+                    sys.executable,
+                    str(PREFLIGHT_SCRIPT),
+                    "review-handoff",
+                    "--input",
+                    str(unknown_preflight_path),
+                    "--out",
+                    str(reviewed_unknown_path),
+                    "--accept-gate",
+                    "unknown-institution",
+                    "--confirm-institution",
+                    "Example Bank",
+                    "--user-review-confirmed",
+                ]
+            )
+            reviewed_unknown_data = (
+                json.loads(reviewed_unknown_path.read_text(encoding="utf-8")) if reviewed_unknown_path.is_file() else {}
+            )
+            institution_resolution = reviewed_unknown_data.get("user_resolutions", {}).get("institution", {})
+            handoff_valid = (
+                reviewed_unknown.returncode == 0
+                and institution_resolution.get("status") == "user-confirmed"
+                and institution_resolution.get("name") == "Example Bank"
+            )
+            check("reviewed handoff retains the typed institution resolution", handoff_valid, command_output(reviewed_unknown))
+            if handoff_valid:
+                reviewed_interest = extract(
+                    [unknown_institution_pdf], reviewed_unknown_path, root / "unknown-institution-analysis.json"
+                )
+                check(
+                    "reviewed institution handoff is accepted and bound for interest extraction",
+                    reviewed_interest.returncode == 0,
+                    command_output(reviewed_interest),
+                )
+                mismatched_interest = extract(
+                    [unknown_institution_pdf],
+                    reviewed_unknown_path,
+                    root / "unknown-institution-mismatch-analysis.json",
+                    institution="Other Bank",
+                )
+                check(
+                    "reviewed institution handoff rejects a mismatched extraction institution",
+                    mismatched_interest.returncode != 0 and "does not match extraction institution" in command_output(mismatched_interest),
+                    command_output(mismatched_interest),
                 )
 
     if failures:
         print(f"Integration suite failed: {len(failures)} scenario(s).", file=sys.stderr)
         return 1
-    print("Preflight integration passed: ready workflow, fingerprints, reordered and changed PDFs, legacy handoff, and FBAR-only review handoff.")
+    print("Preflight integration passed: ready workflow, fingerprints, reordered and changed PDFs, legacy handoff, and reviewed-handoff guardrails.")
     return 0
 
 

@@ -24,7 +24,7 @@ Collect or infer these inputs:
 - Statement PDF paths.
 - Tax year.
 - Institution name visible in the PDFs or clearly represented by the file paths.
-- Ready `statement-intake-preflight` JSON for `--scope one-institution`.
+- Ready `statement-intake-preflight` JSON, or a valid reviewed handoff, for `--scope one-institution`.
 - Account currency only if preflight/extraction leaves it unresolved and the user or statement evidence can confirm it.
 - Output folder, defaulting to `outputs/`.
 - Work folder for JSON/CSV intermediates, defaulting to `work/`.
@@ -71,7 +71,7 @@ python3 "<preflight-root>/scripts/statement_intake_preflight.py" preflight \
   --out "work/statement-preflight.json"
 ```
 
-Review the preflight JSON and CSV. Stop here until preflight returns `status: ready-for-domain-extraction` with an empty `review_gates` list. Pass the same ordered `--pdf` paths to extraction: the ready JSON binds each normalized path, byte size, and lower-case SHA-256. The extractor verifies those fingerprints before reading the PDFs and immediately after all reads, so legacy no-fingerprint, reordered, or changed PDFs fail cleanly. It rejects every other preflight artifact, including `reviewed-for-domain-extraction` handoffs; reviewed handoffs are only for `fbar-threshold-check`. Resolve the intake issue and rerun preflight rather than bypassing it with an ad hoc flag. Do not duplicate those shared checks in this skill; preflight owns PDF readability, institution/year/currency scope, ambiguous `$`, and account/institution hints. Preflight does not replace interest-row extraction; it only standardizes the intake handoff.
+Review the preflight JSON and CSV. Pass a `ready-for-domain-extraction` JSON directly. For a non-structural `review-required` result, create a reviewed handoff only after the user confirms every listed gate and supplies any required typed resolution. `statements-to-interest` accepts a reviewed handoff only for a `one-institution` scope when its source JSON and SHA-256 remain unchanged, every gate is acknowledged, and its year, currency, and institution resolutions validate. It never accepts structural stops, genuine `mixed-years`, or `possible-mixed-institutions` evidence. Pass the same ordered `--pdf` paths to extraction: the handoff binds each normalized path, byte size, and lower-case SHA-256. The extractor verifies those fingerprints before reading the PDFs and immediately after all reads, so legacy no-fingerprint, reordered, or changed PDFs fail cleanly. Resolve the intake issue through preflight rather than bypassing it with an ad hoc flag. Do not duplicate those shared checks in this skill; preflight owns PDF readability, institution/year/currency scope, ambiguous `$`, and account/institution hints. Preflight does not replace interest-row extraction; it only standardizes the intake handoff.
 
 ## 4. Extraction
 
@@ -92,14 +92,14 @@ The script writes:
 - Analysis JSON at `--out`.
 - Review CSV beside the JSON unless `--csv` is supplied. This is for row inspection; do not make CSV the user-facing deliverable unless the user asks for it.
 - `institution_profile` with institution name, account currency, statement titles, detected periods, institution-label source, and statement count.
-- `preflight` summary with source SHA-256 digest and `verified_statement_files` containing the verified normalized paths, byte sizes, and SHA-256 digests; the script requires `--preflight-json`, and rejects non-ready/gated results, mismatched tax year, institution, scope, or ordered PDF sequence.
+- `preflight` summary with source SHA-256 digest and `verified_statement_files` containing the verified normalized paths, byte sizes, and SHA-256 digests; the script requires `--preflight-json`, and rejects raw non-ready/gated results, mismatched tax year, institution, scope, or ordered PDF sequence. A valid reviewed one-institution handoff remains source-bound and carries its accepted review gates and typed resolutions.
 - `source_pdf_summary` and per-file content byte sizes and SHA-256 digests for local audit traceability.
 
 `report` accepts only the current extraction contract: it reloads the ready preflight artifact and rechecks its digest plus every source PDF byte size and SHA-256 digest. If those artifacts changed or are missing, re-run extraction rather than editing the analysis JSON.
 
 Each `excluded_candidates` item records whether it is `clear-non-interest` or `ambiguous`. Clear exclusions such as withholding remain visible in the support packet but do not block a report. Any ambiguous candidate makes the analysis `review-required`, even when other interest rows were counted.
 
-Use `--account-currency` only when the ready preflight artifact or statement evidence confirms the currency and the interest extractor cannot infer it. Do not treat `$` alone as proof of USD; unresolved `$` belongs back in preflight before reporting.
+Use `--account-currency` only when the preflight artifact or statement evidence confirms the currency and the interest extractor cannot infer it. A reviewed preflight currency resolution takes precedence and conflicts with a different CLI value. Do not treat `$` alone as proof of USD; unresolved `$` belongs back in preflight before reporting.
 
 ## 5. Review The Extracted Results
 

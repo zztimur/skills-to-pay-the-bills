@@ -8,9 +8,9 @@ This skill is intentionally narrow:
 - Interest-income support documentation, not official IRS forms or tax advice.
 - Schedule B interest support only; use `fbar-threshold-check` for FBAR maximum-balance or threshold work.
 
-Required companion skill: `statement-intake-preflight`. Extraction requires its intake JSON with `status: ready-for-domain-extraction`, no review gates, and the same ordered PDF paths, tax year, and institution.
+Required companion skill: `statement-intake-preflight`. Extraction requires its intake JSON with `status: ready-for-domain-extraction` and no review gates, or a source-bound reviewed `one-institution` handoff with every required typed resolution, plus the same ordered PDF paths, tax year, and institution.
 
-The ready JSON records each PDF's normalized path, byte size, and lower-case SHA-256. Extraction verifies those fingerprints before reading the PDFs and immediately after all reads. It rejects legacy no-fingerprint artifacts, reordered or changed PDFs, and `reviewed-for-domain-extraction` handoffs; reviewed handoffs are only for `fbar-threshold-check`.
+The preflight artifact records each PDF's normalized path, byte size, and lower-case SHA-256. Extraction verifies those fingerprints before reading the PDFs and immediately after all reads. It rejects legacy no-fingerprint artifacts, reordered or changed PDFs, raw review-required JSON, structural stops, genuine mixed-year or mixed-institution evidence, and incomplete/tampered reviewed handoffs. A reviewed institution name must match `--institution`.
 
 The user-facing deliverable is the PDF packet. JSON and CSV outputs remain available for row review and audit support, but the CSV is not the primary result unless the user asks for it.
 

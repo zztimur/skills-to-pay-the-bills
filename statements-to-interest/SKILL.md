@@ -8,13 +8,13 @@ Analyze a preflighted statement set, extract interest income, convert to USD onl
 
 ## Scope Handoff
 
-Proceed only when the request is for interest-income extraction or Schedule B tax-support documentation. Shared statement intake belongs to `statement-intake-preflight`; extraction requires its `--scope one-institution` JSON with `status: ready-for-domain-extraction` and an empty `review_gates` list. Do not use this skill to determine FBAR maximum balances or thresholds; route that work to `fbar-threshold-check`.
+Proceed only when the request is for interest-income extraction or Schedule B tax-support documentation. Shared statement intake belongs to `statement-intake-preflight`; extraction requires its `--scope one-institution` JSON with either `status: ready-for-domain-extraction` and no review gates, or a source-bound reviewed handoff containing the required typed resolutions. Do not use this skill to determine FBAR maximum balances or thresholds; route that work to `fbar-threshold-check`.
 
 If preflight reports mixed institutions, mixed years, unreadable/scanned PDFs, mixed currencies, or ambiguous `$`, resolve that in `statement-intake-preflight` before continuing here. CSV or pasted rows require manual review outside this deterministic PDF workflow.
 
 ## Skill Dependencies
 
-Required companion skill: `statement-intake-preflight`. Use it first for shared PDF intake with `--scope one-institution`; this skill consumes the ready preflight JSON through required `--preflight-json` and keeps only interest-row extraction, FX confirmation, and packet generation here. Do not bypass a preflight gate with an ad hoc CLI flag; resolve the intake issue and rerun preflight.
+Required companion skill: `statement-intake-preflight`. Use it first for shared PDF intake with `--scope one-institution`; this skill consumes its ready JSON or a valid reviewed handoff through required `--preflight-json` and keeps only interest-row extraction, FX confirmation, and packet generation here. Do not bypass a preflight gate with an ad hoc CLI flag; use its typed review resolution when allowed, otherwise correct the intake issue and rerun preflight.
 
 Conditional FX dependency: `get-yearly-fx-rate`. Use it for non-USD published yearly-average FX workpapers; if it is unavailable or cannot produce a published annual workpaper, stop before PDF generation and ask the user/preparer for a confirmed custom rate instead of sourcing or calculating annual FX here.
 
@@ -53,7 +53,7 @@ python "<package-root>/scripts/statements_to_interest.py" extract \
   --out work/interest-analysis.json
 ```
 
-Pass the same ordered `--pdf` paths used for preflight. Before reading PDFs and again immediately after all reads, extraction verifies each normalized path, byte size, and lower-case SHA-256 against the ready preflight. It rejects legacy no-fingerprint preflights, changed/reordered PDFs, and `reviewed-for-domain-extraction` handoffs; reviewed handoffs are only for `fbar-threshold-check`.
+Pass the same ordered `--pdf` paths used for preflight. Before reading PDFs and again immediately after all reads, extraction verifies each normalized path, byte size, and lower-case SHA-256 against the ready preflight or reviewed handoff. It rejects legacy no-fingerprint preflights, changed/reordered PDFs, raw review-required JSON, structural stops, genuine mixed-year or mixed-institution evidence, and incomplete/tampered reviewed handoffs. A reviewed `unknown-institution` resolution must match `--institution`; a reviewed currency resolution controls the account currency.
 
 Review the JSON and review CSV before reporting. Treat the CSV as an internal row-review artifact, not the user-facing deliverable unless the user asks for it. Confirm the ready `preflight` summary, source SHA-256 digest, and `verified_statement_files` list are present, then focus this skill's review on counted interest rows, excluded interest-like candidates, totals, and FX readiness. Do not invent missing rows. Clear exclusions such as withholding remain documented but do not block reporting. Any ambiguous excluded candidate makes the analysis `review-required`, even with counted rows: review every candidate, correct the source and rerun extraction when one is countable, or create `resolve-exclusions` JSON after a reviewer confirms all are non-interest. Pass that digest-bound file to `report` with `--excluded-candidates-resolution-json`. A zero-row packet also needs explicit preparer confirmation (`--zero-interest-confirmed` plus a non-empty note).
 
