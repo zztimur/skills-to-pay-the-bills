@@ -6,7 +6,7 @@ dependencies:
   skills:
     - name: "statement-intake-preflight"
       required: true
-      description: "Runs shared machine-readable statement PDF intake with --scope one-account before FBAR balance extraction."
+      description: "Runs shared machine-readable statement PDF intake with --scope one-account and fingerprints the exact PDFs before FBAR balance extraction."
     - name: "get-year-end-fx-rate"
       required: false
       description: "Creates retained year-end FX workpapers required for non-USD FBAR conversion."

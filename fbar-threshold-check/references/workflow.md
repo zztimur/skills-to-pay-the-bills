@@ -66,6 +66,8 @@ python3 "<preflight-root>/scripts/statement_intake_preflight.py" review-handoff 
 
 Repeat `--accept-gate` for every code in `review_gates`. The handoff records the original preflight path and SHA-256 plus the accepted gate codes. `extract-account` rejects a raw `review-required` JSON, an incomplete reviewed handoff, a handoff with a structural gate, or a handoff whose source preflight changed after review.
 
+The preflight also pins the exact statement sequence with a positive byte size and SHA-256 fingerprint for each PDF. `extract-account` refuses a missing, legacy-unfingerprinted, duplicated, reordered, or changed file. It checks the fingerprint both before parsing and immediately after parsing; a source change requires a fresh preflight and, if applicable, a new reviewed handoff.
+
 ## 5. Extract One Account
 
 Run:
@@ -85,7 +87,7 @@ Optional flags:
 - `--account-id`: stable local identifier when the user has one.
 - `--institution`: institution label when visible in the statement set or known from the user.
 - `--account-currency`: ISO code when the statement text cannot safely infer it.
-- `--preflight-json`: required ready JSON or reviewed-handoff JSON from `statement-intake-preflight`; the script rejects absent, review-required, stale, mismatched, or incomplete handoffs.
+- `--preflight-json`: required ready JSON or reviewed-handoff JSON from `statement-intake-preflight`; the script rejects absent, review-required, stale, mismatched, incomplete, or file-identity-invalid handoffs.
 - `--csv`: review CSV output path.
 
 The script writes:
@@ -101,7 +103,7 @@ Open the JSON and CSV before confirming. Confirm these fields:
 
 - `preflight` summary, if present, matches the reviewed intake artifact.
 - `account.account_id`, `institution`, and `account.currency` are usable for the confirmed ledger; if not, return to preflight or rerun extraction with an explicit override instead of adjudicating intake ad hoc here.
-- `statement_files` are the expected PDFs.
+- `statement_files` are the expected PDFs; the `preflight.verified_statement_files` summary records the matched ordered paths, byte sizes, and SHA-256 fingerprints.
 - `coverage.complete_year` is true.
 - `coverage.carry_gaps` is empty and `coverage.trailing_carry_days` is small; carried balances near year-end are evidence gaps, not observations.
 - `coverage.carried_forward_days` is plausible for the statement cycle. Carried spans under the 40-day gap threshold (for example one missing monthly statement) pass the automated gates, so a high carried-to-observed ratio still needs the user's explicit acceptance.

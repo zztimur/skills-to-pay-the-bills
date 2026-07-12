@@ -892,7 +892,14 @@ def preflight_file_sha256(path: Path) -> str:
                 digest.update(chunk)
         return digest.hexdigest()
     except OSError as exc:
-        raise FbarError(f"Could not hash preflight JSON {path}: {exc}", 2) from exc
+        raise FbarError(f"Could not hash file {path}: {exc}", 2) from exc
+
+
+def preflight_file_bytes(path: Path, label: str) -> int:
+    try:
+        return path.stat().st_size
+    except OSError as exc:
+        raise FbarError(f"Could not stat {label} {path}: {exc}", 2) from exc
 
 
 def read_preflight_json(path: Path, label: str) -> dict[str, object]:
@@ -907,7 +914,81 @@ def read_preflight_json(path: Path, label: str) -> dict[str, object]:
     return data
 
 
-def validate_preflight_identity(data: dict[str, object], expected_scope: str, tax_year: int, pdf_paths: list[str]) -> None:
+def preflight_statement_fingerprints(data: dict[str, object]) -> list[dict[str, object]]:
+    statement_files = data.get("statement_files")
+    if not isinstance(statement_files, list) or not statement_files:
+        raise FbarError("Preflight JSON has no statement_files list.", 2)
+    fingerprints: list[dict[str, object]] = []
+    seen_paths: set[str] = set()
+    seen_digests: set[str] = set()
+    for index, item in enumerate(statement_files, start=1):
+        if not isinstance(item, dict):
+            raise FbarError(f"Preflight statement_files entry {index} is not an object.", 2)
+        source_path = item.get("resolved_file") or item.get("file")
+        if not source_path:
+            raise FbarError(f"Preflight statement_files entry {index} has no file path.", 2)
+        normalized_path = normalize_preflight_path(str(source_path))
+        if normalized_path in seen_paths:
+            raise FbarError("Preflight contains duplicate statement paths; remove duplicates and rerun preflight.", 2)
+        seen_paths.add(normalized_path)
+        digest = str(item.get("content_sha256") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise FbarError(
+                f"Preflight statement {Path(normalized_path).name} lacks a valid SHA-256 fingerprint; rerun preflight.",
+                2,
+            )
+        if digest in seen_digests:
+            raise FbarError("Preflight contains byte-identical statement PDFs; remove duplicates and rerun preflight.", 2)
+        seen_digests.add(digest)
+        try:
+            content_bytes = int(str(item.get("content_bytes")))
+        except (TypeError, ValueError) as exc:
+            raise FbarError(
+                f"Preflight statement {Path(normalized_path).name} lacks a valid byte-size fingerprint; rerun preflight.",
+                2,
+            ) from exc
+        if content_bytes <= 0:
+            raise FbarError(
+                f"Preflight statement {Path(normalized_path).name} has a non-positive byte-size fingerprint; rerun preflight.",
+                2,
+            )
+        fingerprints.append(
+            {
+                "resolved_file": normalized_path,
+                "content_sha256": digest,
+                "content_bytes": content_bytes,
+            }
+        )
+    return fingerprints
+
+
+def verify_preflight_statement_fingerprints(data: dict[str, object], pdf_paths: list[str]) -> list[dict[str, object]]:
+    expected_paths = [normalize_preflight_path(path_item) for path_item in pdf_paths]
+    if len(set(expected_paths)) != len(expected_paths):
+        raise FbarError("Duplicate statement PDFs were supplied to extraction; remove duplicates and rerun preflight.", 2)
+    fingerprints = preflight_statement_fingerprints(data)
+    actual_paths = [str(item["resolved_file"]) for item in fingerprints]
+    if expected_paths != actual_paths:
+        raise FbarError(
+            "Preflight PDF sequence does not match extraction PDFs. "
+            f"Expected {expected_paths}; preflight has {actual_paths}.",
+            2,
+        )
+    for expected, fingerprint in zip(expected_paths, fingerprints, strict=True):
+        current_path = Path(expected)
+        current_bytes = preflight_file_bytes(current_path, "statement PDF")
+        current_digest = preflight_file_sha256(current_path)
+        if current_bytes != fingerprint["content_bytes"] or current_digest != fingerprint["content_sha256"]:
+            raise FbarError(
+                f"Statement PDF {current_path.name} changed after preflight; rerun preflight and complete review again.",
+                2,
+            )
+    return fingerprints
+
+
+def validate_preflight_identity(
+    data: dict[str, object], expected_scope: str, tax_year: int, pdf_paths: list[str]
+) -> list[dict[str, object]]:
     if data.get("skill") != PREFLIGHT_SKILL:
         raise FbarError(f"Preflight JSON must come from {PREFLIGHT_SKILL}.", 2)
     if str(data.get("schema_version", "")) not in PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS:
@@ -917,23 +998,7 @@ def validate_preflight_identity(data: dict[str, object], expected_scope: str, ta
     if data.get("scope") != expected_scope:
         raise FbarError(f"Preflight scope {data.get('scope')!r} does not match required scope {expected_scope!r}.", 2)
 
-    expected = {normalize_preflight_path(path_item) for path_item in pdf_paths}
-    statement_files = data.get("statement_files")
-    if not isinstance(statement_files, list):
-        raise FbarError("Preflight JSON has no statement_files list.", 2)
-    actual: set[str] = set()
-    for item in statement_files:
-        if not isinstance(item, dict):
-            continue
-        file_value = item.get("resolved_file") or item.get("file")
-        if file_value:
-            actual.add(normalize_preflight_path(str(file_value)))
-    if expected != actual:
-        raise FbarError(
-            "Preflight PDF set does not match extraction PDFs. "
-            f"Expected {sorted(expected)}; preflight has {sorted(actual)}.",
-            2,
-        )
+    return verify_preflight_statement_fingerprints(data, pdf_paths)
 
 
 def validated_review_gates(data: dict[str, object]) -> list[dict[str, str]]:
@@ -1043,7 +1108,9 @@ def load_preflight_json(path: str | None, expected_scope: str, tax_year: int, pd
     elif data.get("review_gates"):
         raise FbarError("Ready preflight unexpectedly contains review gates; rerun preflight.", 2)
 
-    validate_preflight_identity(data, expected_scope, tax_year, pdf_paths)
+    verified_files = validate_preflight_identity(data, expected_scope, tax_year, pdf_paths)
+    data = dict(data)
+    data["verified_statement_files"] = verified_files
     return data
 
 
@@ -1076,6 +1143,7 @@ def preflight_profile(preflight: dict[str, object], source_path: str) -> dict[st
         "review_gates": preflight.get("review_gates", []),
         "review_csv": (preflight.get("artifacts") or {}).get("review_csv") if isinstance(preflight.get("artifacts"), dict) else None,
         "review_handoff": preflight.get("review_handoff"),
+        "verified_statement_files": preflight.get("verified_statement_files", []),
     }
 
 
@@ -1085,6 +1153,7 @@ def command_extract_account(args: argparse.Namespace) -> int:
     preflight = load_preflight_json(args.preflight_json, "one-account", args.tax_year, args.pdf)
     warnings.extend(preflight_warning_lines(preflight))
     lines, file_profiles, full_text, pdf_warnings = load_pdf_lines(args.pdf)
+    verify_preflight_statement_fingerprints(preflight, args.pdf)
     warnings.extend(pdf_warnings)
 
     currency = infer_currency(full_text, args.account_currency, warnings)
@@ -2409,7 +2478,15 @@ def write_preflight_fixture(
         "status": status,
         "tax_year": tax_year,
         "scope": scope,
-        "statement_files": [{"file": str(pdf), "resolved_file": normalize_preflight_path(pdf)} for pdf in pdf_paths],
+        "statement_files": [
+            {
+                "file": str(pdf),
+                "resolved_file": normalize_preflight_path(pdf),
+                "content_sha256": preflight_file_sha256(pdf),
+                "content_bytes": preflight_file_bytes(pdf, "test statement PDF"),
+            }
+            for pdf in pdf_paths
+        ],
         "currency": {"code": "USD", "candidates": ["USD"]},
         "profile": {"primary_institution": "Preflight Bank"},
         "warnings": ["sample review warning"],
@@ -2456,6 +2533,9 @@ def write_reviewed_handoff_fixture(root: Path, name: str, source_path: Path, acc
 
 def test_preflight_handoff(root: Path) -> None:
     pdf = root / "statement.pdf"
+    pdf.write_bytes(b"synthetic statement PDF one")
+    other_pdf = root / "other.pdf"
+    other_pdf.write_bytes(b"synthetic statement PDF two")
     preflight = write_preflight_fixture(root, "preflight-ok", 2025, "one-account", [pdf])
     data = load_preflight_json(str(preflight), "one-account", 2025, [str(pdf)])
     warnings = preflight_warning_lines(data)
@@ -2536,10 +2616,77 @@ def test_preflight_handoff(root: Path) -> None:
     else:
         raise AssertionError("preflight must be required")
 
+    legacy = write_preflight_fixture(root, "preflight-legacy", 2025, "one-account", [pdf])
+    legacy_data = load_json(legacy)
+    legacy_files = legacy_data["statement_files"]
+    assert isinstance(legacy_files, list) and isinstance(legacy_files[0], dict)
+    legacy_files[0].pop("content_sha256", None)
+    legacy_files[0].pop("content_bytes", None)
+    write_json(legacy, legacy_data)
+    try:
+        load_preflight_json(str(legacy), "one-account", 2025, [str(pdf)])
+    except FbarError as exc:
+        assert "fingerprint" in str(exc), str(exc)
+    else:
+        raise AssertionError("legacy preflight without file fingerprints must be rejected")
+
+    reordered = write_preflight_fixture(root, "preflight-reordered", 2025, "one-account", [pdf, other_pdf])
+    try:
+        load_preflight_json(str(reordered), "one-account", 2025, [str(other_pdf), str(pdf)])
+    except FbarError as exc:
+        assert "sequence" in str(exc), str(exc)
+    else:
+        raise AssertionError("reordered statement PDFs must be rejected")
+
+    try:
+        load_preflight_json(str(preflight), "one-account", 2025, [str(pdf), str(pdf)])
+    except FbarError as exc:
+        assert "Duplicate statement" in str(exc), str(exc)
+    else:
+        raise AssertionError("duplicate extraction PDFs must be rejected")
+
+    duplicate_path_preflight = write_preflight_fixture(
+        root, "preflight-duplicate-path", 2025, "one-account", [pdf, other_pdf]
+    )
+    duplicate_path_data = load_json(duplicate_path_preflight)
+    duplicate_path_files = duplicate_path_data["statement_files"]
+    assert isinstance(duplicate_path_files, list) and isinstance(duplicate_path_files[0], dict) and isinstance(duplicate_path_files[1], dict)
+    duplicate_path_files[1]["resolved_file"] = duplicate_path_files[0]["resolved_file"]
+    write_json(duplicate_path_preflight, duplicate_path_data)
+    try:
+        load_preflight_json(str(duplicate_path_preflight), "one-account", 2025, [str(pdf), str(other_pdf)])
+    except FbarError as exc:
+        assert "duplicate statement paths" in str(exc), str(exc)
+    else:
+        raise AssertionError("preflight with duplicate statement paths must be rejected")
+
+    identical_copy = root / "identical-copy.pdf"
+    identical_copy.write_bytes(pdf.read_bytes())
+    duplicate_content_preflight = write_preflight_fixture(
+        root, "preflight-duplicate-content", 2025, "one-account", [pdf, identical_copy]
+    )
+    try:
+        load_preflight_json(str(duplicate_content_preflight), "one-account", 2025, [str(pdf), str(identical_copy)])
+    except FbarError as exc:
+        assert "byte-identical" in str(exc), str(exc)
+    else:
+        raise AssertionError("preflight with byte-identical statement PDFs must be rejected")
+
+    changed_pdf = root / "changed-statement.pdf"
+    changed_pdf.write_bytes(b"statement bytes before preflight")
+    changed_pdf_preflight = write_preflight_fixture(root, "preflight-changed-pdf", 2025, "one-account", [changed_pdf])
+    changed_pdf.write_bytes(b"statement bytes changed after preflight")
+    try:
+        load_preflight_json(str(changed_pdf_preflight), "one-account", 2025, [str(changed_pdf)])
+    except FbarError as exc:
+        assert "changed after preflight" in str(exc), str(exc)
+    else:
+        raise AssertionError("changed statement PDFs must be rejected")
+
     for name, year, scope, pdfs, expected in (
         ("bad-year", 2024, "one-account", [pdf], "tax_year"),
         ("bad-scope", 2025, "one-institution", [pdf], "scope"),
-        ("bad-pdfs", 2025, "one-account", [root / "other.pdf"], "PDF set"),
+        ("bad-pdfs", 2025, "one-account", [other_pdf], "sequence"),
     ):
         bad = write_preflight_fixture(root, name, year, scope, pdfs)
         try:

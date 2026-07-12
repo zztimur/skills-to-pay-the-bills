@@ -13,7 +13,7 @@ Read `references/workflow.md` before analysis. It contains the preflight handoff
 
 ## Skill Dependencies
 
-Required companion skill: `statement-intake-preflight`. Use it first for shared PDF intake with `--scope one-account`; `extract-account` requires either its clean preflight JSON or a separate reviewed-handoff JSON created after explicit user review. This skill keeps only FBAR balance, FX, confirmation, and aggregation logic here.
+Required companion skill: `statement-intake-preflight`. Use it first for shared PDF intake with `--scope one-account`; `extract-account` requires either its clean preflight JSON or a separate reviewed-handoff JSON created after explicit user review, and verifies the ordered PDF byte-size and SHA-256 fingerprints before and after parsing. This skill keeps only FBAR balance, FX, confirmation, and aggregation logic here.
 
 FX workpaper dependency for non-USD accounts: `get-year-end-fx-rate`. Use its retained year-end `workpaper.json` for FBAR-style conversion; do not use yearly-average workpapers from `get-yearly-fx-rate`.
 
