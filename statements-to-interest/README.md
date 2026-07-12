@@ -1,6 +1,6 @@
 # Statements to Interest
 
-Extract interest income from a reviewed statement set and generate an IRS-oriented support packet.
+Extract interest income from a ready statement set and generate an IRS-oriented support packet.
 
 This skill is intentionally narrow:
 
@@ -8,7 +8,9 @@ This skill is intentionally narrow:
 - Interest-income support documentation, not official IRS forms or tax advice.
 - Schedule B interest support only; use `fbar-threshold-check` for FBAR maximum-balance or threshold work.
 
-Required companion skill: `statement-intake-preflight`. Extraction requires its intake JSON with `status: ready-for-domain-extraction`, no review gates, and the same PDF set, tax year, and institution.
+Required companion skill: `statement-intake-preflight`. Extraction requires its intake JSON with `status: ready-for-domain-extraction`, no review gates, and the same ordered PDF paths, tax year, and institution.
+
+The ready JSON records each PDF's normalized path, byte size, and lower-case SHA-256. Extraction verifies those fingerprints before reading the PDFs and immediately after all reads. It rejects legacy no-fingerprint artifacts, reordered or changed PDFs, and `reviewed-for-domain-extraction` handoffs; reviewed handoffs are only for `fbar-threshold-check`.
 
 The user-facing deliverable is the PDF packet. JSON and CSV outputs remain available for row review and audit support, but the CSV is not the primary result unless the user asks for it.
 
@@ -22,6 +24,7 @@ Ambiguous excluded interest-like candidates block a packet even when other inter
 - `references/workflow.md` has the detailed operational checklist, FX gate, troubleshooting, verification, and final-response template.
 - `references/irs-interest-reporting.md` has IRS-oriented wording and source-link guidance.
 - `scripts/statements_to_interest.py` performs extraction, FX prompts, packet assembly, dependency checks, and self-tests.
+- `tests/run_preflight_integration.py` runs a synthetic real-PDF handoff regression through the sibling preflight and interest CLIs.
 - In the source repository only, `workpaper-kit/workpaper.py` is vendored as `scripts/_workpaper.py` and owns the shared ReportLab packet layout. Change the canonical kit there and run `workpaper-kit/sync.sh`; do not hand-edit the vendored copy. The installed package is a read-only consumer and does not include `workpaper-kit`.
 - `statement-intake-preflight` provides the shared PDF intake JSON/CSV used before extraction.
 - `.claude-plugin/` and `commands/` provide the Claude Code entrypoint while reusing the same root workflow.
@@ -111,6 +114,7 @@ Before shipping or reinstalling the skill:
 claude plugin validate --strict statements-to-interest
 "$PYTHON" statements-to-interest/scripts/statements_to_interest.py self-test
 "$PYTHON" statements-to-interest/scripts/statements_to_interest.py smoke-test
+"$PYTHON" statements-to-interest/tests/run_preflight_integration.py
 ```
 
 Sync a cache-free package, then verify source/installed parity:

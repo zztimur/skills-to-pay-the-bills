@@ -1,13 +1,13 @@
 {
   "name": "statements-to-interest",
   "description": "Model-agnostic foreign-bank interest workflow for Schedule B support after statement preflight.",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "dependencies": [
     {
       "type": "skill",
       "name": "statement-intake-preflight",
       "required": true,
-      "description": "Runs shared machine-readable statement PDF intake with --scope one-institution before interest extraction."
+      "description": "Provides ready one-institution statement intake JSON with ordered PDF fingerprints before interest extraction."
     },
     {
       "type": "skill",
