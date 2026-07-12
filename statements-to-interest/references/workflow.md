@@ -162,6 +162,7 @@ If counted rows are not USD:
 
 1. Use the separate `get-yearly-fx-rate` skill to find a published yearly average and create a retained proof workpaper.
 2. Pass that skill's `workpaper.json` into `statements_to_interest.py` with `--fx-workpaper-json`.
+   The report verifies that the declared workpaper PDF and each retained source-proof file still exist and match their SHA-256 digests before it will create a packet.
 3. Treat `get-yearly-fx-rate` as the conditional FX dependency for this path. Do not search for or validate published annual FX sources inside `statements-to-interest`; that is the dependency's job.
 4. If `get-yearly-fx-rate` is unavailable or cannot produce a workpaper, stop before the PDF and ask the user to install/run it or provide a confirmed user/preparer custom rate.
 5. Accept a user/preparer custom rate when preferred. Use `--fx-method user-rate`; `--fx-source` is optional for custom rates.
@@ -171,6 +172,8 @@ If counted rows are not USD:
    - Default is `foreign-per-usd`, matching IRS yearly average tables.
    - Use `--rate-direction usd-per-foreign` only when the supplied rate is USD per one foreign currency unit.
 9. Use item-date spot rates only if the user or preparer explicitly asks for that method.
+
+Daily-rate JSON proof metadata must be an object with `saved_file` and its matching SHA-256 digest. The referenced file is verified before previewing or reporting.
 
 Yearly average confirmation prompt shape:
 
