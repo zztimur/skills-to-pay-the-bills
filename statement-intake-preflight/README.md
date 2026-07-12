@@ -32,7 +32,7 @@ The preflight command writes:
 
 The JSON includes:
 
-- statement files, resolved paths, page counts, and text counts;
+- statement files, resolved paths, byte sizes, SHA-256 fingerprints, page counts, and text counts;
 - detected statement titles and periods;
 - detected years and out-of-year hints;
 - currency candidates it could back up with a nearby amount or name, the weaker ones it could not, and ambiguous `$` warnings;
@@ -49,7 +49,7 @@ Ask for the skill directly:
 Use $statement-intake-preflight to check these 2025 statement PDFs before FBAR extraction.
 ```
 
-Codex should read the root `SKILL.md`, then `references/workflow.md`, run the script, and review the JSON/CSV. A clean preflight can go to the downstream skill; for FBAR, a review-required preflight needs a separate user-confirmed handoff first.
+Codex should read the root `SKILL.md`, then `references/workflow.md`, run the script, and review the JSON/CSV. A clean preflight can go to the downstream skill; for FBAR, a review-required preflight needs a separate user-confirmed handoff first. FBAR extraction checks the same PDFs in the same order against the preflight byte-size and SHA-256 fingerprints.
 
 ## Use It In Claude Code
 

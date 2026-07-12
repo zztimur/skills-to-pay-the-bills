@@ -22,6 +22,7 @@ fails. Fixtures are synthetic; account-like numbers are marked for privacy-gate.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -97,6 +98,11 @@ proc, d = run("happy", [str(p)])
 check("HAPPY-1 clean statement is ready with no gates",
       d and d["status"] == "ready-for-domain-extraction" and not gates_of(d),
       f"status={d['status'] if d else None} gates={gates_of(d)}")
+fingerprint = d["statement_files"][0] if d and d.get("statement_files") else {}
+check("HAPPY-1A real PDF has byte-size and SHA-256 fingerprints",
+      isinstance(fingerprint.get("content_bytes"), int) and fingerprint["content_bytes"] == p.stat().st_size
+      and isinstance(fingerprint.get("content_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", fingerprint["content_sha256"]) is not None,
+      f"bytes={fingerprint.get('content_bytes')} sha256={fingerprint.get('content_sha256')}")
 
 p = make_pdf("es.pdf", [
     "Banco Ejemplo",
