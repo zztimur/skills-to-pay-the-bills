@@ -51,8 +51,8 @@ Open the JSON and CSV before continuing. Confirm:
 - The files have enough machine-readable text.
 - `coverage_hints.statement_period_years`, source-referenced `period_intervals`, and any `contextual_date_evidence` support the requested year. A prior-year opening balance is contextual evidence, not automatically a second statement period.
 - `coverage_hints.period_coverage_review` has no possible internal, leading, or trailing statement-period gap. Its period labels are intake hints only; they do not prove complete transaction or balance coverage.
-- `currency.code` is usable, or unresolved currency is explicitly handled downstream.
-- `account_hints` describe one account when scope is `one-account`.
+- `currency.code` is usable, or weak/unknown currency received the specific ISO confirmation below.
+- `account_hints` describe one account when scope is `one-account`, or the user confirmed one-account scope without supplying an account number.
 - `institution_hints` describe one institution when scope is `one-institution`.
 
 Stop for user review when any `review_gates` entry appears. Each gate carries a `severity`:
@@ -61,6 +61,21 @@ Stop for user review when any `review_gates` entry appears. Each gate carries a 
 - `review` — the set parsed, but a scope or quality assumption needs a human to confirm before downstream extraction.
 
 Any gate, of either severity, sets `status` to `review-required`.
+
+### Ask only when the evidence requires it
+
+Do not turn every preflight observation into a user question. Use the matching
+wording below only when the relevant evidence is unresolved; otherwise state
+the corroborated result and proceed.
+
+- Confident currency (`currency.code` is one ISO code backed by `currency.candidates`): do **not** ask. Say: “Currency is corroborated as `COP` from the statement text. Proceeding with `COP`; no currency confirmation is needed.” Substitute the actual ISO code.
+- Bare `$` or other weak/unknown currency evidence (`ambiguous-dollar` or `unknown-currency`): ask: “We could not corroborate the account currency from the statement text. Please confirm the ISO currency code (for example, `COP`).” Do not infer USD from `$`.
+- Contextual prior-year date: if the statement period is clearly inside the requested year and its coverage is otherwise clear, explain it without asking: “We found `2024-12-31` as a prior-year opening-balance reference. The detected statement period is 2025, so this date is contextual and does not change the statement year.” If statement-period coverage is unclear, ask: “We found `2024-12-31` in the Q1 statement. It appears to be a prior-year opening balance, while the statement period appears to be 2025. Please confirm that all supplied statements cover 2025 and that this date is contextual.”
+- Missing account identity in `one-account` scope (`unknown-account`): ask: “We could not extract a reliable account identifier from these statements. Please confirm that the supplied PDFs represent one account. You do not need to provide the account number.”
+
+Do not use a user response to override `mixed-years`, a structural `stop` gate,
+or corroborated contradictory currency/account evidence. Record accepted review
+input only through the separate reviewed-handoff resolution fields.
 
 Complete gate catalog:
 
