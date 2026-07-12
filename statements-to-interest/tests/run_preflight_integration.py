@@ -348,6 +348,117 @@ def main() -> int:
                     command_output(mismatched_interest),
                 )
 
+        unresolved_year_pdf = make_pdf(
+            root,
+            "unresolved-year.pdf",
+            [
+                "Example Bank Statement",
+                "Statement period January 1 2025 to March 31 2025",
+                "Historic reference 31/12/2024",
+                "Currency USD",
+                "2025-02-03 Interest credited USD 7.00",
+            ],
+        )
+        unresolved_process, unresolved_preflight_path, unresolved_preflight = preflight(
+            root, "unresolved-year", [unresolved_year_pdf]
+        )
+        unresolved_valid = (
+            unresolved_process.returncode == 0
+            and isinstance(unresolved_preflight, dict)
+            and unresolved_preflight.get("status") == "review-required"
+            and [gate.get("code") for gate in unresolved_preflight.get("review_gates", [])] == ["unresolved-year-evidence"]
+        )
+        check("unresolved year preflight requires a typed contextual-year confirmation", unresolved_valid, command_output(unresolved_process))
+        if unresolved_valid:
+            reviewed_unresolved_path = root / "unresolved-year-reviewed.json"
+            reviewed_unresolved = command(
+                [
+                    sys.executable,
+                    str(PREFLIGHT_SCRIPT),
+                    "review-handoff",
+                    "--input",
+                    str(unresolved_preflight_path),
+                    "--out",
+                    str(reviewed_unresolved_path),
+                    "--accept-gate",
+                    "unresolved-year-evidence",
+                    "--confirm-statement-year",
+                    "2025",
+                    "--classify-contextual-year",
+                    "2024",
+                    "--user-review-confirmed",
+                ]
+            )
+            reviewed_unresolved_data = (
+                json.loads(reviewed_unresolved_path.read_text(encoding="utf-8")) if reviewed_unresolved_path.is_file() else {}
+            )
+            contextual_classifications = (
+                reviewed_unresolved_data.get("user_resolutions", {})
+                .get("statement_years", {})
+                .get("contextual_year_classifications", [])
+            )
+            valid_contextual_handoff = (
+                reviewed_unresolved.returncode == 0
+                and contextual_classifications
+                == [
+                    {
+                        "year": 2024,
+                        "classification": "user-confirmed-contextual-prior-year",
+                        "source": "user-review",
+                    }
+                ]
+            )
+            check(
+                "reviewed year handoff retains the required contextual-year classification",
+                valid_contextual_handoff,
+                command_output(reviewed_unresolved),
+            )
+            if valid_contextual_handoff:
+                valid_year_extract = extract(
+                    [unresolved_year_pdf], reviewed_unresolved_path, root / "unresolved-year-analysis.json"
+                )
+                check(
+                    "reviewed contextual-year handoff is accepted for interest extraction",
+                    valid_year_extract.returncode == 0,
+                    command_output(valid_year_extract),
+                )
+
+                missing_contextual_data = json.loads(reviewed_unresolved_path.read_text(encoding="utf-8"))
+                missing_contextual_data["user_resolutions"]["statement_years"]["contextual_year_classifications"] = []
+                missing_contextual_path = root / "unresolved-year-missing-contextual.json"
+                missing_contextual_path.write_text(json.dumps(missing_contextual_data, indent=2), encoding="utf-8")
+                missing_contextual_extract = extract(
+                    [unresolved_year_pdf], missing_contextual_path, root / "unresolved-year-missing-contextual-analysis.json"
+                )
+                check(
+                    "reviewed handoff rejects a missing contextual-year classification",
+                    missing_contextual_extract.returncode != 0
+                    and "contextual-year classifications" in command_output(missing_contextual_extract),
+                    command_output(missing_contextual_extract),
+                )
+
+                substituted_contextual_data = json.loads(reviewed_unresolved_path.read_text(encoding="utf-8"))
+                substituted_contextual_data["user_resolutions"]["statement_years"]["contextual_year_classifications"] = [
+                    {
+                        "year": 2023,
+                        "classification": "user-confirmed-contextual-prior-year",
+                        "source": "user-review",
+                    }
+                ]
+                substituted_contextual_path = root / "unresolved-year-substituted-contextual.json"
+                substituted_contextual_path.write_text(json.dumps(substituted_contextual_data, indent=2), encoding="utf-8")
+                substituted_contextual_extract = extract(
+                    [unresolved_year_pdf],
+                    substituted_contextual_path,
+                    root / "unresolved-year-substituted-contextual-analysis.json",
+                )
+                check(
+                    "reviewed handoff rejects a substituted contextual-year classification",
+                    substituted_contextual_extract.returncode != 0
+                    and "contextual-year classifications" in command_output(substituted_contextual_extract),
+                    command_output(substituted_contextual_extract),
+                )
+
     if failures:
         print(f"Integration suite failed: {len(failures)} scenario(s).", file=sys.stderr)
         return 1

@@ -1173,6 +1173,62 @@ def reviewed_resolution_gate_codes(resolution: dict, expected: set[str], key: st
         )
 
 
+def validate_reviewed_statement_year_resolution(
+    statement_years: dict, source: dict, year_gate_codes: set[str], source_year: int
+) -> None:
+    """Require the reviewed year resolution to preserve every required source classification."""
+    if "mixed-years" in year_gate_codes:
+        raise SystemExit("Reviewed handoff cannot resolve mixed-years; rerun preflight with the corrected tax year or statement set.")
+    if not year_gate_codes:
+        if statement_years.get("status") != "not-required":
+            raise SystemExit("Reviewed handoff has an unexpected statement-year resolution.")
+        if any(key in statement_years for key in ("confirmed_years", "contextual_year_classifications")):
+            raise SystemExit("Reviewed handoff has unexpected statement-year resolution details.")
+        return
+
+    raw_years = statement_years.get("confirmed_years")
+    if statement_years.get("status") != "user-confirmed" or not isinstance(raw_years, list):
+        raise SystemExit("Reviewed handoff does not contain a user-confirmed statement-year resolution.")
+    try:
+        confirmed_years = sorted({int(year) for year in raw_years})
+    except (TypeError, ValueError) as exc:
+        raise SystemExit("Reviewed handoff statement-year resolution contains an invalid year.") from exc
+    if confirmed_years != [source_year]:
+        raise SystemExit(f"Reviewed handoff statement-year resolution must confirm only the extraction year {source_year}.")
+
+    coverage = source.get("coverage_hints")
+    if not isinstance(coverage, dict):
+        raise SystemExit("Reviewed handoff source preflight has no coverage hints for year resolution.")
+    raw_unresolved_years = coverage.get("unresolved_years")
+    if not isinstance(raw_unresolved_years, list):
+        raise SystemExit("Reviewed handoff source preflight has invalid unresolved-year evidence.")
+    try:
+        required_contextual_years = sorted({int(year) for year in raw_unresolved_years if int(year) != source_year})
+    except (TypeError, ValueError) as exc:
+        raise SystemExit("Reviewed handoff source preflight has invalid unresolved-year evidence.") from exc
+    if "unresolved-year-evidence" in year_gate_codes and not required_contextual_years:
+        raise SystemExit("Reviewed handoff source preflight is missing the unresolved years required by its review gate.")
+
+    raw_classifications = statement_years.get("contextual_year_classifications")
+    if not isinstance(raw_classifications, list):
+        raise SystemExit("Reviewed handoff statement-year resolution must include contextual-year classifications.")
+    actual_contextual_years: list[int] = []
+    for item in raw_classifications:
+        if not isinstance(item, dict):
+            raise SystemExit("Reviewed handoff contextual-year classifications must contain objects.")
+        if item.get("classification") != "user-confirmed-contextual-prior-year" or item.get("source") != "user-review":
+            raise SystemExit("Reviewed handoff contextual-year classifications must retain the user-confirmed contextual classification.")
+        try:
+            year = int(item.get("year"))
+        except (TypeError, ValueError) as exc:
+            raise SystemExit("Reviewed handoff contextual-year classification contains an invalid year.") from exc
+        actual_contextual_years.append(year)
+    if len(set(actual_contextual_years)) != len(actual_contextual_years):
+        raise SystemExit("Reviewed handoff contextual-year classifications must not contain duplicate years.")
+    if sorted(actual_contextual_years) != required_contextual_years:
+        raise SystemExit("Reviewed handoff contextual-year classifications do not exactly match the source preflight evidence.")
+
+
 def validate_reviewed_interest_resolutions(
     handoff: dict, source: dict, source_sha256: str, expected_institution: str
 ) -> dict:
@@ -1193,22 +1249,7 @@ def validate_reviewed_interest_resolutions(
 
     year_gate_codes = {"mixed-years", "unresolved-year-evidence", "unknown-year-coverage"} & gate_codes
     statement_years = reviewed_resolution_object(raw_resolutions, "statement_years")
-    if "mixed-years" in year_gate_codes:
-        raise SystemExit("Reviewed handoff cannot resolve mixed-years; rerun preflight with the corrected tax year or statement set.")
-    if year_gate_codes:
-        raw_years = statement_years.get("confirmed_years")
-        if statement_years.get("status") != "user-confirmed" or not isinstance(raw_years, list):
-            raise SystemExit("Reviewed handoff does not contain a user-confirmed statement-year resolution.")
-        try:
-            confirmed_years = sorted({int(year) for year in raw_years})
-        except (TypeError, ValueError) as exc:
-            raise SystemExit("Reviewed handoff statement-year resolution contains an invalid year.") from exc
-        if confirmed_years != [source_year]:
-            raise SystemExit(
-                f"Reviewed handoff statement-year resolution must confirm only the extraction year {source_year}."
-            )
-    elif statement_years.get("status") != "not-required":
-        raise SystemExit("Reviewed handoff has an unexpected statement-year resolution.")
+    validate_reviewed_statement_year_resolution(statement_years, source, year_gate_codes, source_year)
 
     currency_gate_codes = {"ambiguous-dollar", "unknown-currency"} & gate_codes
     currency = reviewed_resolution_object(raw_resolutions, "currency")
