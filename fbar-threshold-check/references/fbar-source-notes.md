@@ -29,7 +29,7 @@ This skill reports both the day-by-day aggregate view and the FinCEN maximum-val
 
 ## FX Dependency Note
 
-This skill consumes FX proof workpapers from two sibling skills and must not duplicate FX sourcing:
+This skill consumes FX proof workpapers only from its `get-year-end-fx-rate` companion skill and must not duplicate FX sourcing:
 
 - `get-year-end-fx-rate`: produces Treasury/Fiscal Data or verified manual year-end rates - the FBAR-style conversion basis - and is accepted by construction.
 
