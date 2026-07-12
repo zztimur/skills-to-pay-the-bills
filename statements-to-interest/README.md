@@ -34,19 +34,33 @@ Conditional FX dependency: `get-yearly-fx-rate`. Use it when the packet needs a 
 
 If no published annual workpaper is available, ask for a confirmed user/preparer custom rate. A custom-rate source is optional; when absent, the PDF discloses that no independent source was provided and adds a preparer-review warning.
 
+## Runtime
+
+This package needs Python with `pdfplumber`, `reportlab`, and `pypdf`.
+
+In Codex desktop, call `load_workspace_dependencies` and set `PYTHON` to the Python executable it returns before running any commands:
+
+```bash
+# Use the path returned by load_workspace_dependencies; do not hard-code a cache path.
+PYTHON="<bundled Python path returned by load_workspace_dependencies>"
+"$PYTHON" statements-to-interest/scripts/statements_to_interest.py dependency-check
+```
+
+Outside Codex, set `PYTHON` to an environment where those three packages are installed. Use `"$PYTHON"` in the commands below.
+
 ## Common Commands
 
 Check runtime and dependency health:
 
 ```bash
-python statements-to-interest/scripts/statements_to_interest.py self-test
-python statements-to-interest/scripts/statements_to_interest.py dependency-check
+"$PYTHON" statements-to-interest/scripts/statements_to_interest.py self-test
+"$PYTHON" statements-to-interest/scripts/statements_to_interest.py dependency-check
 ```
 
 Preflight the statement set:
 
 ```bash
-python3 statement-intake-preflight/scripts/statement_intake_preflight.py preflight \
+"$PYTHON" statement-intake-preflight/scripts/statement_intake_preflight.py preflight \
   --pdf "statement-01.pdf" "statement-02.pdf" \
   --tax-year 2025 \
   --scope one-institution \
@@ -56,7 +70,7 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py preflig
 Extract statement rows:
 
 ```bash
-python statements-to-interest/scripts/statements_to_interest.py extract \
+"$PYTHON" statements-to-interest/scripts/statements_to_interest.py extract \
   --pdf "statement-01.pdf" "statement-02.pdf" \
   --tax-year 2025 \
   --institution "Example Bank" \
@@ -67,7 +81,7 @@ python statements-to-interest/scripts/statements_to_interest.py extract \
 Generate a USD packet:
 
 ```bash
-python statements-to-interest/scripts/statements_to_interest.py report \
+"$PYTHON" statements-to-interest/scripts/statements_to_interest.py report \
   --input "work/example-bank-2025-interest-analysis.json" \
   --out "outputs/example-bank-2025-interest-support-packet.pdf"
 ```
@@ -75,7 +89,7 @@ python statements-to-interest/scripts/statements_to_interest.py report \
 Resolve ambiguous excluded candidates before reporting:
 
 ```bash
-python statements-to-interest/scripts/statements_to_interest.py resolve-exclusions \
+"$PYTHON" statements-to-interest/scripts/statements_to_interest.py resolve-exclusions \
   --input "work/example-bank-2025-interest-analysis.json" \
   --all-excluded-not-interest-confirmed \
   --reviewer-note "Preparer reviewed every excluded candidate and found no additional interest income." \
@@ -93,10 +107,10 @@ For non-USD rows, follow the detailed FX workflow in `references/workflow.md`: g
 Before shipping or reinstalling the skill:
 
 ```bash
-python -S skill-forge/scripts/inspect_skill_package.py statements-to-interest --json --strict
+"$PYTHON" -S skill-forge/scripts/inspect_skill_package.py statements-to-interest --json --strict
 claude plugin validate --strict statements-to-interest
-python statements-to-interest/scripts/statements_to_interest.py self-test
-python statements-to-interest/scripts/statements_to_interest.py smoke-test
+"$PYTHON" statements-to-interest/scripts/statements_to_interest.py self-test
+"$PYTHON" statements-to-interest/scripts/statements_to_interest.py smoke-test
 ```
 
 Sync a cache-free package, then verify source/installed parity:
