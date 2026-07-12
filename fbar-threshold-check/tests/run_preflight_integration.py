@@ -82,9 +82,11 @@ def preflight(work: Path, tag: str, pdfs: list[Path]) -> tuple[subprocess.Comple
     return process, output, read_json(output)
 
 
-def extract(work: Path, tag: str, pdfs: list[Path], handoff: Path) -> tuple[subprocess.CompletedProcess[str], Path, dict[str, object] | None]:
+def extract(
+    work: Path, tag: str, pdfs: list[Path], handoff: Path, *, account_currency: str | None = None
+) -> tuple[subprocess.CompletedProcess[str], Path, dict[str, object] | None]:
     output = work / f"{tag}-account.json"
-    process = run([
+    command = [
         sys.executable,
         str(FBAR_SCRIPT),
         "extract-account",
@@ -96,12 +98,17 @@ def extract(work: Path, tag: str, pdfs: list[Path], handoff: Path) -> tuple[subp
         str(handoff),
         "--out",
         str(output),
-    ])
+    ]
+    if account_currency:
+        command.extend(["--account-currency", account_currency])
+    process = run(command)
     return process, output, read_json(output)
 
 
-def create_reviewed_handoff(work: Path, source: Path, data: dict[str, object]) -> tuple[subprocess.CompletedProcess[str], Path, dict[str, object] | None]:
-    output = work / "reviewed-handoff.json"
+def create_reviewed_handoff(
+    work: Path, tag: str, source: Path, data: dict[str, object]
+) -> tuple[subprocess.CompletedProcess[str], Path, dict[str, object] | None]:
+    output = work / f"{tag}-reviewed-handoff.json"
     gates = data.get("review_gates")
     gate_codes = [str(gate.get("code")) for gate in gates if isinstance(gate, dict) and gate.get("code")] if isinstance(gates, list) else []
     command = [sys.executable, str(PREFLIGHT_SCRIPT), "review-handoff", "--input", str(source)]
@@ -194,7 +201,6 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
     reviewed_pdf = work / "reviewed.pdf"
     make_pdf(reviewed_pdf, [
         "Example Bank Monthly Statement",
-        "Account Number: 44445555",  # privacy-gate: allow (synthetic account fixture)
         "Statement period April 1 2025 to April 30 2025",
         "2025-04-01 Closing balance $9,999.00",
         "2025-04-30 Closing balance $10,001.00",
@@ -209,22 +215,146 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         raw_review_process.stderr.strip(),
     )
 
-    handoff_process, handoff_path, handoff_data = create_reviewed_handoff(work, review_path, review_data or {})
+    handoff_process, handoff_path, handoff_data = create_reviewed_handoff(work, "review", review_path, review_data or {})
     reviewed_process, _reviewed_path, reviewed_data = extract(work, "reviewed", [reviewed_pdf], handoff_path)
     handoff_status = reviewed_data.get("preflight", {}).get("status") if isinstance(reviewed_data, dict) and isinstance(reviewed_data.get("preflight"), dict) else None
+    reviewed_account = reviewed_data.get("account", {}) if isinstance(reviewed_data, dict) and isinstance(reviewed_data.get("account"), dict) else {}
+    reviewed_profile = reviewed_data.get("preflight", {}) if isinstance(reviewed_data, dict) and isinstance(reviewed_data.get("preflight"), dict) else {}
+    reviewed_resolutions = reviewed_profile.get("user_resolutions") if isinstance(reviewed_profile, dict) else None
     check(
-        "REVIEW-2 a reviewed handoff from the real preflight proceeds to extraction",
+        "REVIEW-2 reviewed currency and scope resolutions control extraction and are retained",
         handoff_process.returncode == 0 and handoff_data is not None and reviewed_process.returncode == 0
-        and handoff_status == "reviewed-for-domain-extraction",
+        and handoff_status == "reviewed-for-domain-extraction" and isinstance(reviewed_account, dict)
+        and reviewed_account.get("currency") == "COP" and reviewed_account.get("account_id") == "reviewed-one-account-2025"
+        and reviewed_account.get("account_id_source") == "reviewed-one-account-local-label"
+        and isinstance(reviewed_resolutions, dict)
+        and isinstance(reviewed_resolutions.get("currency"), dict)
+        and reviewed_resolutions["currency"].get("code") == "COP",
         reviewed_process.stderr.strip(),
+    )
+
+    currency_conflict_process, _currency_conflict_path, _currency_conflict_data = extract(
+        work, "reviewed-currency-conflict", [reviewed_pdf], handoff_path, account_currency="USD"
+    )
+    check(
+        "REVIEW-3 a CLI currency cannot override the reviewed handoff resolution",
+        currency_conflict_process.returncode == 2 and "conflicts with the user-confirmed currency" in currency_conflict_process.stderr,
+        currency_conflict_process.stderr.strip(),
+    )
+
+    tampered_handoff = work / "review-tampered-resolution.json"
+    tampered_data = read_json(handoff_path) or {}
+    tampered_resolutions = tampered_data.get("user_resolutions") if isinstance(tampered_data, dict) else None
+    if isinstance(tampered_resolutions, dict):
+        tampered_resolutions["source_preflight_sha256"] = "0" * 64
+    tampered_handoff.write_text(json.dumps(tampered_data, indent=2) + "\n", encoding="utf-8")
+    tampered_process, _tampered_path, _tampered_data = extract(work, "reviewed-tampered", [reviewed_pdf], tampered_handoff)
+    check(
+        "REVIEW-4 a source-unbound reviewed resolution is rejected before parsing",
+        tampered_process.returncode == 2 and "not bound to the reviewed source preflight" in tampered_process.stderr,
+        tampered_process.stderr.strip(),
+    )
+
+    invalid_currency_handoff = work / "review-invalid-currency.json"
+    invalid_currency_data = read_json(handoff_path) or {}
+    invalid_currency_resolutions = invalid_currency_data.get("user_resolutions") if isinstance(invalid_currency_data, dict) else None
+    invalid_currency = invalid_currency_resolutions.get("currency") if isinstance(invalid_currency_resolutions, dict) else None
+    if isinstance(invalid_currency, dict):
+        invalid_currency["code"] = "ZZZ"
+    invalid_currency_handoff.write_text(json.dumps(invalid_currency_data, indent=2) + "\n", encoding="utf-8")
+    invalid_currency_process, _invalid_currency_path, _invalid_currency_data = extract(
+        work, "reviewed-invalid-currency", [reviewed_pdf], invalid_currency_handoff
+    )
+    check(
+        "REVIEW-5 a reviewed currency must be a supported ISO code",
+        invalid_currency_process.returncode == 2 and "supported ISO currency code" in invalid_currency_process.stderr,
+        invalid_currency_process.stderr.strip(),
     )
 
     review_path.write_text(review_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     stale_handoff_process, _stale_path, _stale_data = extract(work, "stale-handoff", [reviewed_pdf], handoff_path)
     check(
-        "REVIEW-3 a reviewed handoff rejects a source preflight changed after review",
+        "REVIEW-6 a reviewed handoff rejects a source preflight changed after review",
         stale_handoff_process.returncode == 2 and "changed after review" in stale_handoff_process.stderr,
         stale_handoff_process.stderr.strip(),
+    )
+
+    missing_midyear = [work / "missing-mid-q1.pdf", work / "missing-mid-q3.pdf", work / "missing-mid-q4.pdf"]
+    make_pdf(missing_midyear[0], [
+        "Example Bank Quarterly Statement",
+        "Account Number: 55556666",  # privacy-gate: allow (synthetic account fixture)
+        "Statement period January 1 2025 to March 31 2025",
+        "Currency USD",
+        "2025-01-01 Closing balance 9,500.00 USD",
+        "2025-03-31 Closing balance 9,500.00 USD",
+    ])
+    make_pdf(missing_midyear[1], [
+        "Example Bank Quarterly Statement",
+        "Account Number: 55556666",  # privacy-gate: allow (synthetic account fixture)
+        "Statement period July 1 2025 to September 30 2025",
+        "Currency USD",
+        "2025-07-01 Closing balance 9,600.00 USD",
+        "2025-09-30 Closing balance 9,600.00 USD",
+    ])
+    make_pdf(missing_midyear[2], [
+        "Example Bank Quarterly Statement",
+        "Account Number: 55556666",  # privacy-gate: allow (synthetic account fixture)
+        "Statement period October 1 2025 to December 31 2025",
+        "Currency USD",
+        "2025-10-01 Closing balance 9,700.00 USD",
+        "2025-12-31 Closing balance 9,700.00 USD",
+    ])
+    mid_process, mid_path, mid_data = preflight(work, "missing-midyear", missing_midyear)
+    mid_handoff_process, mid_handoff_path, _mid_handoff_data = create_reviewed_handoff(
+        work, "missing-midyear", mid_path, mid_data or {}
+    )
+    mid_extract_process, _mid_account_path, mid_account = extract(work, "missing-midyear", missing_midyear, mid_handoff_path)
+    mid_coverage = mid_account.get("coverage", {}) if isinstance(mid_account, dict) and isinstance(mid_account.get("coverage"), dict) else {}
+    mid_warnings = mid_account.get("warnings", []) if isinstance(mid_account, dict) else []
+    mid_preflight = mid_account.get("preflight", {}) if isinstance(mid_account, dict) and isinstance(mid_account.get("preflight"), dict) else {}
+    mid_hints = mid_preflight.get("coverage_hints", {}) if isinstance(mid_preflight, dict) else {}
+    mid_gaps = mid_coverage.get("carry_gaps", []) if isinstance(mid_coverage, dict) else []
+    check(
+        "COVERAGE-1 an omitted mid-year statement stays review-required with source and carry-gap evidence",
+        mid_process.returncode == 0 and mid_handoff_process.returncode == 0 and mid_extract_process.returncode == 0
+        and isinstance(mid_data, dict) and any(isinstance(gate, dict) and gate.get("code") == "possible-missing-statement-period" for gate in mid_data.get("review_gates", []))
+        and isinstance(mid_hints, dict) and isinstance(mid_hints.get("period_coverage_review"), dict)
+        and isinstance(mid_gaps, list) and any(isinstance(gap, dict) and int(gap.get("days", 0)) > 40 for gap in mid_gaps)
+        and isinstance(mid_warnings, list) and any("possible calendar coverage gap" in str(warning) for warning in mid_warnings)
+        and isinstance(mid_account, dict) and mid_account.get("status") == "extracted-review-required" and "daily_threshold" not in mid_account,
+        mid_extract_process.stderr.strip(),
+    )
+
+    missing_year_end = [work / "missing-year-end-q1.pdf", work / "missing-year-end-q2.pdf", work / "missing-year-end-q3.pdf"]
+    for path, start, end, first_date, last_date in (
+        (missing_year_end[0], "January 1", "March 31", "2025-01-01", "2025-03-31"),
+        (missing_year_end[1], "April 1", "June 30", "2025-04-01", "2025-06-30"),
+        (missing_year_end[2], "July 1", "September 30", "2025-07-01", "2025-09-30"),
+    ):
+        make_pdf(path, [
+            "Example Bank Quarterly Statement",
+            "Account Number: 77778888",  # privacy-gate: allow (synthetic account fixture)
+            f"Statement period {start} 2025 to {end} 2025",
+            "Currency USD",
+            f"{first_date} Closing balance 9,800.00 USD",
+            f"{last_date} Closing balance 9,800.00 USD",
+        ])
+    end_process, end_path, end_data = preflight(work, "missing-year-end", missing_year_end)
+    end_handoff_process, end_handoff_path, _end_handoff_data = create_reviewed_handoff(
+        work, "missing-year-end", end_path, end_data or {}
+    )
+    end_extract_process, _end_account_path, end_account = extract(work, "missing-year-end", missing_year_end, end_handoff_path)
+    end_coverage = end_account.get("coverage", {}) if isinstance(end_account, dict) and isinstance(end_account.get("coverage"), dict) else {}
+    end_warnings = end_account.get("warnings", []) if isinstance(end_account, dict) else []
+    check(
+        "COVERAGE-2 an omitted year-end statement retains trailing-gap warnings and no daily answer",
+        end_process.returncode == 0 and end_handoff_process.returncode == 0 and end_extract_process.returncode == 0
+        and isinstance(end_data, dict) and any(isinstance(gate, dict) and gate.get("code") == "possible-missing-statement-period" for gate in end_data.get("review_gates", []))
+        and isinstance(end_coverage, dict) and int(end_coverage.get("trailing_carry_days", 0)) > 40
+        and end_coverage.get("carry_gap_review_required") is True
+        and isinstance(end_warnings, list) and any("final" in str(warning) and "carried forward" in str(warning) for warning in end_warnings)
+        and isinstance(end_account, dict) and end_account.get("status") == "extracted-review-required" and "daily_threshold" not in end_account,
+        end_extract_process.stderr.strip(),
     )
 
 

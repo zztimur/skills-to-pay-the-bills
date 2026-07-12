@@ -64,7 +64,7 @@ python3 "<preflight-root>/scripts/statement_intake_preflight.py" review-handoff 
   --out "work/statement-preflight-reviewed.json"
 ```
 
-Repeat `--accept-gate` for every code in `review_gates`. The handoff records the original preflight path and SHA-256 plus the accepted gate codes. `extract-account` rejects a raw `review-required` JSON, an incomplete reviewed handoff, a handoff with a structural gate, or a handoff whose source preflight changed after review.
+Repeat `--accept-gate` for every code in `review_gates`. The handoff records the original preflight path and SHA-256 plus the accepted gate codes. For ambiguous/unknown currency, account, or year gates it also records source-bound structured reviewer resolutions. `extract-account` rejects a raw `review-required` JSON, an incomplete reviewed handoff, missing/mismatched required resolutions, a handoff with a structural gate, or a handoff whose source preflight changed after review.
 
 The preflight also pins the exact statement sequence with a positive byte size and SHA-256 fingerprint for each PDF. `extract-account` refuses a missing, legacy-unfingerprinted, duplicated, reordered, or changed file. It checks the fingerprint both before parsing and immediately after parsing; a source change requires a fresh preflight and, if applicable, a new reviewed handoff.
 
@@ -86,8 +86,8 @@ Optional flags:
 
 - `--account-id`: stable local identifier when the user has one.
 - `--institution`: institution label when visible in the statement set or known from the user.
-- `--account-currency`: ISO code when the statement text cannot safely infer it.
-- `--preflight-json`: required ready JSON or reviewed-handoff JSON from `statement-intake-preflight`; the script rejects absent, review-required, stale, mismatched, incomplete, or file-identity-invalid handoffs.
+- `--account-currency`: ISO code when a clean statement set cannot safely infer it. It cannot override a user-confirmed currency from a reviewed handoff; that handoff code is used instead of inferring a bare `$`.
+- `--preflight-json`: required ready JSON or reviewed-handoff JSON from `statement-intake-preflight`; the script rejects absent, review-required, stale, mismatched, incomplete, resolution-invalid, or file-identity-invalid handoffs.
 - `--csv`: review CSV output path.
 
 The script writes:
@@ -101,7 +101,7 @@ The review CSV has one row per day with native balance, USD balance placeholder,
 
 Open the JSON and CSV before confirming. Confirm these fields:
 
-- `preflight` summary, if present, matches the reviewed intake artifact.
+- `preflight` summary, if present, matches the reviewed intake artifact. For reviewed handoffs, confirm its `user_resolutions`, `coverage_hints`, and `verified_statement_files` remain present and source-bound.
 - `account.account_id`, `institution`, and `account.currency` are usable for the confirmed ledger; if not, return to preflight or rerun extraction with an explicit override instead of adjudicating intake ad hoc here.
 - `statement_files` are the expected PDFs; the `preflight.verified_statement_files` summary records the matched ordered paths, byte sizes, and SHA-256 fingerprints.
 - `coverage.complete_year` is true.
@@ -115,6 +115,7 @@ Stop for user review when any of these appear:
 
 - Missing opening balance or missing days.
 - Carry-forward gaps longer than 40 days (`coverage.carry_gaps`), including statements that stop before December 31.
+- A `possible-missing-statement-period` preflight warning, including omitted mid-year or year-end statement periods. The extracted ledger is review-required and does not contain a daily threshold answer; long carry gaps still block confirmation until explicitly accepted.
 - Ambiguous thousands/decimal separators flagged in row notes or warnings.
 - Materially different same-day balance candidates flagged in row notes.
 - Low-confidence candidate rows.
