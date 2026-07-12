@@ -1,15 +1,13 @@
 # Changelog
 
-All notable **repository-wide** changes are documented here — cross-cutting work
-that touches shared infrastructure or more than one skill. This is separate from
-each skill's own version: every skill package versions independently in its own
-`.claude-plugin/plugin.json` and is released/tagged on its own schedule (see the
-root [README](README.md)'s "Releasing A Skill" section). Do not duplicate a
-single skill's routine release here; log an entry only when the change is
-repo-wide or spans more than one package.
+All notable published changes are documented here. This is the release history
+for the repository as a collection: a release can contain one skill update,
+shared-infrastructure work, or a wider milestone. Individual package manifests
+may retain their own version metadata, but they do not have separate tags,
+changelogs, or GitHub Releases.
 
-The current repo version lives in [`VERSION`](VERSION) and is tagged
-`repo-vX.Y.Z`.
+The current repository version lives in [`VERSION`](VERSION), is tagged
+`vX.Y.Z`, and has one matching GitHub Release.
 
 ## [1.3.3] - 2026-07-11
 
@@ -64,15 +62,13 @@ new. Snapshot of the repo as of this point, following:
 
 ## Versioning Policy
 
-Bump the repo version and add an entry here when a change:
+Bump the root version and add an entry here for every published repository
+release, including a release that contains only one skill change. Do not bump
+the version for ordinary edits or commits that have not been deliberately
+released yet.
 
-- adds, removes, or substantially reworks a skill package;
-- changes shared cross-cutting infrastructure (CI, git hooks, `workpaper-kit`,
-  `privacy-gate` rules, repo-wide conventions) in a way that affects more than
-  one package;
-- is a milestone worth remembering independent of any single skill's own
-  release.
-
-Do not bump for a single skill's routine release (already tracked by its own
-`plugin.json` version and `<skill-folder>-vX.Y.Z` tag), a doc/typo fix scoped to
-one package, or a CI tweak with no behavior change.
+Use `scripts/release-repo.sh` to prepare and publish a release. It makes the
+root version bump, generates this entry, runs the release checks, creates the
+global `vX.Y.Z` tag, and pushes it for the GitHub Release workflow. Skill
+manifests are package metadata only; do not create per-skill tags, changelogs,
+or GitHub Releases.

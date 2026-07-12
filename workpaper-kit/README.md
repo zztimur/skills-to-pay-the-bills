@@ -41,10 +41,10 @@ remain usable with Python's standard library alone, while
 
 ## Versioning
 
-`workpaper-kit` carries its own `.claude-plugin/plugin.json` version so shared
-engine changes can be reviewed and released independently. It is still internal
-plumbing, not a skill. Use `scripts/release-diff.sh workpaper-kit` to review a
-bump.
+`workpaper-kit` retains `.claude-plugin/plugin.json` package metadata, but it
+does not ship independently. Shared-engine changes are reviewed and released in
+the same global repository release as every other change. It is still internal
+plumbing, not a skill; use `scripts/release-diff.sh` to review the next release.
 
 ## Interface
 
