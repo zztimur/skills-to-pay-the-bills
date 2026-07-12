@@ -108,6 +108,14 @@ def create_reviewed_handoff(work: Path, source: Path, data: dict[str, object]) -
     for code in gate_codes:
         command.extend(["--accept-gate", code])
     command.extend(["--user-review-confirmed", "--out", str(output)])
+    # Supply only the structured resolutions requested by the generated
+    # preflight. The handoff keeps these separate from its raw evidence.
+    if {"ambiguous-dollar", "unknown-currency"} & set(gate_codes):
+        command.extend(["--confirm-currency", "COP"])
+    if {"unknown-account", "possible-mixed-accounts"} & set(gate_codes):
+        command.append("--confirm-one-account")
+    if {"unresolved-year-evidence", "unknown-year-coverage"} & set(gate_codes):
+        command.extend(["--confirm-statement-year", "2025"])
     process = run(command)
     return process, output, read_json(output)
 
@@ -118,28 +126,28 @@ if not PREFLIGHT_SCRIPT.is_file():
 
 with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as temporary:
     work = Path(temporary)
-    january = work / "january.pdf"
-    february = work / "february.pdf"
+    january = work / "jan-sep.pdf"
+    february = work / "oct-dec.pdf"
     make_pdf(january, [
-        "Example Bank Monthly Statement",
+        "Example Bank Statement",
         "Account Number: 12345678",  # privacy-gate: allow (synthetic account fixture)
-        "Statement period January 1 2025 to January 31 2025",
+        "Statement period January 1 2025 to September 30 2025",
         "Currency USD",
         "2025-01-01 Closing balance 9,999.00 USD",
-        "2025-01-31 Closing balance 10,001.00 USD",
+        "2025-09-30 Closing balance 10,001.00 USD",
     ])
     make_pdf(february, [
-        "Example Bank Monthly Statement",
+        "Example Bank Statement",
         "Account Number: 12345678",  # privacy-gate: allow (synthetic account fixture)
-        "Statement period February 1 2025 to February 28 2025",
+        "Statement period October 1 2025 to December 31 2025",
         "Currency USD",
-        "2025-02-01 Closing balance 10,002.00 USD",
-        "2025-02-28 Closing balance 10,003.00 USD",
+        "2025-10-01 Closing balance 10,002.00 USD",
+        "2025-12-31 Closing balance 10,003.00 USD",
     ])
 
     ready_process, ready_path, ready_data = preflight(work, "ready", [january, february])
     ready = ready_process.returncode == 0 and ready_data is not None and ready_data.get("status") == "ready-for-domain-extraction"
-    check("READY-1 two real statement PDFs produce a clean preflight", ready, ready_process.stderr.strip())
+    check("READY-1 full-year real statement PDFs produce a clean preflight", ready, ready_process.stderr.strip())
 
     extract_process, _account_path, account_data = extract(work, "ready", [january, february], ready_path)
     verified = account_data.get("preflight", {}).get("verified_statement_files", []) if isinstance(account_data, dict) and isinstance(account_data.get("preflight"), dict) else []
