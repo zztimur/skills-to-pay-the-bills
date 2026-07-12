@@ -49,7 +49,8 @@ Open the JSON and CSV before continuing. Confirm:
 - `statement_files` are the exact PDFs expected for the downstream run, in that order. Each carries `content_bytes` and `content_sha256`, so a downstream run can reject substituted, reordered, or duplicated files.
 - `tax_year` and `scope` match the intended downstream workflow.
 - The files have enough machine-readable text.
-- `profile.statement_titles` and `coverage_hints.detected_periods` look like the requested year.
+- `coverage_hints.statement_period_years`, source-referenced `period_intervals`, and any `contextual_date_evidence` support the requested year. A prior-year opening balance is contextual evidence, not automatically a second statement period.
+- `coverage_hints.period_coverage_review` has no possible internal, leading, or trailing statement-period gap. Its period labels are intake hints only; they do not prove complete transaction or balance coverage.
 - `currency.code` is usable, or unresolved currency is explicitly handled downstream.
 - `account_hints` describe one account when scope is `one-account`.
 - `institution_hints` describe one institution when scope is `one-institution`.
@@ -71,8 +72,10 @@ Complete gate catalog:
 | `low-text-pdf` | stop | Machine-readable text is below threshold (scanned/image-only; out of scope for v1). |
 | `duplicate-input` | review | The same statement file (same resolved path) was supplied more than once. |
 | `duplicate-content` | review | Byte-identical statements were supplied under different names. |
-| `mixed-years` | review | A detected statement year falls outside the requested tax year. Copyright/legal years are excluded even with an intervening month, a range, or a comma/space-separated list (`© 2019`, `© May 2019`, `© 2019-2024`, `© 2019, 2020, 2021`), as are bare or month-only heritage/account-open years (`since 1904`, `Customer since March 2015`); a period year carrying a numeric date (`since 2025-04-01`) is kept. |
+| `mixed-years` | review | A detected statement-period year falls outside the requested tax year. Copyright/legal years are excluded even with an intervening month, a range, or a comma/space-separated list (`© 2019`, `© May 2019`, `© 2019-2024`, `© 2019, 2020, 2021`), as are bare or month-only heritage/account-open years (`since 1904`, `Customer since March 2015`); a period year carrying a numeric date (`since 2025-04-01`) is kept. A labelled opening/prior balance is recorded separately as contextual evidence. |
+| `unresolved-year-evidence` | review | An out-of-period year could not be classified as a statement period or labelled contextual evidence. Review the source before downstream extraction. |
 | `unknown-year-coverage` | review | No statement year was detected; verify the periods manually. |
+| `possible-missing-statement-period` | review | Two or more source-referenced period labels leave an internal, leading, or trailing gap in the requested year. Obtain missing statements or review the source periods. |
 | `ambiguous-dollar` | review | `$` appears with no unambiguous ISO code or currency name. |
 | `unknown-currency` | review | No account currency marker was found. |
 | `mixed-currencies` | review | More than one currency was confirmed. |
@@ -115,7 +118,7 @@ python3 "<package-root>/scripts/statement_intake_preflight.py" review-handoff \
 
 Repeat `--accept-gate` for every listed review code. The handoff preserves the original preflight path, SHA-256, scope, tax year, PDF metadata, gate list, and explicit acceptance record. FBAR extraction verifies all of those fields, then rechecks the ordered PDF byte-size and SHA-256 fingerprints before and after parsing. Changed, duplicate, reordered, or legacy-unfingerprinted files require a fresh preflight (and, where applicable, a new reviewed handoff).
 
-Downstream tools should import preflight warnings and profile hints into their own JSON output, but they still own domain-specific parsing and review gates.
+Downstream tools should retain preflight warnings, profile hints, and coverage hints (including period and contextual-date evidence) in their own JSON output, but they still own domain-specific parsing and review gates.
 
 ## 6. Final Response
 
