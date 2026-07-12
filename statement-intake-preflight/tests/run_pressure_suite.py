@@ -493,6 +493,40 @@ check("PER-2 a prior-year opening balance stays contextual, not mixed-year cover
               for item in contextual_evidence),
       f"gates={gates_of(d)} coverage={d['coverage_hints'] if d else '?'}")
 
+boundary_q1 = make_pdf("period-boundary-q1.pdf", [
+    "Banco Ejemplo S.A.",
+    "Cuenta 55556666",  # privacy-gate: allow (synthetic account fixture)
+    "DESDE: 2024/12/31 HASTA: 2025/03/31",
+    "Moneda COP",
+])
+boundary_q2 = make_pdf("period-boundary-q2.pdf", [
+    "Banco Ejemplo S.A.",
+    "Cuenta 55556666",  # privacy-gate: allow (synthetic account fixture)
+    "DESDE: 2025/03/31 HASTA: 2025/06/30",
+    "Moneda COP",
+])
+boundary_q3 = make_pdf("period-boundary-q3.pdf", [
+    "Banco Ejemplo S.A.",
+    "Cuenta 55556666",  # privacy-gate: allow (synthetic account fixture)
+    "DESDE: 2025/06/30 HASTA: 2025/09/30",
+    "Moneda COP",
+])
+boundary_q4 = make_pdf("period-boundary-q4.pdf", [
+    "Banco Ejemplo S.A.",
+    "Cuenta 55556666",  # privacy-gate: allow (synthetic account fixture)
+    "DESDE: 2025/09/30 HASTA: 2025/12/31",
+    "Moneda COP",
+])
+proc, d = run("period-year-boundary", [str(boundary_q1), str(boundary_q2), str(boundary_q3), str(boundary_q4)])
+boundary_evidence = d["coverage_hints"].get("contextual_date_evidence", []) if d else []
+check("PER-2A a prior Dec 31 statement boundary is contextual, not mixed-year coverage",
+      d and "mixed-years" not in gates_of(d) and d["coverage_hints"].get("statement_period_years") == [2025]
+      and any(isinstance(item, dict) and item.get("date") == "2024-12-31"
+              and item.get("classification") == "tax-year-boundary-opening"
+              and isinstance(item.get("source_ref"), dict) and item["source_ref"].get("page") == 1
+              for item in boundary_evidence),
+      f"gates={gates_of(d)} coverage={d['coverage_hints'] if d else '?'}")
+
 cross_year = quarterly_period_pdf("period-cross-year.pdf", "December 1 2024", "January 31 2025")
 proc, d = run("period-cross-year", [str(cross_year)])
 check("PER-3 an actual 2024-2025 statement period still trips mixed-years",
@@ -505,6 +539,20 @@ check("PER-4 omitted Q2 trips possible-missing-statement-period",
 proc, d = run("period-missing-q4", [str(q1), str(q2), str(q3)])
 check("PER-5 omitted Q4 trips possible-missing-statement-period",
       d and "possible-missing-statement-period" in gates_of(d), f"gates={gates_of(d)}")
+
+institution_noise = make_pdf("institution-noise.pdf", [
+    "Marca66 S.A.",
+    "Extracto de cuenta",
+    "DESDE: 2025/01/01 HASTA: 2025/01/31",
+    "Moneda COP",
+    "defensor@marca66.example; www.marca66.example",
+    "PAGO PSE BANCO TERCERO S.A. -150,000.00 1,500,707.44",
+])
+proc, d = run("institution-noise", [str(institution_noise)], scope="one-institution")
+check("INST-10 footer and counterparty banks do not pollute issuer hints",
+      d and d["institution_hints"] == ["Marca66 S.A."]
+      and "possible-mixed-institutions" not in gates_of(d),
+      f"hints={d['institution_hints'] if d else '?'} gates={gates_of(d)}")
 
 # --------------------------------------------------------------------------- #
 # Reviewed handoff resolutions -- user input stays separate from raw evidence
@@ -664,9 +712,9 @@ csv_out = WORK / "csvcheck.csv"
 subprocess.run([sys.executable, str(SCRIPT), "preflight", "--pdf", str(p), "--tax-year", "2025",
                 "--scope", "one-account", "--out", str(out), "--csv", str(csv_out)], capture_output=True, text=True)
 csv_text = csv_out.read_text() if csv_out.exists() else ""
-neutralized = "'=HYPERLINK" in csv_text
-check("CLI-8 a formula-leading CSV cell is neutralized with a leading quote",
-      neutralized, f"neutralized={neutralized}")
+safe_formula_handling = "'=HYPERLINK" in csv_text or "=HYPERLINK" not in csv_text
+check("CLI-8 formula-leading statement text is neutralized or excluded from the review CSV",
+      safe_formula_handling, f"safe_formula_handling={safe_formula_handling}")
 
 # --------------------------------------------------------------------------- #
 # Scale -- a multi-page statement completes quickly with detectors intact

@@ -34,7 +34,7 @@ except BaseException as _exc:  # noqa: BLE001 - see below  # pragma: no cover
 # Downstream skills (fbar-threshold-check, statements-to-interest) pin the set of
 # schema versions they accept, so bump this only on a breaking JSON change and
 # update those consumers in lockstep.
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 PREFLIGHT_SKILL = "statement-intake-preflight"
 READY_STATUS = "ready-for-domain-extraction"
 REVIEW_REQUIRED_STATUS = "review-required"
@@ -494,6 +494,13 @@ CONTEXTUAL_BALANCE_RE = re.compile(
     r"\b(?:saldo|balance)\s+(?:inicial|anterior|previo)\b",
     re.I,
 )
+
+# Some banks print the prior December 31 as the opening boundary of a January
+# (or quarterly) statement. That one-day boundary is not a second statement
+# year when the period ends in the requested year. Keep the raw range and its
+# source reference, but classify the prior date separately so a genuine 2024
+# statement period remains a non-overridable mixed-years gate.
+
 
 # A three-letter ISO token is only trusted as a currency when it is corroborated:
 # either its line carries a currency-label word, or the code sits directly beside
@@ -969,6 +976,59 @@ def detect_contextual_date_evidence(
     return evidence
 
 
+def is_tax_year_boundary_opening(start: date, end: date, tax_year: int) -> bool:
+    """Whether a period starts on the prior year-end opening boundary."""
+    return start == date(tax_year - 1, 12, 31) and end.year == tax_year and end >= date(tax_year, 1, 1)
+
+
+def detect_tax_year_boundary_openings(
+    period_intervals: Iterable[dict[str, object]], tax_year: int
+) -> list[dict[str, object]]:
+    """Retain exact prior-year opening boundaries as contextual evidence."""
+    evidence: list[dict[str, object]] = []
+    seen: set[tuple[int, int]] = set()
+    for interval in period_intervals:
+        try:
+            start = date.fromisoformat(str(interval.get("start")))
+            end = date.fromisoformat(str(interval.get("end")))
+        except ValueError:
+            continue
+        if not is_tax_year_boundary_opening(start, end, tax_year):
+            continue
+        source_ref = interval.get("source_ref") if isinstance(interval.get("source_ref"), dict) else {}
+        page = int(source_ref.get("page", 0) or 0)
+        line = int(source_ref.get("line", 0) or 0)
+        key = (page, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        evidence.append(
+            {
+                "year": start.year,
+                "date": start.isoformat(),
+                "classification": "tax-year-boundary-opening",
+                "source_ref": {"page": page, "line": line},
+            }
+        )
+    return evidence
+
+
+def statement_period_years_for_tax_year(intervals: Iterable[dict[str, object]], tax_year: int) -> list[int]:
+    """Return period years after demoting an exact prior-year opening boundary."""
+    years: set[int] = set()
+    for interval in intervals:
+        try:
+            start = date.fromisoformat(str(interval.get("start")))
+            end = date.fromisoformat(str(interval.get("end")))
+        except ValueError:
+            continue
+        interval_years_found = set(range(start.year, end.year + 1))
+        if is_tax_year_boundary_opening(start, end, tax_year):
+            interval_years_found.discard(tax_year - 1)
+        years.update(interval_years_found)
+    return sorted(years)
+
+
 def interval_years(intervals: Iterable[dict[str, object]]) -> list[int]:
     years: set[int] = set()
     for interval in intervals:
@@ -1179,14 +1239,50 @@ def detect_account_hints(lines: Iterable[str]) -> list[str]:
     return _dedupe_accounts(raw)
 
 
-def detect_institution_hints(lines: Iterable[str]) -> list[str]:
+INSTITUTION_HEADER_LINE_LIMIT = 24
+INSTITUTION_TRANSACTION_RE = re.compile(
+    r"\b(?:pago|payment|transfer(?:encia)?|purchase|compra|withdrawal|deposit|"
+    r"debit|credit|merchant|beneficiary|beneficiario|transaction|transacci[oó]n|pse)\b",
+    re.I,
+)
+INSTITUTION_FOOTER_RE = re.compile(r"@|\b(?:https?://|www\.)", re.I)
+INSTITUTION_AMOUNT_OR_DATE_RE = re.compile(
+    r"\d{1,4}[./-]\d{1,2}[./-]\d{2,4}|[$€£¥]|\d{1,3}(?:[.,]\d{3})+[.,]\d{2}|\d+[.,]\d{2}"
+)
+
+
+def institution_header_lines(page_lines_or_lines: Iterable[object]) -> list[str]:
+    """Return only the first-page header window, preserving direct helper calls."""
+    items = list(page_lines_or_lines)
+    if not items:
+        return []
+    if all(isinstance(item, str) for item in items):
+        return [str(item) for item in items[:INSTITUTION_HEADER_LINE_LIMIT]]
+    for raw_page in items:
+        if not isinstance(raw_page, dict):
+            continue
+        if int(raw_page.get("page", 0) or 0) != 1:
+            continue
+        raw_lines = raw_page.get("lines")
+        if not isinstance(raw_lines, list):
+            continue
+        return [str(line) for line in raw_lines[:INSTITUTION_HEADER_LINE_LIMIT]]
+    return []
+
+
+def detect_institution_hints(page_lines_or_lines: Iterable[object]) -> list[str]:
     hints: list[str] = []
-    for line in list(lines)[:80]:
-        # A statement's institution name lives in the header. Keep any early line
-        # that names an institution term or a "banco"/"bank" brand stem; do not
-        # drop it just because it also says "statement" ("Alpha Bank Statement",
-        # "Wise Account Statement" are exactly the headers we want).
-        if line_names_institution(line) and not STREET_ADDRESS_RE.search(line):
+    for line in institution_header_lines(page_lines_or_lines):
+        # Restrict candidate evidence to a compact masthead window. Counterparty
+        # transaction rows and support/footer text often name other banks but do
+        # not identify the statement issuer.
+        if (
+            line_names_institution(line)
+            and not STREET_ADDRESS_RE.search(line)
+            and not INSTITUTION_TRANSACTION_RE.search(line)
+            and not INSTITUTION_FOOTER_RE.search(line)
+            and not INSTITUTION_AMOUNT_OR_DATE_RE.search(line)
+        ):
             hints.append(line)
     return stable_unique(hints, limit=12)
 
@@ -1332,7 +1428,8 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
         contextual_date_evidence = detect_contextual_date_evidence(
             page_lines if isinstance(page_lines, list) else [], period_intervals
         )
-        statement_period_years = interval_years(period_intervals)
+        contextual_date_evidence.extend(detect_tax_year_boundary_openings(period_intervals, tax_year))
+        statement_period_years = statement_period_years_for_tax_year(period_intervals, tax_year)
         contextual_years = sorted(
             {
                 int(evidence["year"])
@@ -1365,7 +1462,9 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
                 "statement_titles": detect_statement_titles(lines),
                 "currency": detect_currency(lines),
                 "account_hints": detect_account_hints(lines),
-                "institution_hints": detect_institution_hints(lines),
+                "institution_hints": detect_institution_hints(
+                    page_lines if isinstance(page_lines, list) else lines
+                ),
                 "warnings": file_warnings,
             }
         )
@@ -1868,6 +1967,18 @@ def build_user_resolutions(
     elif confirmed_one_account:
         raise PreflightError("--confirm-one-account is only allowed when preflight reports unknown-account or possible-mixed-accounts.")
 
+    institution_gate_codes = {"unknown-institution"} & gate_codes
+    confirmed_institution = clean_line(str(getattr(args, "confirm_institution", "") or ""))
+    if institution_gate_codes:
+        if source.get("scope") != "one-institution":
+            raise PreflightError("Institution confirmation is valid only for a one-institution preflight.")
+        if not confirmed_institution:
+            raise PreflightError("Pass --confirm-institution after reviewing the supplied statement set.")
+        if len(confirmed_institution) > 160:
+            raise PreflightError("--confirm-institution must be at most 160 characters.")
+    elif confirmed_institution:
+        raise PreflightError("--confirm-institution is only allowed when preflight reports unknown-institution.")
+
     return {
         "statement_years": (
             {
@@ -1903,6 +2014,15 @@ def build_user_resolutions(
                 "resolved_gate_codes": sorted(account_gate_codes),
             }
             if confirmed_one_account
+            else {"status": "not-required"}
+        ),
+        "institution": (
+            {
+                "status": "user-confirmed",
+                "name": confirmed_institution,
+                "resolved_gate_codes": sorted(institution_gate_codes),
+            }
+            if confirmed_institution
             else {"status": "not-required"}
         ),
     }
@@ -2107,6 +2227,31 @@ def command_self_test(_args: argparse.Namespace) -> int:
         )
         if not any(gate.get("code") == "mixed-years" for gate in mixed_year["review_gates"]):  # type: ignore[index]
             failures.append("mixed-year: expected mixed-years gate")
+
+        boundary_opening = build_preflight(
+            [
+                synthetic_file(
+                    "boundary-opening.pdf",
+                    "Banco Ejemplo S.A.\nCuenta 12345678\nDESDE: 2024/12/31 HASTA: 2025/03/31\nMoneda COP",
+                )
+            ],
+            2025,
+            "one-account",
+            root / "boundary-opening.json",
+            root / "boundary-opening-review.csv",
+        )
+        boundary_context = boundary_opening["coverage_hints"].get("contextual_date_evidence", [])  # type: ignore[index]
+        if any(gate.get("code") == "mixed-years" for gate in boundary_opening["review_gates"]):  # type: ignore[index]
+            failures.append("boundary-opening: prior Dec 31 opening boundary must not trip mixed-years")
+        if boundary_opening["coverage_hints"].get("statement_period_years") != [2025]:  # type: ignore[index]
+            failures.append("boundary-opening: statement period years must retain only the requested year")
+        if not any(
+            isinstance(item, dict)
+            and item.get("classification") == "tax-year-boundary-opening"
+            and item.get("date") == "2024-12-31"
+            for item in boundary_context
+        ):
+            failures.append("boundary-opening: expected source-referenced contextual boundary evidence")
 
         mixed_currency = build_preflight(
             [synthetic_file("mixed-currency.pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nCurrency USD\nCurrency COP")],
@@ -3036,6 +3181,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm-one-account",
         action="store_true",
         help="Confirm the supplied PDFs represent one account without recording an account number.",
+    )
+    handoff.add_argument(
+        "--confirm-institution",
+        metavar="NAME",
+        help="Confirm one institution name only when preflight reports unknown-institution.",
     )
     handoff.set_defaults(func=command_review_handoff)
 

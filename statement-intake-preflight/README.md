@@ -29,10 +29,12 @@ human answer is needed, it uses these prompts:
 - Weak currency evidence: “We could not corroborate the account currency from the statement text. Please confirm the ISO currency code (for example, `COP`).”
 - Contextual prior-year date with unclear period coverage: “We found `2024-12-31` in the Q1 statement. It appears to be a prior-year opening balance, while the statement period appears to be 2025. Please confirm that all supplied statements cover 2025 and that this date is contextual.”
 - No extractable account identity for an FBAR account set: “We could not extract a reliable account identifier from these statements. Please confirm that the supplied PDFs represent one account. You do not need to provide the account number.”
+- No extractable issuer for an interest set: “We could not extract a reliable institution name from these statements. Please confirm the institution name shown on the statements.”
 
 If a currency is corroborated, it proceeds without asking. If a prior-year date
-is clearly an opening/prior balance and the statement-period coverage is clear,
-it explains that the date is contextual instead of asking for confirmation.
+is clearly an opening/prior balance, including an exact prior December 31
+opening boundary ending in the requested year, it explains that the date is
+contextual instead of asking for confirmation.
 
 In Codex Desktop, use the bundled workspace Python if plain `python3` does not have `pdfplumber`. The skill should check the available runtime before calling the dependency missing.
 
@@ -63,7 +65,7 @@ Ask for the skill directly:
 Use $statement-intake-preflight to check these 2025 statement PDFs before FBAR extraction.
 ```
 
-Codex should read the root `SKILL.md`, then `references/workflow.md`, run the script, and review the JSON/CSV. A clean preflight can go to the downstream skill; for FBAR, a review-required preflight needs a separate user-confirmed handoff first. FBAR extraction checks the same PDFs in the same order against the preflight byte-size and SHA-256 fingerprints.
+Codex should read the root `SKILL.md`, then `references/workflow.md`, run the script, and review the JSON/CSV. A clean preflight can go to the downstream skill; a non-structural review-required preflight needs a separate user-confirmed handoff when the downstream workflow supports its typed resolutions. FBAR extraction checks the same PDFs in the same order against the preflight byte-size and SHA-256 fingerprints.
 
 ## Use It In Claude Code
 
@@ -99,7 +101,7 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py preflig
   --out work/statement-preflight.json
 ```
 
-Then either pass a clean FBAR preflight JSON to the downstream skill, or create a reviewed handoff after explicit user confirmation of every non-structural review gate:
+Then either pass a clean preflight JSON to the downstream skill, or create a reviewed handoff after explicit user confirmation of every non-structural review gate:
 
 ```bash
 python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-handoff \
@@ -111,7 +113,7 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-
 
 Repeat `--accept-gate` for each gate. Structural `stop` gates cannot be accepted: correct the inputs and rerun preflight. For a reviewed handoff, use the new JSON path below:
 
-Add only the resolution flags required by the source gates: `--confirm-currency COP` for weak or unknown currency evidence, `--confirm-one-account` when no account identifier can be extracted, and `--confirm-statement-year 2025` (plus `--classify-contextual-year 2024` when applicable) for unresolved year coverage. Do not provide a full account number by default. <!-- privacy-gate: allow -->
+Add only the resolution flags required by the source gates: `--confirm-currency COP` for weak or unknown currency evidence, `--confirm-one-account` when no account identifier can be extracted, `--confirm-institution "Example Bank"` for an unknown one-institution issuer, and `--confirm-statement-year 2025` (plus `--classify-contextual-year 2024` when applicable) for unresolved year coverage. Do not provide a full account number by default. A genuine mixed statement year or conflicting institution evidence cannot be accepted. <!-- privacy-gate: allow -->
 
 ```bash
 python3 fbar-threshold-check/scripts/fbar_threshold_check.py extract-account \

@@ -1,6 +1,6 @@
 ---
 name: statement-intake-preflight
-description: Preflight machine-readable bank statement PDFs before FBAR or interest workflows. Use for shared text, scope, account, institution, currency, review-gate checks, and reviewed FBAR handoffs.
+description: Preflight machine-readable bank statement PDFs before FBAR or interest workflows. Use for shared text, scope, account, institution, currency, review-gate checks, and reviewed downstream handoffs.
 ---
 
 # Statement Intake Preflight
@@ -32,7 +32,7 @@ Review the JSON and CSV before passing the JSON to downstream tools. Stop for us
 
 ## Downstream Handoff
 
-Pass a `ready-for-domain-extraction` JSON directly into downstream extraction. For FBAR only, turn a `review-required` preflight with no structural `stop` gates into a separate reviewed handoff after the user confirms every review gate:
+Pass a `ready-for-domain-extraction` JSON directly into downstream extraction. For FBAR, and for interest extraction when its typed reviewed-handoff contract applies, turn a `review-required` preflight with no structural `stop` gates into a separate reviewed handoff after the user confirms every review gate:
 
 ```bash
 python3 "<package-root>/scripts/statement_intake_preflight.py" review-handoff \
@@ -44,7 +44,7 @@ python3 "<package-root>/scripts/statement_intake_preflight.py" review-handoff \
   --out work/statement-preflight-reviewed.json
 ```
 
-Repeat `--accept-gate` for every code shown in `review_gates`. Add resolution flags only when the corresponding gate requires them: `--confirm-currency ISO` for ambiguous/unknown currency, `--confirm-one-account` without supplying an account number, and `--confirm-statement-year TAX_YEAR` with any `--classify-contextual-year PRIOR_YEAR` values. The handoff records these separately from the raw preflight evidence. Never create a handoff for a structural `stop` gate or use reviewer input to override a genuine mixed statement period.
+Repeat `--accept-gate` for every code shown in `review_gates`. Add resolution flags only when the corresponding gate requires them: `--confirm-currency ISO` for ambiguous/unknown currency, `--confirm-one-account` without supplying an account number, `--confirm-institution "Name"` for an unknown one-institution issuer, and `--confirm-statement-year TAX_YEAR` with any `--classify-contextual-year PRIOR_YEAR` values. The handoff records these separately from the raw preflight evidence. Never create a handoff for a structural `stop` gate or use reviewer input to override a genuine mixed statement period or conflicting institution evidence.
 
 ```bash
 python3 "<fbar-root>/scripts/fbar_threshold_check.py" extract-account \
@@ -65,7 +65,7 @@ python3 "<interest-root>/scripts/statements_to_interest.py" extract \
   --out work/interest-analysis.json
 ```
 
-FBAR extraction rejects absent, raw review-required, stale, mismatched, or incomplete handoffs. Other downstream skills retain their own handoff contracts. Preflight warnings and gate resolutions remain visible to downstream skills, which still own domain-specific parsing and review gates.
+FBAR extraction rejects absent, raw review-required, stale, mismatched, or incomplete handoffs. `statements-to-interest` accepts a reviewed `one-institution` handoff only when its typed institution, currency, and year resolutions validate against the unchanged source preflight. Preflight warnings and gate resolutions remain visible to downstream skills, which still own domain-specific parsing and review gates.
 
 ## Runtime
 
