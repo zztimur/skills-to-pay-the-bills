@@ -28,7 +28,7 @@ The command writes:
 - JSON handoff at `--out`.
 - Review CSV beside the JSON unless `--csv` is supplied.
 
-Review the JSON and CSV before passing the JSON to downstream tools. Stop for user review when the output reports non-PDF files, missing files, scanned/image-only or low-text PDFs, duplicate inputs, mixed statement periods, unresolved out-of-period year evidence, possible missing statement periods, mixed currencies, ambiguous `$`, possible mixed accounts, possible mixed institutions, or unknown currency/account context required by the requested downstream workflow. `references/workflow.md` has the full gate catalog with severities.
+Review the JSON and CSV before passing the JSON to downstream tools. Stop for user review when the output reports non-PDF files, missing files, scanned/image-only or low-text PDFs, duplicate inputs, mixed statement periods, unresolved out-of-period year evidence, possible missing statement periods, mixed currencies, ambiguous `$`, possible mixed accounts, possible mixed institutions, or unknown currency/account context required by the requested downstream workflow. Ask only the gate-specific question in `references/workflow.md`: do not ask about a corroborated currency, a clearly contextual prior-year date, or an extracted account identifier. Never ask for a full account number by default. `references/workflow.md` has the full gate catalog, severities, and ready-to-use wording.
 
 ## Downstream Handoff
 

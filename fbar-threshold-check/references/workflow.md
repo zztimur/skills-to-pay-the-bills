@@ -17,7 +17,7 @@ Before running extraction:
 - Treat `statement-intake-preflight` as a required companion skill, not optional setup. If it is not installed or discoverable, stop before extraction and ask the user to install or run it.
 - Verify only the FBAR-specific intent here: the user wants an FBAR threshold support check, not an official filing.
 
-If preflight reports multiple accounts, multiple currencies, mixed years, low/no text, or ambiguous currency, resolve that in the preflight step before this skill extracts balances.
+If preflight reports multiple accounts, multiple currencies, mixed years, low/no text, or ambiguous currency, resolve that in the preflight step before this skill extracts balances. The preflight owns the user questions: proceed silently when it corroborates a currency, explain a clearly contextual prior-year opening balance without asking, ask for an ISO code only for weak/unknown currency evidence, and ask for one-account confirmation only when identity is not extractable. Do not request a full account number by default or ask again when `user_resolutions` already records the answer.
 
 ## 2. Source Anchors
 
