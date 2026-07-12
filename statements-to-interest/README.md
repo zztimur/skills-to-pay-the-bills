@@ -51,6 +51,8 @@ PYTHON="<bundled Python path returned by load_workspace_dependencies>"
 
 Outside Codex, set `PYTHON` to an environment where those three packages are installed. Use `"$PYTHON"` in the commands below.
 
+`dependency-check` also looks in sibling skill folders, Codex installs, and `~/.claude/skills`. For another host layout, set `STATEMENTS_TO_INTEREST_SKILL_ROOTS` to one or more skill-root directories separated by the platform path separator. This only improves dependency diagnostics; the host must still discover the companion skills.
+
 ## Common Commands
 
 Check runtime and dependency health:
