@@ -114,7 +114,7 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-
 
 Repeat `--accept-gate` for each gate. Structural `stop` gates cannot be accepted: correct the inputs and rerun preflight. For a reviewed handoff, use the new JSON path below:
 
-Add only the resolution flags required by the source gates: `--confirm-currency COP` for weak or unknown currency evidence, `--confirm-one-account` when no account identifier can be extracted, `--confirm-institution "Example Bank"` for an unknown one-institution issuer or an opt-in FBAR `one-account --require-institution` issuer gate, and `--confirm-statement-year 2025` (plus `--classify-contextual-year 2024` when applicable) for unresolved year coverage. Do not provide a full account number by default. A genuine mixed statement year or conflicting institution evidence cannot be accepted. <!-- privacy-gate: allow -->
+Add only the resolution flags required by the source gates: `--confirm-currency COP` for weak or unknown currency evidence, `--confirm-one-account` when no account identifier can be extracted, `--confirm-institution "Example Bank"` for an unknown one-institution issuer or an opt-in FBAR `one-account --require-institution` issuer gate, and `--confirm-statement-year 2025` (plus `--classify-contextual-year 2024` when applicable) for unresolved year coverage. Do not provide a full account number by default. A genuine mixed statement year cannot be accepted. Conflicting issuer evidence can be resolved only for opt-in FBAR `one-account --require-institution` intake after explicit user review; the handoff preserves the original evidence and accepted gate. <!-- privacy-gate: allow -->
 
 ```bash
 python3 fbar-threshold-check/scripts/fbar_threshold_check.py extract-account \
