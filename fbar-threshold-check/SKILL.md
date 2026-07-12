@@ -13,7 +13,7 @@ Read `references/workflow.md` before analysis. It contains the preflight handoff
 
 ## Skill Dependencies
 
-Required companion skill: `statement-intake-preflight`. Use it first for shared PDF intake with `--scope one-account`; this skill consumes the reviewed preflight JSON through `--preflight-json` and keeps only FBAR balance, FX, confirmation, and aggregation logic here.
+Required companion skill: `statement-intake-preflight`. Use it first for shared PDF intake with `--scope one-account`; `extract-account` requires either its clean preflight JSON or a separate reviewed-handoff JSON created after explicit user review. This skill keeps only FBAR balance, FX, confirmation, and aggregation logic here.
 
 FX workpaper dependency for non-USD accounts: `get-year-end-fx-rate`. Use its retained year-end `workpaper.json` for FBAR-style conversion; do not use yearly-average workpapers from `get-yearly-fx-rate`.
 
@@ -27,7 +27,17 @@ python3 "<preflight-root>/scripts/statement_intake_preflight.py" preflight \
   --out work/statement-preflight.json
 ```
 
-Then extract the account ledger and pass the reviewed preflight JSON:
+If the preflight status is `ready-for-domain-extraction`, extract the account ledger with that JSON. If it is `review-required`, stop for user review. Structural `stop` gates require corrected PDFs; otherwise create a reviewed handoff that acknowledges every review gate after the user confirms it:
+
+```bash
+python3 "<preflight-root>/scripts/statement_intake_preflight.py" review-handoff \
+  --input work/statement-preflight.json \
+  --accept-gate ambiguous-dollar \
+  --user-review-confirmed \
+  --out work/statement-preflight-reviewed.json
+```
+
+Then pass the ready preflight or reviewed handoff into extraction:
 
 ```bash
 python3 "<package-root>/scripts/fbar_threshold_check.py" extract-account \
@@ -36,6 +46,8 @@ python3 "<package-root>/scripts/fbar_threshold_check.py" extract-account \
   --preflight-json work/statement-preflight.json \
   --out work/account-1.json
 ```
+
+For a reviewed handoff, replace `work/statement-preflight.json` with `work/statement-preflight-reviewed.json`.
 
 Review the account JSON and CSV before confirming. The CSV is a row-review artifact with one row per calendar day. Shared PDF/account/year/currency intake gates belong to `statement-intake-preflight`; this skill's review starts after that handoff and focuses on balance evidence. Stop for user review when the FBAR extractor reports ambiguous amount separators, missing opening coverage, incomplete daily balance coverage, carry-forward gaps, materially different same-day balance candidates, or low-confidence balance rows. `confirm-account` refuses ledgers with carry-forward gaps longer than 40 days unless the user has explicitly reviewed `coverage.carry_gaps` and you pass `--accept-carry-forward`.
 

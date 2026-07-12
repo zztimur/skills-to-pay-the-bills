@@ -12,7 +12,7 @@ The point is not to file FinCEN Form 114 or give legal advice. The point is to t
 
 One calendar year. One account at a time. Confirm the ledger before aggregation.
 
-For each account, preflight the machine-readable statement PDFs with `statement-intake-preflight`, extract daily balances with the reviewed preflight JSON, review the generated JSON/CSV, and confirm the account only after the user has looked at the coverage and balance assumptions. For non-USD accounts, use a retained FX workpaper from `get-year-end-fx-rate`.
+For each account, preflight the machine-readable statement PDFs with `statement-intake-preflight`. A clean preflight can go straight to extraction; a review-required one needs a separate reviewed-handoff after the user accepts every non-structural gate. Then extract daily balances, review the generated JSON/CSV, and confirm the account only after the user has looked at the coverage and balance assumptions. For non-USD accounts, use a retained FX workpaper from `get-year-end-fx-rate`.
 
 Required companion skill: `statement-intake-preflight`. This skill assumes the intake JSON/CSV has already been reviewed before FBAR balance extraction starts.
 
@@ -43,7 +43,7 @@ Ask for the skill directly:
 Use $fbar-threshold-check to check whether my foreign accounts crossed the FBAR threshold for 2025.
 ```
 
-Codex should read the root `SKILL.md`, then `references/workflow.md`, run `statement-intake-preflight` for shared intake, and use this script for extraction, confirmation, and aggregation. It should pause for FBAR ledger review when the script reports coverage gaps, ambiguous balance amounts, conflicting balance candidates, or low-confidence balance rows.
+Codex should read the root `SKILL.md`, then `references/workflow.md`, run `statement-intake-preflight` for shared intake, and use this script for extraction, confirmation, and aggregation. It must stop on preflight review gates, create a reviewed handoff only after explicit user confirmation, and pause again for FBAR ledger review when the script reports coverage gaps, ambiguous balance amounts, conflicting balance candidates, or low-confidence balance rows.
 
 ## Use It In Claude Code
 
@@ -76,6 +76,18 @@ python3 fbar-threshold-check/scripts/fbar_threshold_check.py extract-account \
   --preflight-json work/statement-preflight.json \
   --out work/account-1.json
 ```
+
+If preflight reports review gates, do not run extraction yet. After the user reviews every non-structural gate, create and use a separate handoff instead:
+
+```bash
+python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-handoff \
+  --input work/statement-preflight.json \
+  --accept-gate ambiguous-dollar \
+  --user-review-confirmed \
+  --out work/statement-preflight-reviewed.json
+```
+
+Repeat `--accept-gate` for every listed gate, then replace the extraction command’s `--preflight-json` value with `work/statement-preflight-reviewed.json`.
 
 Confirm the reviewed account:
 

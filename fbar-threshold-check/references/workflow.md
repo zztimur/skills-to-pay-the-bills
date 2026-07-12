@@ -52,7 +52,19 @@ python3 "<preflight-root>/scripts/statement_intake_preflight.py" preflight \
   --out "work/statement-preflight.json"
 ```
 
-Review the preflight JSON and CSV. Stop here until preflight review gates are resolved or explicitly accepted. Do not duplicate those shared checks in this skill; preflight owns PDF readability, year/account/currency scope, ambiguous `$`, and account/institution hints. Preflight does not replace FBAR balance extraction; it only standardizes the intake handoff.
+Review the preflight JSON and CSV. A `ready-for-domain-extraction` JSON can proceed. For `review-required`, stop here: structural `stop` gates require corrected input PDFs and a new preflight; review gates require explicit user confirmation of every listed code and a separate reviewed handoff. Do not duplicate those shared checks in this skill; preflight owns PDF readability, year/account/currency scope, ambiguous `$`, and account/institution hints. Preflight does not replace FBAR balance extraction; it only standardizes the intake handoff.
+
+After the user reviews every non-structural gate, run:
+
+```bash
+python3 "<preflight-root>/scripts/statement_intake_preflight.py" review-handoff \
+  --input "work/statement-preflight.json" \
+  --accept-gate "ambiguous-dollar" \
+  --user-review-confirmed \
+  --out "work/statement-preflight-reviewed.json"
+```
+
+Repeat `--accept-gate` for every code in `review_gates`. The handoff records the original preflight path and SHA-256 plus the accepted gate codes. `extract-account` rejects a raw `review-required` JSON, an incomplete reviewed handoff, a handoff with a structural gate, or a handoff whose source preflight changed after review.
 
 ## 5. Extract One Account
 
@@ -66,12 +78,14 @@ python3 "<package-root>/scripts/fbar_threshold_check.py" extract-account \
   --out "work/account-1.json"
 ```
 
+For a reviewed handoff, replace `work/statement-preflight.json` with `work/statement-preflight-reviewed.json`.
+
 Optional flags:
 
 - `--account-id`: stable local identifier when the user has one.
 - `--institution`: institution label when visible in the statement set or known from the user.
 - `--account-currency`: ISO code when the statement text cannot safely infer it.
-- `--preflight-json`: reviewed JSON from `statement-intake-preflight`; the script rejects mismatched tax year, scope, or PDF set.
+- `--preflight-json`: required ready JSON or reviewed-handoff JSON from `statement-intake-preflight`; the script rejects absent, review-required, stale, mismatched, or incomplete handoffs.
 - `--csv`: review CSV output path.
 
 The script writes:

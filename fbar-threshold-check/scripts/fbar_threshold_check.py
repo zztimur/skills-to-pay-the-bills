@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import re
 import sys
@@ -34,6 +35,10 @@ MAX_ROUTINE_CARRY_DAYS = 40
 ACCEPTED_FX_SKILLS = ("get-year-end-fx-rate",)
 PREFLIGHT_SKILL = "statement-intake-preflight"
 PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0"}
+PREFLIGHT_READY_STATUS = "ready-for-domain-extraction"
+PREFLIGHT_REVIEW_REQUIRED_STATUS = "review-required"
+PREFLIGHT_REVIEWED_HANDOFF_STATUS = "reviewed-for-domain-extraction"
+PREFLIGHT_REVIEWED_HANDOFF_TYPE = "reviewed-handoff"
 
 CURRENCY_CODES = {
     "AED",
@@ -879,17 +884,30 @@ def normalize_preflight_path(path: str | Path) -> str:
     return str(Path(path).expanduser().resolve(strict=False))
 
 
-def load_preflight_json(path: str | None, expected_scope: str, tax_year: int, pdf_paths: list[str]) -> dict[str, object] | None:
-    if not path:
-        return None
-    preflight_path = Path(path)
+def preflight_file_sha256(path: Path) -> str:
     try:
-        data = json.loads(preflight_path.read_text(encoding="utf-8"))
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
     except OSError as exc:
-        raise FbarError(f"Could not read preflight JSON {preflight_path}: {exc}", 2) from exc
-    except json.JSONDecodeError as exc:
-        raise FbarError(f"Preflight JSON {preflight_path} is not valid JSON: {exc}", 2) from exc
+        raise FbarError(f"Could not hash preflight JSON {path}: {exc}", 2) from exc
 
+
+def read_preflight_json(path: Path, label: str) -> dict[str, object]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise FbarError(f"Could not read {label} {path}: {exc}", 2) from exc
+    except json.JSONDecodeError as exc:
+        raise FbarError(f"{label.capitalize()} {path} is not valid JSON: {exc}", 2) from exc
+    if not isinstance(data, dict):
+        raise FbarError(f"{label.capitalize()} {path} must contain a JSON object.", 2)
+    return data
+
+
+def validate_preflight_identity(data: dict[str, object], expected_scope: str, tax_year: int, pdf_paths: list[str]) -> None:
     if data.get("skill") != PREFLIGHT_SKILL:
         raise FbarError(f"Preflight JSON must come from {PREFLIGHT_SKILL}.", 2)
     if str(data.get("schema_version", "")) not in PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS:
@@ -916,12 +934,120 @@ def load_preflight_json(path: str | None, expected_scope: str, tax_year: int, pd
             f"Expected {sorted(expected)}; preflight has {sorted(actual)}.",
             2,
         )
+
+
+def validated_review_gates(data: dict[str, object]) -> list[dict[str, str]]:
+    raw_gates = data.get("review_gates")
+    if not isinstance(raw_gates, list) or not raw_gates:
+        raise FbarError("review-required preflight has no review_gates; rerun preflight.", 2)
+    gates: list[dict[str, str]] = []
+    seen_codes: set[str] = set()
+    for raw_gate in raw_gates:
+        if not isinstance(raw_gate, dict):
+            raise FbarError("Preflight review_gates must contain objects; rerun preflight.", 2)
+        code = str(raw_gate.get("code") or "").strip()
+        severity = str(raw_gate.get("severity") or "").strip()
+        message = str(raw_gate.get("message") or "").strip()
+        if not code or not severity or not message:
+            raise FbarError("Every preflight review gate needs code, severity, and message; rerun preflight.", 2)
+        if code in seen_codes:
+            raise FbarError(f"Preflight has duplicate review gate code {code!r}; rerun preflight.", 2)
+        seen_codes.add(code)
+        gates.append({"code": code, "severity": severity, "message": message})
+    return gates
+
+
+def resolve_reviewed_handoff(handoff: dict[str, object], handoff_path: Path) -> dict[str, object]:
+    if handoff.get("skill") != PREFLIGHT_SKILL:
+        raise FbarError(f"Reviewed handoff must come from {PREFLIGHT_SKILL}.", 2)
+    if str(handoff.get("schema_version", "")) not in PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS:
+        raise FbarError(f"Unsupported reviewed-handoff schema_version {handoff.get('schema_version')!r}.", 2)
+    if handoff.get("artifact_type") != PREFLIGHT_REVIEWED_HANDOFF_TYPE:
+        raise FbarError("Preflight JSON is neither a ready preflight nor a reviewed-handoff artifact.", 2)
+    if handoff.get("status") != PREFLIGHT_REVIEWED_HANDOFF_STATUS:
+        raise FbarError("Reviewed handoff is not marked reviewed-for-domain-extraction.", 2)
+
+    source_meta = handoff.get("source_preflight")
+    review = handoff.get("review")
+    if not isinstance(source_meta, dict) or not isinstance(review, dict):
+        raise FbarError("Reviewed handoff is missing source_preflight or review metadata.", 2)
+    if review.get("user_review_confirmed") is not True:
+        raise FbarError("Reviewed handoff does not record explicit user review confirmation.", 2)
+    source_path_value = source_meta.get("resolved_path") or source_meta.get("path")
+    if not source_path_value:
+        raise FbarError("Reviewed handoff has no source preflight path.", 2)
+    source_path = Path(str(source_path_value))
+    if normalize_preflight_path(source_path) == normalize_preflight_path(handoff_path):
+        raise FbarError("Reviewed handoff must preserve a separate source preflight JSON.", 2)
+    expected_source_hash = str(source_meta.get("sha256") or "")
+    if not expected_source_hash:
+        raise FbarError("Reviewed handoff has no source preflight SHA-256.", 2)
+    if preflight_file_sha256(source_path) != expected_source_hash:
+        raise FbarError("Source preflight changed after review; rerun preflight and create a new reviewed handoff.", 2)
+    source = read_preflight_json(source_path, "source preflight JSON")
+    if source.get("status") != PREFLIGHT_REVIEW_REQUIRED_STATUS:
+        raise FbarError("Reviewed handoff source must retain status review-required.", 2)
+
+    for key in ("schema_version", "tax_year", "scope", "statement_files", "review_gates"):
+        if handoff.get(key) != source.get(key):
+            raise FbarError(f"Reviewed handoff {key} does not match its source preflight.", 2)
+    for key in ("schema_version", "tax_year", "scope", "status"):
+        if source_meta.get(key) != source.get(key):
+            raise FbarError(f"Reviewed handoff source_preflight.{key} does not match its source preflight.", 2)
+
+    gates = validated_review_gates(source)
+    stop_codes = sorted(gate["code"] for gate in gates if gate["severity"] == "stop")
+    if stop_codes:
+        raise FbarError(
+            "Reviewed handoff cannot accept structural stop gate(s): " + ", ".join(stop_codes) + ".",
+            2,
+        )
+    if any(gate["severity"] != "review" for gate in gates):
+        raise FbarError("Reviewed handoff source has unsupported review-gate severity; rerun preflight.", 2)
+    accepted_codes_raw = review.get("accepted_gate_codes")
+    if not isinstance(accepted_codes_raw, list):
+        raise FbarError("Reviewed handoff has no accepted_gate_codes list.", 2)
+    accepted_codes = [str(code).strip() for code in accepted_codes_raw if str(code).strip()]
+    if len(set(accepted_codes)) != len(accepted_codes):
+        raise FbarError("Reviewed handoff has duplicate accepted gate codes.", 2)
+    expected_codes = {gate["code"] for gate in gates}
+    if set(accepted_codes) != expected_codes:
+        raise FbarError("Reviewed handoff must accept every and only the source preflight review gates.", 2)
+
+    resolved = dict(source)
+    resolved["status"] = PREFLIGHT_REVIEWED_HANDOFF_STATUS
+    resolved["review_handoff"] = {
+        "artifact_json": str(handoff_path),
+        "source_preflight_json": str(source_path),
+        "source_preflight_sha256": expected_source_hash,
+        "accepted_gate_codes": sorted(accepted_codes),
+        "confirmed_at": review.get("confirmed_at"),
+    }
+    return resolved
+
+
+def load_preflight_json(path: str | None, expected_scope: str, tax_year: int, pdf_paths: list[str]) -> dict[str, object]:
+    if not path:
+        raise FbarError("--preflight-json is required. Run statement-intake-preflight before extracting an FBAR ledger.", 2)
+    preflight_path = Path(path)
+    data = read_preflight_json(preflight_path, "preflight JSON")
+    if data.get("status") == PREFLIGHT_REVIEWED_HANDOFF_STATUS:
+        data = resolve_reviewed_handoff(data, preflight_path)
+    elif data.get("status") == PREFLIGHT_REVIEW_REQUIRED_STATUS:
+        raise FbarError(
+            "Preflight is review-required. Resolve its structural issues or create a reviewed handoff after explicit user review.",
+            2,
+        )
+    elif data.get("status") != PREFLIGHT_READY_STATUS:
+        raise FbarError(f"Unsupported preflight status {data.get('status')!r}.", 2)
+    elif data.get("review_gates"):
+        raise FbarError("Ready preflight unexpectedly contains review gates; rerun preflight.", 2)
+
+    validate_preflight_identity(data, expected_scope, tax_year, pdf_paths)
     return data
 
 
-def preflight_warning_lines(preflight: dict[str, object] | None) -> list[str]:
-    if not preflight:
-        return []
+def preflight_warning_lines(preflight: dict[str, object]) -> list[str]:
     lines: list[str] = []
     for warning in preflight.get("warnings", []):
         if isinstance(warning, str) and warning.strip():
@@ -932,12 +1058,15 @@ def preflight_warning_lines(preflight: dict[str, object] | None) -> list[str]:
             message = str(gate.get("message") or "").strip()
             if message:
                 lines.append(f"Preflight gate {code}: {message}")
+    handoff = preflight.get("review_handoff")
+    if isinstance(handoff, dict):
+        accepted = handoff.get("accepted_gate_codes")
+        if isinstance(accepted, list) and accepted:
+            lines.append("Preflight reviewed handoff accepted gate(s): " + ", ".join(str(code) for code in accepted))
     return sorted(set(lines))
 
 
-def preflight_profile(preflight: dict[str, object] | None, source_path: str | None) -> dict[str, object] | None:
-    if not preflight:
-        return None
+def preflight_profile(preflight: dict[str, object], source_path: str) -> dict[str, object]:
     return {
         "source_json": source_path,
         "status": preflight.get("status"),
@@ -946,6 +1075,7 @@ def preflight_profile(preflight: dict[str, object] | None, source_path: str | No
         "profile": preflight.get("profile"),
         "review_gates": preflight.get("review_gates", []),
         "review_csv": (preflight.get("artifacts") or {}).get("review_csv") if isinstance(preflight.get("artifacts"), dict) else None,
+        "review_handoff": preflight.get("review_handoff"),
     }
 
 
@@ -2261,22 +2391,66 @@ def test_csv_naming() -> None:
     assert account_csv_path(Path("work/account-1.json"), confirmed=True).name == "account-1-confirmed.csv"
 
 
-def write_preflight_fixture(root: Path, name: str, tax_year: int, scope: str, pdf_paths: list[Path]) -> Path:
+def write_preflight_fixture(
+    root: Path,
+    name: str,
+    tax_year: int,
+    scope: str,
+    pdf_paths: list[Path],
+    *,
+    status: str = PREFLIGHT_READY_STATUS,
+    gates: list[dict[str, str]] | None = None,
+) -> Path:
     path = root / f"{name}.json"
+    review_gates = gates or []
     data = {
         "schema_version": "1.0",
         "skill": PREFLIGHT_SKILL,
-        "status": "review-required",
+        "status": status,
         "tax_year": tax_year,
         "scope": scope,
         "statement_files": [{"file": str(pdf), "resolved_file": normalize_preflight_path(pdf)} for pdf in pdf_paths],
         "currency": {"code": "USD", "candidates": ["USD"]},
         "profile": {"primary_institution": "Preflight Bank"},
         "warnings": ["sample review warning"],
-        "review_gates": [{"code": "sample-gate", "message": "sample gate message"}],
+        "review_gates": review_gates,
         "artifacts": {"review_csv": str(root / f"{name}.csv")},
     }
     write_json(path, data)
+    return path
+
+
+def write_reviewed_handoff_fixture(root: Path, name: str, source_path: Path, accepted_codes: list[str] | None = None) -> Path:
+    source = load_json(source_path)
+    review_gates = source["review_gates"]
+    assert isinstance(review_gates, list)
+    expected_codes = [str(gate["code"]) for gate in review_gates if isinstance(gate, dict)]
+    handoff = {
+        "schema_version": source["schema_version"],
+        "skill": PREFLIGHT_SKILL,
+        "artifact_type": PREFLIGHT_REVIEWED_HANDOFF_TYPE,
+        "status": PREFLIGHT_REVIEWED_HANDOFF_STATUS,
+        "tax_year": source["tax_year"],
+        "scope": source["scope"],
+        "statement_files": source["statement_files"],
+        "review_gates": review_gates,
+        "source_preflight": {
+            "path": str(source_path),
+            "resolved_path": normalize_preflight_path(source_path),
+            "sha256": preflight_file_sha256(source_path),
+            "schema_version": source["schema_version"],
+            "status": source["status"],
+            "tax_year": source["tax_year"],
+            "scope": source["scope"],
+        },
+        "review": {
+            "user_review_confirmed": True,
+            "accepted_gate_codes": accepted_codes if accepted_codes is not None else expected_codes,
+            "confirmed_at": "2026-07-12T00:00:00Z",
+        },
+    }
+    path = root / f"{name}.json"
+    write_json(path, handoff)
     return path
 
 
@@ -2286,7 +2460,81 @@ def test_preflight_handoff(root: Path) -> None:
     data = load_preflight_json(str(preflight), "one-account", 2025, [str(pdf)])
     warnings = preflight_warning_lines(data)
     assert any("sample review warning" in warning for warning in warnings), warnings
-    assert any("sample-gate" in warning for warning in warnings), warnings
+
+    review_gate = {"code": "sample-gate", "severity": "review", "message": "sample gate message"}
+    review_required = write_preflight_fixture(
+        root,
+        "preflight-review-required",
+        2025,
+        "one-account",
+        [pdf],
+        status=PREFLIGHT_REVIEW_REQUIRED_STATUS,
+        gates=[review_gate],
+    )
+    try:
+        load_preflight_json(str(review_required), "one-account", 2025, [str(pdf)])
+    except FbarError as exc:
+        assert "review-required" in str(exc), str(exc)
+    else:
+        raise AssertionError("raw review-required preflight must be rejected")
+
+    reviewed_handoff = write_reviewed_handoff_fixture(root, "preflight-reviewed", review_required)
+    reviewed = load_preflight_json(str(reviewed_handoff), "one-account", 2025, [str(pdf)])
+    assert reviewed["status"] == PREFLIGHT_REVIEWED_HANDOFF_STATUS
+    handoff = reviewed.get("review_handoff")
+    assert isinstance(handoff, dict) and handoff.get("accepted_gate_codes") == ["sample-gate"]
+
+    incomplete_handoff = write_reviewed_handoff_fixture(root, "preflight-incomplete", review_required, accepted_codes=[])
+    try:
+        load_preflight_json(str(incomplete_handoff), "one-account", 2025, [str(pdf)])
+    except FbarError as exc:
+        assert "every and only" in str(exc), str(exc)
+    else:
+        raise AssertionError("reviewed handoff must acknowledge every source gate")
+
+    structural_source = write_preflight_fixture(
+        root,
+        "preflight-structural",
+        2025,
+        "one-account",
+        [pdf],
+        status=PREFLIGHT_REVIEW_REQUIRED_STATUS,
+        gates=[{"code": "low-text-pdf", "severity": "stop", "message": "statement has little text"}],
+    )
+    structural_handoff = write_reviewed_handoff_fixture(root, "preflight-structural-handoff", structural_source)
+    try:
+        load_preflight_json(str(structural_handoff), "one-account", 2025, [str(pdf)])
+    except FbarError as exc:
+        assert "structural stop" in str(exc), str(exc)
+    else:
+        raise AssertionError("reviewed handoff must reject structural stop gates")
+
+    changed_source = write_preflight_fixture(
+        root,
+        "preflight-changed-source",
+        2025,
+        "one-account",
+        [pdf],
+        status=PREFLIGHT_REVIEW_REQUIRED_STATUS,
+        gates=[review_gate],
+    )
+    changed_handoff = write_reviewed_handoff_fixture(root, "preflight-changed-handoff", changed_source)
+    changed_data = load_json(changed_source)
+    changed_data["warnings"] = ["changed after review"]
+    write_json(changed_source, changed_data)
+    try:
+        load_preflight_json(str(changed_handoff), "one-account", 2025, [str(pdf)])
+    except FbarError as exc:
+        assert "changed after review" in str(exc), str(exc)
+    else:
+        raise AssertionError("reviewed handoff must reject a changed source preflight")
+
+    try:
+        load_preflight_json(None, "one-account", 2025, [str(pdf)])
+    except FbarError as exc:
+        assert "required" in str(exc), str(exc)
+    else:
+        raise AssertionError("preflight must be required")
 
     for name, year, scope, pdfs, expected in (
         ("bad-year", 2024, "one-account", [pdf], "tax_year"),
@@ -2314,7 +2562,11 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--account-id", help="Optional stable local account identifier.")
     extract.add_argument("--institution", help="Optional institution label.")
     extract.add_argument("--account-currency", help="Optional ISO currency code when statement text is ambiguous.")
-    extract.add_argument("--preflight-json", help="statement-intake-preflight JSON reviewed before extraction.")
+    extract.add_argument(
+        "--preflight-json",
+        required=True,
+        help="Ready preflight JSON or reviewed-handoff JSON from statement-intake-preflight.",
+    )
     extract.set_defaults(func=command_extract_account)
 
     confirm = subparsers.add_parser("confirm-account", help="Confirm reviewed account ledger and convert to USD when needed.")
