@@ -1022,6 +1022,110 @@ def validated_review_gates(data: dict[str, object]) -> list[dict[str, str]]:
     return gates
 
 
+def reviewed_resolution_object(resolutions: dict[str, object], key: str) -> dict[str, object]:
+    value = resolutions.get(key)
+    if not isinstance(value, dict):
+        raise FbarError(f"Reviewed handoff user_resolutions.{key} must be an object.", 2)
+    return value
+
+
+def reviewed_resolution_gate_codes(resolution: dict[str, object], expected: set[str], key: str) -> None:
+    raw_codes = resolution.get("resolved_gate_codes")
+    if not isinstance(raw_codes, list):
+        raise FbarError(f"Reviewed handoff user_resolutions.{key}.resolved_gate_codes must be a list.", 2)
+    codes = [str(code).strip() for code in raw_codes if str(code).strip()]
+    if len(codes) != len(raw_codes) or len(set(codes)) != len(codes) or set(codes) != expected:
+        raise FbarError(
+            f"Reviewed handoff user_resolutions.{key}.resolved_gate_codes must exactly match the source review gates.",
+            2,
+        )
+
+
+def validate_reviewed_user_resolutions(
+    handoff: dict[str, object], source: dict[str, object], source_sha256: str, gates: list[dict[str, str]]
+) -> dict[str, object]:
+    """Accept only structured, source-bound reviewer resolutions.
+
+    The reviewed handoff must never turn a bare currency symbol or an absent
+    account number into an implicit extraction decision.  These fields are
+    optional only for legacy reviewed handoffs with unrelated review gates.
+    """
+    gate_codes = {gate["code"] for gate in gates}
+    currency_gate_codes = {"ambiguous-dollar", "unknown-currency"} & gate_codes
+    account_gate_codes = {"unknown-account", "possible-mixed-accounts"} & gate_codes
+    year_gate_codes = {"mixed-years", "unresolved-year-evidence", "unknown-year-coverage"} & gate_codes
+    raw_resolutions = handoff.get("user_resolutions")
+    if raw_resolutions is None:
+        if currency_gate_codes or account_gate_codes or year_gate_codes:
+            raise FbarError(
+                "Reviewed handoff is missing structured user resolutions for its currency, account, or year review gates.",
+                2,
+            )
+        return {}
+    if not isinstance(raw_resolutions, dict):
+        raise FbarError("Reviewed handoff user_resolutions must be an object.", 2)
+    resolutions = raw_resolutions
+    if str(resolutions.get("source_preflight_sha256") or "") != source_sha256:
+        raise FbarError("Reviewed handoff user resolutions are not bound to the reviewed source preflight SHA-256.", 2)
+
+    try:
+        tax_year = as_int(source.get("tax_year", 0), "source preflight tax_year")
+    except FbarError:
+        raise FbarError("Reviewed handoff source preflight has an invalid tax year.", 2) from None
+
+    statement_years = reviewed_resolution_object(resolutions, "statement_years")
+    if "mixed-years" in year_gate_codes:
+        raise FbarError(
+            "Reviewed handoff cannot resolve mixed-years; rerun preflight with the corrected tax year or statement set.",
+            2,
+        )
+    if year_gate_codes:
+        if statement_years.get("status") != "user-confirmed":
+            raise FbarError("Reviewed handoff does not contain a user-confirmed statement-year resolution.", 2)
+        raw_years = statement_years.get("confirmed_years")
+        if not isinstance(raw_years, list):
+            raise FbarError("Reviewed handoff statement-year resolution must list confirmed_years.", 2)
+        try:
+            confirmed_years = sorted({int(year) for year in raw_years})
+        except (TypeError, ValueError) as exc:
+            raise FbarError("Reviewed handoff statement-year resolution contains an invalid year.", 2) from exc
+        if confirmed_years != [tax_year]:
+            raise FbarError(
+                f"Reviewed handoff statement-year resolution must confirm only the extraction year {tax_year}.",
+                2,
+            )
+    elif statement_years.get("status") != "not-required":
+        raise FbarError("Reviewed handoff has an unexpected statement-year resolution.", 2)
+
+    currency = reviewed_resolution_object(resolutions, "currency")
+    source_currency = source.get("currency") if isinstance(source.get("currency"), dict) else {}
+    if currency_gate_codes:
+        if str(source_currency.get("code") or "").upper() != "UNKNOWN":
+            raise FbarError("Reviewed handoff currency resolution is only valid when source preflight currency is UNKNOWN.", 2)
+        if currency.get("status") != "user-confirmed":
+            raise FbarError("Reviewed handoff does not contain a user-confirmed currency resolution.", 2)
+        reviewed_resolution_gate_codes(currency, currency_gate_codes, "currency")
+        confirmed_currency = str(currency.get("code") or "").strip().upper()
+        if confirmed_currency not in CURRENCY_CODES:
+            raise FbarError("Reviewed handoff currency resolution must use a supported ISO currency code.", 2)
+        if str(currency.get("source_currency_code") or "").upper() != "UNKNOWN":
+            raise FbarError("Reviewed handoff currency resolution does not preserve the source UNKNOWN currency state.", 2)
+    elif currency.get("status") != "not-required":
+        raise FbarError("Reviewed handoff has an unexpected currency resolution.", 2)
+
+    one_account = reviewed_resolution_object(resolutions, "one_account")
+    if account_gate_codes:
+        if one_account.get("status") != "user-confirmed" or one_account.get("confirmed") is not True:
+            raise FbarError("Reviewed handoff does not contain a user-confirmed one-account resolution.", 2)
+        if one_account.get("account_identifier_provided") is not False:
+            raise FbarError("Reviewed handoff one-account resolution must not claim an unverified account identifier.", 2)
+        reviewed_resolution_gate_codes(one_account, account_gate_codes, "one_account")
+    elif one_account.get("status") != "not-required":
+        raise FbarError("Reviewed handoff has an unexpected one-account resolution.", 2)
+
+    return resolutions
+
+
 def resolve_reviewed_handoff(handoff: dict[str, object], handoff_path: Path) -> dict[str, object]:
     if handoff.get("skill") != PREFLIGHT_SKILL:
         raise FbarError(f"Reviewed handoff must come from {PREFLIGHT_SKILL}.", 2)
@@ -1078,6 +1182,7 @@ def resolve_reviewed_handoff(handoff: dict[str, object], handoff_path: Path) -> 
     expected_codes = {gate["code"] for gate in gates}
     if set(accepted_codes) != expected_codes:
         raise FbarError("Reviewed handoff must accept every and only the source preflight review gates.", 2)
+    user_resolutions = validate_reviewed_user_resolutions(handoff, source, expected_source_hash, gates)
 
     resolved = dict(source)
     resolved["status"] = PREFLIGHT_REVIEWED_HANDOFF_STATUS
@@ -1088,6 +1193,8 @@ def resolve_reviewed_handoff(handoff: dict[str, object], handoff_path: Path) -> 
         "accepted_gate_codes": sorted(accepted_codes),
         "confirmed_at": review.get("confirmed_at"),
     }
+    if user_resolutions:
+        resolved["user_resolutions"] = user_resolutions
     return resolved
 
 
@@ -1140,9 +1247,11 @@ def preflight_profile(preflight: dict[str, object], source_path: str) -> dict[st
         "scope": preflight.get("scope"),
         "currency": preflight.get("currency"),
         "profile": preflight.get("profile"),
+        "coverage_hints": preflight.get("coverage_hints"),
         "review_gates": preflight.get("review_gates", []),
         "review_csv": (preflight.get("artifacts") or {}).get("review_csv") if isinstance(preflight.get("artifacts"), dict) else None,
         "review_handoff": preflight.get("review_handoff"),
+        "user_resolutions": preflight.get("user_resolutions"),
         "verified_statement_files": preflight.get("verified_statement_files", []),
     }
 
@@ -1156,7 +1265,25 @@ def command_extract_account(args: argparse.Namespace) -> int:
     verify_preflight_statement_fingerprints(preflight, args.pdf)
     warnings.extend(pdf_warnings)
 
-    currency = infer_currency(full_text, args.account_currency, warnings)
+    user_resolutions = preflight.get("user_resolutions") if isinstance(preflight.get("user_resolutions"), dict) else {}
+    reviewed_currency = user_resolutions.get("currency") if isinstance(user_resolutions.get("currency"), dict) else {}
+    confirmed_currency = (
+        normalize_currency(str(reviewed_currency.get("code") or ""))
+        if reviewed_currency.get("status") == "user-confirmed"
+        else None
+    )
+    if confirmed_currency:
+        if args.account_currency:
+            requested_currency = normalize_currency(args.account_currency)
+            if requested_currency != confirmed_currency:
+                raise FbarError(
+                    "--account-currency conflicts with the user-confirmed currency in the reviewed preflight handoff.",
+                    2,
+                )
+        # A reviewed ISO resolution wins over a bare '$' in statement text.
+        currency = confirmed_currency
+    else:
+        currency = infer_currency(full_text, args.account_currency, warnings)
     if currency in {"UNKNOWN", "MIXED"} and preflight:
         preflight_currency = preflight.get("currency")
         if isinstance(preflight_currency, dict):
@@ -1180,7 +1307,18 @@ def command_extract_account(args: argparse.Namespace) -> int:
     daily_rows, coverage, coverage_warnings = build_daily_rows(args.tax_year, currency, candidates)
     warnings.extend(coverage_warnings)
 
-    account_id = args.account_id or make_account_id(args.institution, account_hints, args.tax_year)
+    reviewed_one_account = user_resolutions.get("one_account") if isinstance(user_resolutions.get("one_account"), dict) else {}
+    if args.account_id:
+        account_id = args.account_id
+        account_id_source = "user-supplied"
+    elif not account_hints and reviewed_one_account.get("status") == "user-confirmed" and reviewed_one_account.get("confirmed") is True:
+        # The preflight reviewer confirmed scope but deliberately did not supply
+        # an account number. Keep a stable local label without inventing one.
+        account_id = f"reviewed-one-account-{args.tax_year}"
+        account_id_source = "reviewed-one-account-local-label"
+    else:
+        account_id = make_account_id(args.institution, account_hints, args.tax_year)
+        account_id_source = "derived-from-statement-hints" if account_hints else "generated-local-label"
     data: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "skill": "fbar-threshold-check",
@@ -1192,6 +1330,7 @@ def command_extract_account(args: argparse.Namespace) -> int:
             "institution": args.institution or infer_institution(full_text),
             "currency": currency,
             "account_number_hints": account_hints,
+            "account_id_source": account_id_source,
         },
         "preflight": preflight_profile(preflight, args.preflight_json),
         "statement_files": file_profiles,

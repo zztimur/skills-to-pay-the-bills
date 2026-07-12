@@ -27,7 +27,7 @@ python3 "<preflight-root>/scripts/statement_intake_preflight.py" preflight \
   --out work/statement-preflight.json
 ```
 
-If the preflight status is `ready-for-domain-extraction`, extract the account ledger with that JSON. If it is `review-required`, stop for user review. Structural `stop` gates require corrected PDFs; otherwise create a reviewed handoff that acknowledges every review gate after the user confirms it:
+If the preflight status is `ready-for-domain-extraction`, extract the account ledger with that JSON. If it is `review-required`, stop for user review. Structural `stop` gates require corrected PDFs; otherwise create a reviewed handoff that acknowledges every review gate after the user confirms it. When the handoff has an ambiguous/unknown currency or unknown account gate, it must contain the preflight skill's structured user resolution; extraction uses that confirmed ISO code rather than inferring a bare `$`, and may use a safe local account label when the reviewer confirmed one-account scope without providing an account number:
 
 ```bash
 python3 "<preflight-root>/scripts/statement_intake_preflight.py" review-handoff \
@@ -49,7 +49,7 @@ python3 "<package-root>/scripts/fbar_threshold_check.py" extract-account \
 
 For a reviewed handoff, replace `work/statement-preflight.json` with `work/statement-preflight-reviewed.json`.
 
-Review the account JSON and CSV before confirming. The CSV is a row-review artifact with one row per calendar day. Shared PDF/account/year/currency intake gates belong to `statement-intake-preflight`; this skill's review starts after that handoff and focuses on balance evidence. Stop for user review when the FBAR extractor reports ambiguous amount separators, missing opening coverage, incomplete daily balance coverage, carry-forward gaps, materially different same-day balance candidates, or low-confidence balance rows. `confirm-account` refuses ledgers with carry-forward gaps longer than 40 days unless the user has explicitly reviewed `coverage.carry_gaps` and you pass `--accept-carry-forward`.
+Review the account JSON and CSV before confirming. The CSV is a row-review artifact with one row per calendar day. The extracted `preflight` object retains reviewed resolution metadata, coverage hints, and ordered fingerprint evidence. Shared PDF/account/year/currency intake gates belong to `statement-intake-preflight`; this skill's review starts after that handoff and focuses on balance evidence. Stop for user review when the FBAR extractor reports ambiguous amount separators, missing opening coverage, incomplete daily balance coverage, carry-forward gaps, materially different same-day balance candidates, low-confidence balance rows, or a preflight possible-missing-statement-period warning. `confirm-account` refuses ledgers with carry-forward gaps longer than 40 days unless the user has explicitly reviewed `coverage.carry_gaps` and you pass `--accept-carry-forward`.
 
 Confirm only after the user has reviewed the account ledger:
 
