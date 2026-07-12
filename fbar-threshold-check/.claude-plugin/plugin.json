@@ -1,13 +1,13 @@
 {
   "name": "fbar-threshold-check",
-  "description": "Client-agnostic FBAR threshold checker for daily aggregate and maximum-value views.",
-  "version": "1.5.1",
+  "description": "Client-agnostic FBAR evidence builder with reviewed preflight handoffs and daily/max-value support views.",
+  "version": "1.5.2",
   "dependencies": [
     {
       "type": "skill",
       "name": "statement-intake-preflight",
       "required": true,
-      "description": "Runs shared machine-readable statement PDF intake with --scope one-account before FBAR balance extraction."
+      "description": "Runs required shared PDF intake with --scope one-account and fingerprints exact statements before FBAR extraction."
     },
     {
       "type": "skill",
