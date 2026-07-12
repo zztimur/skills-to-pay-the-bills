@@ -13,21 +13,22 @@ Read `references/workflow.md` before analysis. It contains the preflight handoff
 
 ## Skill Dependencies
 
-Required companion skill: `statement-intake-preflight`. Use it first for shared PDF intake with `--scope one-account`; `extract-account` requires either its clean preflight JSON or a separate reviewed-handoff JSON created after explicit user review, and verifies the ordered PDF byte-size and SHA-256 fingerprints before and after parsing. This skill keeps only FBAR balance, FX, confirmation, and aggregation logic here.
+Required companion skill: `statement-intake-preflight`. Use it first for shared PDF intake with `--scope one-account --require-institution`; `extract-account` requires either its clean preflight JSON or a separate reviewed-handoff JSON created after explicit user review, and verifies the ordered PDF byte-size and SHA-256 fingerprints before and after parsing. This skill keeps only FBAR balance, FX, confirmation, and aggregation logic here.
 
 FX workpaper dependency for non-USD accounts: `get-year-end-fx-rate`. Use its retained year-end `workpaper.json` for FBAR-style conversion; do not use yearly-average workpapers from `get-yearly-fx-rate`.
 
-Process one account at a time. First use the separate `statement-intake-preflight` skill with `--scope one-account` and review its JSON/CSV:
+Process one account at a time. First use the separate `statement-intake-preflight` skill with `--scope one-account --require-institution` and review its JSON/CSV:
 
 ```bash
 python3 "<preflight-root>/scripts/statement_intake_preflight.py" preflight \
   --pdf statement-01.pdf statement-02.pdf \
   --tax-year 2025 \
   --scope one-account \
+  --require-institution \
   --out work/statement-preflight.json
 ```
 
-If the preflight status is `ready-for-domain-extraction`, extract the account ledger with that JSON. If it is `review-required`, stop for user review. Structural `stop` gates require corrected PDFs; otherwise create a reviewed handoff that acknowledges every review gate after the user confirms it. The preflight workflow asks only when its evidence is weak: it does not ask about a corroborated currency, a clearly contextual prior-year date with clear coverage (including an exact prior December 31 opening boundary), or an extracted account identifier. When the handoff has an ambiguous/unknown currency or unknown account gate, it must contain the preflight skill's structured user resolution; extraction uses that confirmed ISO code rather than inferring a bare `$`, and may use a safe local account label when the reviewer confirmed one-account scope without providing an account number. Do not ask for a full account number by default or repeat a question already resolved in the handoff:
+If the preflight status is `ready-for-domain-extraction`, extract the account ledger with that JSON. If it is `review-required`, stop for user review. Structural `stop` gates require corrected PDFs; otherwise create a reviewed handoff that acknowledges every review gate after the user confirms it. The preflight workflow asks only when its evidence is weak: it does not ask about a corroborated currency, a clearly contextual prior-year date with clear coverage (including an exact prior December 31 opening boundary), or an extracted account identifier. When the handoff has an ambiguous/unknown currency, unknown account, or opt-in issuer gate, it must contain the preflight skill's structured user resolution; extraction uses confirmed currency and issuer values rather than inferring them from weak text. Do not ask for a full account number by default or repeat a question already resolved in the handoff.
 
 ```bash
 python3 "<preflight-root>/scripts/statement_intake_preflight.py" review-handoff \

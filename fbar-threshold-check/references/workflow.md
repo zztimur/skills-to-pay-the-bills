@@ -21,11 +21,11 @@ When the year and PDF paths are already supplied, acknowledge them and start pre
 
 Before running extraction:
 
-- Use `statement-intake-preflight` to verify shared statement intake scope: one account, one calendar year, one currency bucket, readable PDFs, and account/currency hints.
+- Use `statement-intake-preflight` with `--scope one-account --require-institution` to verify shared statement intake scope: one account, one calendar year, one currency bucket, one issuer, readable PDFs, and account/currency hints.
 - Treat `statement-intake-preflight` as a required companion skill, not optional setup. If it is not installed or discoverable, stop before extraction and ask the user to install or run it.
 - Verify only the FBAR-specific intent here: the user wants an FBAR threshold support check, not an official filing.
 
-If preflight reports multiple accounts, multiple currencies, mixed years, low/no text, or ambiguous currency, resolve that in the preflight step before this skill extracts balances. The preflight owns the user questions: proceed silently when it corroborates a currency, explain a clearly contextual prior-year opening balance (including an exact prior December 31 opening boundary) without asking, ask for an ISO code only for weak/unknown currency evidence, and ask for one-account confirmation only when identity is not extractable. Do not request a full account number by default or ask again when `user_resolutions` already records the answer.
+If preflight reports multiple accounts, multiple currencies, mixed years, low/no text, ambiguous currency, or unresolved issuer evidence, resolve that in the preflight step before this skill extracts balances. The preflight owns the user questions: proceed silently when it corroborates a currency, explain a clearly contextual prior-year opening balance (including an exact prior December 31 opening boundary) without asking, ask for an ISO code only for weak/unknown currency evidence, and ask for one-account or institution confirmation only when the matching evidence is unresolved. Do not request a full account number by default or ask again when `user_resolutions` already records the answer.
 
 ## 2. Source Anchors
 
@@ -50,13 +50,14 @@ If `pdfplumber` is unavailable in Codex Desktop, call `load_workspace_dependenci
 
 ## 4. Preflight One Account
 
-Before extracting balances, run the shared statement preflight with `--scope one-account`:
+Before extracting balances, run the shared statement preflight with `--scope one-account --require-institution`:
 
 ```bash
 python3 "<preflight-root>/scripts/statement_intake_preflight.py" preflight \
   --pdf "statement-01.pdf" "statement-02.pdf" \
   --tax-year 2025 \
   --scope one-account \
+  --require-institution \
   --out "work/statement-preflight.json"
 ```
 
@@ -72,7 +73,7 @@ python3 "<preflight-root>/scripts/statement_intake_preflight.py" review-handoff 
   --out "work/statement-preflight-reviewed.json"
 ```
 
-Repeat `--accept-gate` for every code in `review_gates`. The handoff records the original preflight path and SHA-256 plus the accepted gate codes. For ambiguous/unknown currency, account, or year gates it also records source-bound structured reviewer resolutions. `extract-account` rejects a raw `review-required` JSON, an incomplete reviewed handoff, missing/mismatched required resolutions, a handoff with a structural gate, or a handoff whose source preflight changed after review.
+Repeat `--accept-gate` for every code in `review_gates`. The handoff records the original preflight path and SHA-256 plus the accepted gate codes. For ambiguous/unknown currency, account, year, or opt-in issuer gates it also records source-bound structured reviewer resolutions. For an opt-in issuer gate, pass `--confirm-institution "Name"`; this selects the issuer without removing the original unknown/mixed evidence. `extract-account` rejects a raw `review-required` JSON, an incomplete reviewed handoff, missing/mismatched required resolutions, a handoff with a structural gate, or a handoff whose source preflight changed after review.
 
 The preflight also pins the exact statement sequence with a positive byte size and SHA-256 fingerprint for each PDF. `extract-account` refuses a missing, legacy-unfingerprinted, duplicated, reordered, or changed file. It checks the fingerprint both before parsing and immediately after parsing; a source change requires a fresh preflight and, if applicable, a new reviewed handoff.
 
@@ -93,7 +94,7 @@ For a reviewed handoff, replace `work/statement-preflight.json` with `work/state
 Optional flags:
 
 - `--account-id`: stable local identifier when the user has one.
-- `--institution`: institution label when visible in the statement set or known from the user.
+- `--institution`: optional institution label. When the reviewed preflight contains a typed issuer resolution, it must match that resolution; otherwise extraction rejects the override.
 - `--account-currency`: ISO code when a clean statement set cannot safely infer it. It cannot override a user-confirmed currency from a reviewed handoff; that handoff code is used instead of inferring a bare `$`.
 - `--preflight-json`: required ready JSON or reviewed-handoff JSON from `statement-intake-preflight`; the script rejects absent, review-required, stale, mismatched, incomplete, resolution-invalid, or file-identity-invalid handoffs.
 - `--csv`: review CSV output path.
@@ -109,7 +110,7 @@ The review CSV has one row per day with native balance, USD balance placeholder,
 
 Open the JSON and CSV before confirming. Confirm these fields:
 
-- `preflight` summary, if present, matches the reviewed intake artifact. For reviewed handoffs, confirm its `user_resolutions`, `coverage_hints`, and `verified_statement_files` remain present and source-bound.
+- `preflight` summary, if present, matches the reviewed intake artifact. For reviewed handoffs, confirm its `user_resolutions`, `coverage_hints`, and `verified_statement_files` remain present and source-bound; an opt-in issuer gate must have its typed institution resolution.
 - `account.account_id`, `institution`, and `account.currency` are usable for the confirmed ledger; if not, return to preflight or rerun extraction with an explicit override instead of adjudicating intake ad hoc here.
 - `statement_files` are the expected PDFs; the `preflight.verified_statement_files` summary records the matched ordered paths, byte sizes, and SHA-256 fingerprints.
 - `coverage.complete_year` is true.

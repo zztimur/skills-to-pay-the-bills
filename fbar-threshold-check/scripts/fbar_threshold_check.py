@@ -271,6 +271,11 @@ def clean_text(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
+def normalized_institution_label(value: object) -> str:
+    """Compare user-facing institution labels without accepting a different name."""
+    return re.sub(r"[^\w]+", "", clean_text(value).casefold())
+
+
 def normalize_currency(raw: str | None) -> str:
     if not raw:
         return "UNKNOWN"
@@ -1221,6 +1226,11 @@ def reviewed_resolution_gate_codes(resolution: dict[str, object], expected: set[
         )
 
 
+def preflight_requires_institution(source: dict[str, object]) -> bool:
+    requirements = source.get("requirements")
+    return isinstance(requirements, dict) and requirements.get("institution_required") is True
+
+
 def validate_reviewed_user_resolutions(
     handoff: dict[str, object], source: dict[str, object], source_sha256: str, gates: list[dict[str, str]]
 ) -> dict[str, object]:
@@ -1234,11 +1244,12 @@ def validate_reviewed_user_resolutions(
     currency_gate_codes = {"ambiguous-dollar", "unknown-currency"} & gate_codes
     account_gate_codes = {"unknown-account", "possible-mixed-accounts"} & gate_codes
     year_gate_codes = {"mixed-years", "unresolved-year-evidence", "unknown-year-coverage"} & gate_codes
+    institution_gate_codes = {"unknown-institution", "possible-mixed-institutions"} & gate_codes
     raw_resolutions = handoff.get("user_resolutions")
     if raw_resolutions is None:
-        if currency_gate_codes or account_gate_codes or year_gate_codes:
+        if currency_gate_codes or account_gate_codes or year_gate_codes or institution_gate_codes:
             raise FbarError(
-                "Reviewed handoff is missing structured user resolutions for its currency, account, or year review gates.",
+                "Reviewed handoff is missing structured user resolutions for its currency, account, year, or institution review gates.",
                 2,
             )
         return {}
@@ -1303,6 +1314,22 @@ def validate_reviewed_user_resolutions(
     elif one_account.get("status") != "not-required":
         raise FbarError("Reviewed handoff has an unexpected one-account resolution.", 2)
 
+    institution = reviewed_resolution_object(resolutions, "institution")
+    if institution_gate_codes:
+        if source.get("scope") != "one-account" or not preflight_requires_institution(source):
+            raise FbarError(
+                "Reviewed institution resolution is valid only for a one-account preflight run with --require-institution.",
+                2,
+            )
+        if institution.get("status") != "user-confirmed":
+            raise FbarError("Reviewed handoff does not contain a user-confirmed institution resolution.", 2)
+        reviewed_resolution_gate_codes(institution, institution_gate_codes, "institution")
+        confirmed_institution = clean_text(institution.get("name"))
+        if not confirmed_institution or len(confirmed_institution) > 160:
+            raise FbarError("Reviewed handoff institution resolution must contain a non-empty name of at most 160 characters.", 2)
+    elif institution.get("status") != "not-required":
+        raise FbarError("Reviewed handoff has an unexpected institution resolution.", 2)
+
     return resolutions
 
 
@@ -1337,10 +1364,10 @@ def resolve_reviewed_handoff(handoff: dict[str, object], handoff_path: Path) -> 
     if source.get("status") != PREFLIGHT_REVIEW_REQUIRED_STATUS:
         raise FbarError("Reviewed handoff source must retain status review-required.", 2)
 
-    for key in ("schema_version", "tax_year", "scope", "statement_files", "review_gates"):
+    for key in ("schema_version", "tax_year", "scope", "requirements", "statement_files", "review_gates"):
         if handoff.get(key) != source.get(key):
             raise FbarError(f"Reviewed handoff {key} does not match its source preflight.", 2)
-    for key in ("schema_version", "tax_year", "scope", "status"):
+    for key in ("schema_version", "tax_year", "scope", "requirements", "status"):
         if source_meta.get(key) != source.get(key):
             raise FbarError(f"Reviewed handoff source_preflight.{key} does not match its source preflight.", 2)
 
@@ -1425,6 +1452,7 @@ def preflight_profile(preflight: dict[str, object], source_path: str) -> dict[st
         "source_json": source_path,
         "status": preflight.get("status"),
         "scope": preflight.get("scope"),
+        "requirements": preflight.get("requirements"),
         "currency": preflight.get("currency"),
         "profile": preflight.get("profile"),
         "coverage_hints": preflight.get("coverage_hints"),
@@ -1434,6 +1462,26 @@ def preflight_profile(preflight: dict[str, object], source_path: str) -> dict[st
         "user_resolutions": preflight.get("user_resolutions"),
         "verified_statement_files": preflight.get("verified_statement_files", []),
     }
+
+
+def resolve_institution(
+    preflight: dict[str, object], user_resolutions: dict[str, object], requested_institution: str | None
+) -> str | None:
+    """Use a reviewed typed issuer when present, otherwise source preflight evidence."""
+    reviewed = user_resolutions.get("institution")
+    if isinstance(reviewed, dict) and reviewed.get("status") == "user-confirmed":
+        confirmed = clean_text(reviewed.get("name"))
+        if requested_institution and normalized_institution_label(requested_institution) != normalized_institution_label(confirmed):
+            raise FbarError(
+                "--institution conflicts with the user-confirmed institution in the reviewed preflight handoff.",
+                2,
+            )
+        return confirmed
+    if requested_institution:
+        return clean_text(requested_institution)
+    profile = preflight.get("profile")
+    primary = profile.get("primary_institution") if isinstance(profile, dict) else None
+    return clean_text(primary) or None
 
 
 def command_extract_account(args: argparse.Namespace) -> int:
@@ -1478,6 +1526,7 @@ def command_extract_account(args: argparse.Namespace) -> int:
         warnings.append("No account number/designation hint was found; verify this is one account.")
     if currency in {"UNKNOWN", "MIXED"}:
         warnings.append("Account currency is not confirmed; do not confirm this ledger until resolved.")
+    institution = resolve_institution(preflight, user_resolutions, args.institution)
 
     candidates, candidate_warnings = extract_balance_candidates(
         lines, args.tax_year, currency, page_period_contexts=page_period_contexts
@@ -1496,7 +1545,7 @@ def command_extract_account(args: argparse.Namespace) -> int:
         account_id = f"reviewed-one-account-{args.tax_year}"
         account_id_source = "reviewed-one-account-local-label"
     else:
-        account_id = make_account_id(args.institution, account_hints, args.tax_year)
+        account_id = make_account_id(institution, account_hints, args.tax_year)
         account_id_source = "derived-from-statement-hints" if account_hints else "generated-local-label"
     data: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
@@ -1506,7 +1555,7 @@ def command_extract_account(args: argparse.Namespace) -> int:
         "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "account": {
             "account_id": account_id,
-            "institution": args.institution or infer_institution(full_text),
+            "institution": institution,
             "currency": currency,
             "account_number_hints": account_hints,
             "account_id_source": account_id_source,
@@ -1541,15 +1590,6 @@ def make_account_id(institution: str | None, account_hints: list[str], year: int
     base = re.sub(r"[^a-zA-Z0-9]+", "-", base.lower()).strip("-") or "account"
     hint = re.sub(r"[^a-zA-Z0-9]+", "", account_hints[0])[-4:] if account_hints else ""
     return f"{base}-{hint or year}"
-
-
-def infer_institution(full_text: str) -> str | None:
-    for line in full_text.splitlines()[:12]:
-        cleaned = clean_text(line)
-        if 3 <= len(cleaned) <= 80 and not re.search(r"\d{2,}", cleaned):
-            if not any(term in cleaned.lower() for term in ("statement", "extracto", "period", "account", "cuenta")):
-                return cleaned
-    return None
 
 
 def require_account_data(path: Path) -> dict[str, object]:
@@ -2919,6 +2959,7 @@ def write_reviewed_handoff_fixture(root: Path, name: str, source_path: Path, acc
         "status": PREFLIGHT_REVIEWED_HANDOFF_STATUS,
         "tax_year": source["tax_year"],
         "scope": source["scope"],
+        "requirements": source.get("requirements"),
         "statement_files": source["statement_files"],
         "review_gates": review_gates,
         "source_preflight": {
@@ -2929,6 +2970,7 @@ def write_reviewed_handoff_fixture(root: Path, name: str, source_path: Path, acc
             "status": source["status"],
             "tax_year": source["tax_year"],
             "scope": source["scope"],
+            "requirements": source.get("requirements"),
         },
         "review": {
             "user_review_confirmed": True,
@@ -2973,6 +3015,44 @@ def test_preflight_handoff(root: Path) -> None:
     assert reviewed["status"] == PREFLIGHT_REVIEWED_HANDOFF_STATUS
     handoff = reviewed.get("review_handoff")
     assert isinstance(handoff, dict) and handoff.get("accepted_gate_codes") == ["sample-gate"]
+
+    institution_gate = {"code": "unknown-institution", "severity": "review", "message": "issuer needs review"}
+    institution_source = write_preflight_fixture(
+        root,
+        "preflight-institution-review",
+        2025,
+        "one-account",
+        [pdf],
+        status=PREFLIGHT_REVIEW_REQUIRED_STATUS,
+        gates=[institution_gate],
+    )
+    institution_source_data = load_json(institution_source)
+    institution_source_data["requirements"] = {"institution_required": True}
+    write_json(institution_source, institution_source_data)
+    institution_handoff = write_reviewed_handoff_fixture(root, "preflight-institution-reviewed", institution_source)
+    institution_handoff_data = load_json(institution_handoff)
+    institution_handoff_data["user_resolutions"] = {
+        "source_preflight_sha256": preflight_file_sha256(institution_source),
+        "statement_years": {"status": "not-required"},
+        "currency": {"status": "not-required"},
+        "one_account": {"status": "not-required"},
+        "institution": {
+            "status": "user-confirmed",
+            "name": "Reviewed Test Bank",
+            "resolved_gate_codes": ["unknown-institution"],
+        },
+    }
+    write_json(institution_handoff, institution_handoff_data)
+    institution_reviewed = load_preflight_json(str(institution_handoff), "one-account", 2025, [str(pdf)])
+    institution_resolutions = institution_reviewed.get("user_resolutions")
+    assert isinstance(institution_resolutions, dict)
+    assert resolve_institution(institution_reviewed, institution_resolutions, None) == "Reviewed Test Bank"
+    try:
+        resolve_institution(institution_reviewed, institution_resolutions, "Different Test Bank")
+    except FbarError as exc:
+        assert "conflicts with the user-confirmed institution" in str(exc), str(exc)
+    else:
+        raise AssertionError("a CLI institution must not override a reviewed institution resolution")
 
     incomplete_handoff = write_reviewed_handoff_fixture(root, "preflight-incomplete", review_required, accepted_codes=[])
     try:

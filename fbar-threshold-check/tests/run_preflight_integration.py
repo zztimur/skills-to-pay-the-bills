@@ -64,7 +64,9 @@ def check(name: str, condition: bool, detail: str = "") -> None:
     results.append((name, bool(condition), detail))
 
 
-def preflight(work: Path, tag: str, pdfs: list[Path]) -> tuple[subprocess.CompletedProcess[str], Path, dict[str, object] | None]:
+def preflight(
+    work: Path, tag: str, pdfs: list[Path], *, require_institution: bool = False
+) -> tuple[subprocess.CompletedProcess[str], Path, dict[str, object] | None]:
     output = work / f"{tag}-preflight.json"
     process = run([
         sys.executable,
@@ -76,6 +78,7 @@ def preflight(work: Path, tag: str, pdfs: list[Path]) -> tuple[subprocess.Comple
         "2025",
         "--scope",
         "one-account",
+        *( ["--require-institution"] if require_institution else [] ),
         "--out",
         str(output),
     ])
@@ -83,7 +86,13 @@ def preflight(work: Path, tag: str, pdfs: list[Path]) -> tuple[subprocess.Comple
 
 
 def extract(
-    work: Path, tag: str, pdfs: list[Path], handoff: Path, *, account_currency: str | None = None
+    work: Path,
+    tag: str,
+    pdfs: list[Path],
+    handoff: Path,
+    *,
+    account_currency: str | None = None,
+    institution: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path, dict[str, object] | None]:
     output = work / f"{tag}-account.json"
     command = [
@@ -101,12 +110,14 @@ def extract(
     ]
     if account_currency:
         command.extend(["--account-currency", account_currency])
+    if institution:
+        command.extend(["--institution", institution])
     process = run(command)
     return process, output, read_json(output)
 
 
 def create_reviewed_handoff(
-    work: Path, tag: str, source: Path, data: dict[str, object]
+    work: Path, tag: str, source: Path, data: dict[str, object], *, institution: str | None = None
 ) -> tuple[subprocess.CompletedProcess[str], Path, dict[str, object] | None]:
     output = work / f"{tag}-reviewed-handoff.json"
     gates = data.get("review_gates")
@@ -123,6 +134,8 @@ def create_reviewed_handoff(
         command.append("--confirm-one-account")
     if {"unresolved-year-evidence", "unknown-year-coverage"} & set(gate_codes):
         command.extend(["--confirm-statement-year", "2025"])
+    if {"unknown-institution", "possible-mixed-institutions"} & set(gate_codes) and institution:
+        command.extend(["--confirm-institution", institution])
     process = run(command)
     return process, output, read_json(output)
 
@@ -277,6 +290,115 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         "REVIEW-6 a reviewed handoff rejects a source preflight changed after review",
         stale_handoff_process.returncode == 2 and "changed after review" in stale_handoff_process.stderr,
         stale_handoff_process.stderr.strip(),
+    )
+
+    issuer_unknown = work / "issuer-unknown.pdf"
+    make_pdf(issuer_unknown, [
+        "Monthly Account Statement",
+        "Account Number: 88889999",  # privacy-gate: allow (synthetic account fixture)
+        "Statement period January 1 2025 to December 31 2025",
+        "Currency USD",
+        "2025-01-01 Closing balance 9,900.00 USD",
+        "2025-12-31 Closing balance 9,900.00 USD",
+    ])
+    legacy_institution_process, _legacy_institution_path, legacy_institution_data = preflight(
+        work, "legacy-institution", [issuer_unknown]
+    )
+    legacy_requirements = legacy_institution_data.get("requirements") if isinstance(legacy_institution_data, dict) else None
+    legacy_gates = legacy_institution_data.get("review_gates") if isinstance(legacy_institution_data, dict) else []
+    check(
+        "INSTITUTION-1 legacy one-account preflight stays issuer-optional",
+        legacy_institution_process.returncode == 0
+        and isinstance(legacy_institution_data, dict)
+        and legacy_institution_data.get("status") == "ready-for-domain-extraction"
+        and legacy_requirements == {"institution_required": False}
+        and not any(isinstance(gate, dict) and gate.get("code") == "unknown-institution" for gate in legacy_gates),
+        legacy_institution_process.stderr.strip(),
+    )
+
+    required_institution_process, required_institution_path, required_institution_data = preflight(
+        work, "required-institution", [issuer_unknown], require_institution=True
+    )
+    required_institution_gates = required_institution_data.get("review_gates") if isinstance(required_institution_data, dict) else []
+    required_handoff_process, required_handoff_path, required_handoff_data = create_reviewed_handoff(
+        work,
+        "required-institution",
+        required_institution_path,
+        required_institution_data or {},
+        institution="Reviewed Test Bank",
+    )
+    required_extract_process, _required_account_path, required_account_data = extract(
+        work, "required-institution", [issuer_unknown], required_handoff_path
+    )
+    required_account = required_account_data.get("account") if isinstance(required_account_data, dict) else None
+    required_resolutions = required_handoff_data.get("user_resolutions") if isinstance(required_handoff_data, dict) else None
+    reviewed_institution = required_resolutions.get("institution") if isinstance(required_resolutions, dict) else None
+    check(
+        "INSTITUTION-2 opt-in one-account preflight requires and retains a typed issuer confirmation",
+        required_institution_process.returncode == 0
+        and isinstance(required_institution_data, dict)
+        and any(isinstance(gate, dict) and gate.get("code") == "unknown-institution" for gate in required_institution_gates)
+        and required_handoff_process.returncode == 0
+        and isinstance(reviewed_institution, dict)
+        and reviewed_institution.get("name") == "Reviewed Test Bank"
+        and required_extract_process.returncode == 0
+        and isinstance(required_account, dict)
+        and required_account.get("institution") == "Reviewed Test Bank",
+        required_extract_process.stderr.strip(),
+    )
+
+    institution_conflict_process, _institution_conflict_path, _institution_conflict_data = extract(
+        work,
+        "required-institution-conflict",
+        [issuer_unknown],
+        required_handoff_path,
+        institution="Different Test Bank",
+    )
+    check(
+        "INSTITUTION-3 a CLI issuer cannot override the reviewed institution resolution",
+        institution_conflict_process.returncode == 2
+        and "conflicts with the user-confirmed institution" in institution_conflict_process.stderr,
+        institution_conflict_process.stderr.strip(),
+    )
+
+    mixed_institutions = [work / "issuer-alpha.pdf", work / "issuer-beta.pdf"]
+    make_pdf(mixed_institutions[0], [
+        "Alpha Bank N.A.",
+        "Account Number: 11223344",  # privacy-gate: allow (synthetic account fixture)
+        "Statement period January 1 2025 to June 30 2025",
+        "Currency USD",
+        "2025-01-01 Closing balance 9,900.00 USD",
+        "2025-06-30 Closing balance 9,900.00 USD",
+    ])
+    make_pdf(mixed_institutions[1], [
+        "Beta Banco S.A.",
+        "Account Number: 11223344",  # privacy-gate: allow (synthetic account fixture)
+        "Statement period July 1 2025 to December 31 2025",
+        "Currency USD",
+        "2025-07-01 Closing balance 9,900.00 USD",
+        "2025-12-31 Closing balance 9,900.00 USD",
+    ])
+    mixed_institution_process, mixed_institution_path, mixed_institution_data = preflight(
+        work, "mixed-institution", mixed_institutions, require_institution=True
+    )
+    mixed_handoff_process, _mixed_handoff_path, mixed_handoff_data = create_reviewed_handoff(
+        work,
+        "mixed-institution",
+        mixed_institution_path,
+        mixed_institution_data or {},
+        institution="Reviewed Test Bank",
+    )
+    mixed_gates = mixed_institution_data.get("review_gates") if isinstance(mixed_institution_data, dict) else []
+    mixed_resolutions = mixed_handoff_data.get("user_resolutions") if isinstance(mixed_handoff_data, dict) else None
+    mixed_resolution = mixed_resolutions.get("institution") if isinstance(mixed_resolutions, dict) else None
+    check(
+        "INSTITUTION-4 mixed issuer evidence is source-gated and requires the typed reviewed selection",
+        mixed_institution_process.returncode == 0
+        and any(isinstance(gate, dict) and gate.get("code") == "possible-mixed-institutions" for gate in mixed_gates)
+        and mixed_handoff_process.returncode == 0
+        and isinstance(mixed_resolution, dict)
+        and mixed_resolution.get("resolved_gate_codes") == ["possible-mixed-institutions"],
+        mixed_handoff_process.stderr.strip(),
     )
 
     missing_midyear = [work / "missing-mid-q1.pdf", work / "missing-mid-q3.pdf", work / "missing-mid-q4.pdf"]
