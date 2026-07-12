@@ -1,6 +1,6 @@
 ---
 name: statement-intake-preflight
-description: Preflight machine-readable bank statement PDFs before FBAR or interest workflows. Use for shared text, scope, account, institution, currency, and review-gate JSON checks.
+description: Preflight machine-readable bank statement PDFs before FBAR or interest workflows. Use for shared text, scope, account, institution, currency, review-gate checks, and reviewed FBAR handoffs.
 ---
 
 # Statement Intake Preflight
