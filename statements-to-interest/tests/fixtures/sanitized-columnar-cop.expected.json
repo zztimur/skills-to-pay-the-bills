@@ -1,0 +1,55 @@
+{
+  "fixture_format": "sanitized-pdfplumber-text-v1",
+  "sanitization": "Layout-style text only. Institution, identifiers, references, and monetary values are synthetic; no customer statement data is retained.",
+  "institution": "Layout Test Bank",
+  "tax_year": 2025,
+  "pages": [
+    {
+      "page_number": 1,
+      "source_file": "layout-test-bank-2025-page-1.pdf",
+      "text_file": "sanitized-columnar-cop-page-1.txt"
+    },
+    {
+      "page_number": 2,
+      "source_file": "layout-test-bank-2025-page-2.pdf",
+      "text_file": "sanitized-columnar-cop-page-2.txt"
+    }
+  ],
+  "expected": {
+    "row_count": 2,
+    "rows": [
+      {
+        "date": "2025-01-03",
+        "amount_foreign": "1486.00",
+        "currency": "COP",
+        "confidence": "medium",
+        "notes_contains": [
+          "positive interest term",
+          "multiple positive monetary values found",
+          "currency inferred from statement account currency COP"
+        ]
+      },
+      {
+        "date": "2025-01-31",
+        "amount_foreign": "2017.75",
+        "currency": "COP",
+        "confidence": "medium",
+        "notes_contains": [
+          "positive interest term",
+          "multiple positive monetary values found",
+          "currency inferred from statement account currency COP"
+        ]
+      }
+    ],
+    "excluded_candidates": [],
+    "metadata": {
+      "account_currency": "COP",
+      "account_currency_basis": "statement-text",
+      "institution_label_basis": "pdf-text",
+      "page_count": 2
+    },
+    "warning_substrings": [
+      "Multiple currency markers were detected in the statement text"
+    ]
+  }
+}

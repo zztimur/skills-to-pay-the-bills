@@ -1,0 +1,10 @@
+Sanitized pdfplumber text fixture. This is not a customer statement.
+Layout Test Bank
+Movimientos de cuenta en COP
+Cuenta No. 987.654.321 # privacy-gate: allow
+Periodo: 2025-02-01 to 2025-02-28
+Pagina 1 de 1
+Fecha | Hora | Referencia | Descripcion | Debito | Abono | Saldo
+03/02/2025 12:10:05 987654321 Intereses abonados $0.00 $642 $2,679,063
+03/02/2025 12:10:15 987654322 Retencion sobre intereses $20.00 $2,679,043 # privacy-gate: allow
+Pie de pagina | Layout Test Bank | 1 / 1

@@ -22,7 +22,7 @@ Ambiguous excluded interest-like candidates block a packet even when other inter
 - `references/workflow.md` has the detailed operational checklist, FX gate, troubleshooting, verification, and final-response template.
 - `references/irs-interest-reporting.md` has IRS-oriented wording and source-link guidance.
 - `scripts/statements_to_interest.py` performs extraction, FX prompts, packet assembly, dependency checks, and self-tests.
-- `workpaper-kit/workpaper.py` is vendored as `scripts/_workpaper.py` and owns the shared ReportLab packet layout. Edit the canonical kit and run `workpaper-kit/sync.sh`; do not hand-edit the vendored copy.
+- In the source repository only, `workpaper-kit/workpaper.py` is vendored as `scripts/_workpaper.py` and owns the shared ReportLab packet layout. Change the canonical kit there and run `workpaper-kit/sync.sh`; do not hand-edit the vendored copy. The installed package is a read-only consumer and does not include `workpaper-kit`.
 - `statement-intake-preflight` provides the shared PDF intake JSON/CSV used before extraction.
 - `.claude-plugin/` and `commands/` provide the Claude Code entrypoint while reusing the same root workflow.
 
@@ -88,6 +88,8 @@ For non-USD rows, follow the detailed FX workflow in `references/workflow.md`: g
 
 ## Validation
 
+`self-test` includes deidentified, layout-style `pdfplumber` text fixtures in `tests/fixtures/`. They cover collapsed columns, repeated headers and footers, identifier-shaped values, dates and times, and competing balance amounts without retaining customer statement data.
+
 Before shipping or reinstalling the skill:
 
 ```bash
@@ -97,8 +99,11 @@ python statements-to-interest/scripts/statements_to_interest.py self-test
 python statements-to-interest/scripts/statements_to_interest.py smoke-test
 ```
 
-After reinstalling, verify source/installed parity:
+Sync a cache-free package, then verify source/installed parity:
 
 ```bash
+rsync -a --delete --delete-excluded \
+  --exclude '__pycache__/' --exclude '*.py[co]' \
+  statements-to-interest/ ~/.codex/skills/statements-to-interest/
 diff -qr statements-to-interest ~/.codex/skills/statements-to-interest
 ```
