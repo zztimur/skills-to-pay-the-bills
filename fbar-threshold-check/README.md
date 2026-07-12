@@ -12,7 +12,7 @@ The point is not to file FinCEN Form 114 or give legal advice. The point is to t
 
 One calendar year. One account at a time. Confirm the ledger before aggregation.
 
-For each account, preflight the machine-readable statement PDFs with `statement-intake-preflight`. A clean preflight can go straight to extraction; a review-required one needs a separate reviewed-handoff after the user accepts every non-structural gate. Then extract daily balances, review the generated JSON/CSV, and confirm the account only after the user has looked at the coverage and balance assumptions. For non-USD accounts, use a retained FX workpaper from `get-year-end-fx-rate`.
+For each account, preflight the machine-readable statement PDFs with `statement-intake-preflight`. A clean preflight can go straight to extraction; a review-required one needs a separate reviewed-handoff after the user accepts every non-structural gate. Extraction accepts only the same PDFs in the same order, with the byte size and SHA-256 fingerprints preflight recorded. Then extract daily balances, review the generated JSON/CSV, and confirm the account only after the user has looked at the coverage and balance assumptions. For non-USD accounts, use a retained FX workpaper from `get-year-end-fx-rate`.
 
 Required companion skill: `statement-intake-preflight`. This skill assumes the intake JSON/CSV has already been reviewed before FBAR balance extraction starts.
 
@@ -89,6 +89,8 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-
 
 Repeat `--accept-gate` for every listed gate, then replace the extraction command’s `--preflight-json` value with `work/statement-preflight-reviewed.json`.
 
+Extraction rejects a missing, duplicated, reordered, or modified statement PDF. If any PDF changed since preflight, rerun preflight and recreate the reviewed handoff when one is required.
+
 Confirm the reviewed account:
 
 ```bash
@@ -121,6 +123,7 @@ python3 fbar-threshold-check/scripts/fbar_threshold_check.py aggregate \
 The shared preflight skill owns unreadable PDFs, mixed accounts, mixed years, and ambiguous currency context. After that handoff, this skill should stop or ask for review when:
 
 - Amount separators in balance rows are ambiguous.
+- A statement PDF differs from the preflight byte-size or SHA-256 fingerprint.
 - Opening coverage is missing or carry-forward gaps are too large.
 - Balance rows are low confidence.
 - A non-USD account lacks acceptable year-end FX proof.
