@@ -9,6 +9,13 @@ changelogs, or GitHub Releases.
 The current repository version lives in [`VERSION`](VERSION), is tagged
 `vX.Y.Z`, and has one matching GitHub Release.
 
+## [1.3.4] - 2026-07-12
+
+- Bumped `statements-to-interest` to 1.2.2 and made its README runtime setup
+  explicit: use the Python path returned by Codex's
+  `load_workspace_dependencies` rather than assuming the system `python` has
+  the PDF libraries installed.
+
 ## [1.3.3] - 2026-07-11
 
 Shared-infrastructure patch release for the proof-packet engine:
