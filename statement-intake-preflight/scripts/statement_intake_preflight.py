@@ -1415,9 +1415,19 @@ def detect_currency(lines: Iterable[str]) -> dict[str, object]:
     }
 
 
-def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, out_path: Path, csv_path: Path) -> dict[str, object]:
+def build_preflight(
+    files: list[dict[str, object]],
+    tax_year: int,
+    scope: str,
+    out_path: Path,
+    csv_path: Path,
+    *,
+    require_institution: bool = False,
+) -> dict[str, object]:
     if scope not in SUPPORTED_SCOPES:
         raise PreflightError(f"Unsupported scope {scope!r}. Use one-account or one-institution.")
+    if require_institution and scope != "one-account":
+        raise PreflightError("--require-institution is available only with one-account scope.")
     if not (MIN_TAX_YEAR <= tax_year <= MAX_TAX_YEAR):
         raise PreflightError(f"tax_year {tax_year} is outside the supported range {MIN_TAX_YEAR}-{MAX_TAX_YEAR}.")
 
@@ -1617,11 +1627,12 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
         signature = institution_signature(file_hints[0])
         if signature:
             per_file_institution_signatures.add(signature)
-    if scope == "one-institution" and len(per_file_institution_signatures) > 1:
+    institution_required = scope == "one-institution" or require_institution
+    if institution_required and len(per_file_institution_signatures) > 1:
         message = f"Multiple institution hints found; verify this is one institution: {', '.join(institution_hints[:6])}."
         warnings.append(message)
         add_gate(gates, "possible-mixed-institutions", message)
-    if all_lines and scope == "one-institution" and not institution_hints:
+    if all_lines and institution_required and not institution_hints:
         message = "No institution hint was found in early statement text; verify the institution manually."
         warnings.append(message)
         add_gate(gates, "unknown-institution", message)
@@ -1637,6 +1648,7 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
         "status": status,
         "tax_year": tax_year,
         "scope": scope,
+        "requirements": {"institution_required": require_institution},
         "created_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "profile": {
             "primary_institution": primary_institution,
@@ -1910,6 +1922,12 @@ def _coverage_years(coverage: dict[str, object], key: str) -> set[int]:
     return years
 
 
+def preflight_requires_institution(source: dict[str, object]) -> bool:
+    """Whether this one-account preflight explicitly requested issuer review."""
+    requirements = source.get("requirements")
+    return isinstance(requirements, dict) and requirements.get("institution_required") is True
+
+
 def build_user_resolutions(
     source: dict[str, object], gates: list[dict[str, str]], args: argparse.Namespace
 ) -> dict[str, object]:
@@ -1992,11 +2010,17 @@ def build_user_resolutions(
     elif confirmed_one_account:
         raise PreflightError("--confirm-one-account is only allowed when preflight reports unknown-account or possible-mixed-accounts.")
 
-    institution_gate_codes = {"unknown-institution"} & gate_codes
+    institution_gate_codes = {"unknown-institution", "possible-mixed-institutions"} & gate_codes
     confirmed_institution = clean_line(str(getattr(args, "confirm_institution", "") or ""))
     if institution_gate_codes:
-        if source.get("scope") != "one-institution":
-            raise PreflightError("Institution confirmation is valid only for a one-institution preflight.")
+        scope = source.get("scope")
+        institution_confirmation_allowed = (
+            scope == "one-institution" and institution_gate_codes == {"unknown-institution"}
+        ) or (scope == "one-account" and preflight_requires_institution(source))
+        if not institution_confirmation_allowed:
+            raise PreflightError(
+                "Institution confirmation is valid only for an unknown one-institution preflight or a one-account preflight run with --require-institution."
+            )
         if not confirmed_institution:
             raise PreflightError("Pass --confirm-institution after reviewing the supplied statement set.")
         if len(confirmed_institution) > 160:
@@ -2105,6 +2129,7 @@ def command_review_handoff(args: argparse.Namespace) -> int:
         "status": REVIEWED_HANDOFF_STATUS,
         "tax_year": source.get("tax_year"),
         "scope": source.get("scope"),
+        "requirements": source.get("requirements"),
         "statement_files": statement_files,
         "currency": source.get("currency"),
         "profile": source.get("profile"),
@@ -2121,6 +2146,7 @@ def command_review_handoff(args: argparse.Namespace) -> int:
             "status": source.get("status"),
             "tax_year": source.get("tax_year"),
             "scope": source.get("scope"),
+            "requirements": source.get("requirements"),
         },
         "review": {
             "user_review_confirmed": True,
@@ -2144,7 +2170,14 @@ def command_preflight(args: argparse.Namespace) -> int:
     csv_path = Path(args.csv) if args.csv else review_csv_path(out_path)
     check_output_paths(out_path, csv_path, args.pdf)
     files = load_pdf_files(args.pdf)
-    data = build_preflight(files, int(args.tax_year), args.scope, out_path, csv_path)
+    data = build_preflight(
+        files,
+        int(args.tax_year),
+        args.scope,
+        out_path,
+        csv_path,
+        require_institution=bool(getattr(args, "require_institution", False)),
+    )
     write_json(out_path, data)
     write_review_csv(csv_path, data)
     print(f"Wrote preflight JSON: {out_path}")
@@ -2532,6 +2565,100 @@ def command_self_test(_args: argparse.Namespace) -> int:
         )
         if not any(gate.get("code") == "possible-mixed-institutions" for gate in mixed_institutions["review_gates"]):  # type: ignore[index]
             failures.append("mixed-institutions: expected possible-mixed-institutions gate across files")
+
+        # FBAR keeps its normal one-account behavior unless it explicitly asks
+        # preflight to prove the issuing institution. This opt-in mode must gate
+        # absent or conflicting evidence and retain a typed reviewer selection.
+        legacy_one_account_institution = build_preflight(
+            [
+                synthetic_file(
+                    "legacy-one-account.pdf",
+                    "Account 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD",
+                )
+            ],
+            2025,
+            "one-account",
+            root / "legacy-one-account-institution.json",
+            root / "legacy-one-account-institution-review.csv",
+        )
+        if legacy_one_account_institution.get("requirements") != {"institution_required": False}:
+            failures.append("institution-required: legacy one-account preflight must record institution requirement as false")
+        if any(gate.get("code") == "unknown-institution" for gate in legacy_one_account_institution["review_gates"]):  # type: ignore[index]
+            failures.append("institution-required: legacy one-account preflight must not introduce an institution gate")
+
+        required_unknown_institution = build_preflight(
+            [
+                synthetic_file(
+                    "required-unknown-institution.pdf",
+                    "Account 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD",
+                )
+            ],
+            2025,
+            "one-account",
+            root / "required-unknown-institution.json",
+            root / "required-unknown-institution-review.csv",
+            require_institution=True,
+        )
+        unknown_institution_codes = [str(gate.get("code")) for gate in required_unknown_institution["review_gates"]]  # type: ignore[index]
+        if required_unknown_institution.get("requirements") != {"institution_required": True} or unknown_institution_codes != ["unknown-institution"]:
+            failures.append("institution-required: expected unknown-institution gate only for an opt-in one-account preflight")
+        required_unknown_source = root / "required-unknown-institution-source.json"
+        required_unknown_handoff = root / "required-unknown-institution-handoff.json"
+        write_json(required_unknown_source, required_unknown_institution)
+        try:
+            command_review_handoff(
+                argparse.Namespace(
+                    input=str(required_unknown_source),
+                    out=str(required_unknown_handoff),
+                    accept_gate=unknown_institution_codes,
+                    user_review_confirmed=True,
+                    confirm_institution="Reviewed Test Bank",
+                )
+            )
+            required_unknown_data = load_json_artifact(required_unknown_handoff, "required institution handoff")
+            required_unknown_resolutions = required_unknown_data.get("user_resolutions")
+            institution_resolution = (
+                required_unknown_resolutions.get("institution") if isinstance(required_unknown_resolutions, dict) else None
+            )
+            if not isinstance(institution_resolution, dict) or institution_resolution.get("name") != "Reviewed Test Bank":
+                failures.append("institution-required: expected source-bound typed institution resolution")
+        except PreflightError as exc:
+            failures.append(f"institution-required: expected unknown issuer confirmation to succeed ({exc})")
+
+        required_mixed_institutions = build_preflight(
+            [
+                synthetic_file(
+                    "required-alpha.pdf",
+                    "Alpha Bank N.A.\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD",
+                ),
+                synthetic_file(
+                    "required-beta.pdf",
+                    "Beta Banco S.A.\nAccount 12345678\nStatement period February 1 2025 to February 28 2025\nCurrency USD",
+                ),
+            ],
+            2025,
+            "one-account",
+            root / "required-mixed-institutions.json",
+            root / "required-mixed-institutions-review.csv",
+            require_institution=True,
+        )
+        required_mixed_codes = [str(gate.get("code")) for gate in required_mixed_institutions["review_gates"]]  # type: ignore[index]
+        if required_mixed_codes != ["possible-missing-statement-period", "possible-mixed-institutions"]:
+            failures.append(f"institution-required: expected mixed issuer evidence gate, got {required_mixed_codes}")
+        required_mixed_source = root / "required-mixed-institutions-source.json"
+        write_json(required_mixed_source, required_mixed_institutions)
+        try:
+            command_review_handoff(
+                argparse.Namespace(
+                    input=str(required_mixed_source),
+                    out=str(root / "required-mixed-institutions-handoff.json"),
+                    accept_gate=required_mixed_codes,
+                    user_review_confirmed=True,
+                    confirm_institution="Reviewed Test Bank",
+                )
+            )
+        except PreflightError as exc:
+            failures.append(f"institution-required: expected mixed issuer confirmation to succeed for opt-in FBAR mode ({exc})")
 
         # The same bank across two months must not read as two institutions.
         same_institution = build_preflight(
@@ -3174,6 +3301,11 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--pdf", nargs="+", required=True, help="Statement PDFs for one tax year and one scope.")
     preflight.add_argument("--tax-year", type=_year_arg, required=True, help=f"Calendar/tax year to verify ({MIN_TAX_YEAR}-{MAX_TAX_YEAR}).")
     preflight.add_argument("--scope", choices=sorted(SUPPORTED_SCOPES), required=True, help="Expected downstream scope.")
+    preflight.add_argument(
+        "--require-institution",
+        action="store_true",
+        help="With one-account scope, require source-bound institution evidence or a reviewed typed institution confirmation.",
+    )
     preflight.add_argument("--out", required=True, help="Output preflight JSON path.")
     preflight.add_argument("--csv", help="Optional review CSV path.")
     preflight.add_argument(
@@ -3225,7 +3357,7 @@ def build_parser() -> argparse.ArgumentParser:
     handoff.add_argument(
         "--confirm-institution",
         metavar="NAME",
-        help="Confirm one institution name only when preflight reports unknown-institution.",
+        help="Confirm one institution name only for an allowed institution review gate.",
     )
     handoff.set_defaults(func=command_review_handoff)
 

@@ -35,7 +35,7 @@ python3 "<package-root>/scripts/statement_intake_preflight.py" preflight \
   --out "work/statement-preflight.json"
 ```
 
-Use `--scope one-account` before `fbar-threshold-check`. Use `--scope one-institution` before `statements-to-interest`.
+Use `--scope one-account --require-institution` before `fbar-threshold-check`; this opt-in addition keeps the one-account scope while requiring issuer evidence or a typed reviewed selection. Use `--scope one-institution` before `statements-to-interest`.
 
 The command writes:
 
@@ -53,7 +53,7 @@ Open the JSON and CSV before continuing. Confirm:
 - `coverage_hints.period_coverage_review` has no possible internal, leading, or trailing statement-period gap. Its period labels are intake hints only; they do not prove complete transaction or balance coverage.
 - `currency.code` is usable, or weak/unknown currency received the specific ISO confirmation below.
 - `account_hints` describe one account when scope is `one-account`, or the user confirmed one-account scope without supplying an account number.
-- `institution_hints` describe one institution when scope is `one-institution`.
+- `institution_hints` describe one institution when scope is `one-institution` or when an FBAR one-account preflight explicitly used `--require-institution`.
 
 Stop for user review when any `review_gates` entry appears. Each gate carries a `severity`:
 
@@ -72,7 +72,7 @@ the corroborated result and proceed.
 - Bare `$` or other weak/unknown currency evidence (`ambiguous-dollar` or `unknown-currency`): ask: “We could not corroborate the account currency from the statement text. Please confirm the ISO currency code (for example, `COP`).” Do not infer USD from `$`.
 - Contextual prior-year date: if the statement period is clearly inside the requested year and its coverage is otherwise clear, explain it without asking: “We found `2024-12-31` as a prior-year opening boundary. The detected statement period is 2025, so this date is contextual and does not change the statement year.” This includes a period that begins exactly on the prior December 31 and ends in the requested year. If coverage is unclear, ask: “We found `2024-12-31` in the Q1 statement. It appears to be a prior-year opening balance, while the statement period appears to be 2025. Please confirm that all supplied statements cover 2025 and that this date is contextual.”
 - Missing account identity in `one-account` scope (`unknown-account`): ask: “We could not extract a reliable account identifier from these statements. Please confirm that the supplied PDFs represent one account. You do not need to provide the account number.”
-- Missing issuer identity in `one-institution` scope (`unknown-institution`): ask: “We could not extract a reliable institution name from these statements. Please confirm the institution name shown on the statements.”
+- Missing issuer identity in `one-institution` scope, or opt-in FBAR `one-account --require-institution` scope (`unknown-institution`): ask: “We could not extract a reliable institution name from these statements. Please confirm the institution name shown on the statements.” For opt-in FBAR mixed issuer evidence (`possible-mixed-institutions`), ask: “The statements contain more than one institution hint. Please confirm the one institution these PDFs represent.”
 
 Do not use a user response to override `mixed-years`, a structural `stop` gate,
 or corroborated contradictory currency/account evidence. Record accepted review
@@ -97,8 +97,8 @@ Complete gate catalog:
 | `mixed-currencies` | review | More than one currency was confirmed. |
 | `possible-mixed-accounts` | review (`one-account`) | More than one account identifier was found. |
 | `unknown-account` | review (`one-account`) | No account identifier was found. |
-| `possible-mixed-institutions` | review (`one-institution`) | More than one institution was found. |
-| `unknown-institution` | review (`one-institution`) | No institution was found in early statement text. |
+| `possible-mixed-institutions` | review (`one-institution` or opt-in FBAR `one-account --require-institution`) | More than one institution was found. |
+| `unknown-institution` | review (`one-institution` or opt-in FBAR `one-account --require-institution`) | No institution was found in early statement text. |
 
 Detection is multilingual where it matters. Currency labels include the German `Währung` (`devise` and `valuta` are deliberately excluded: they collide with the English verb "devise" and with "value date"); negative amounts (accounting parens `(1.234,56)` and the European trailing minus `1.234,56-`) and footnoted codes (`USD¹`) still corroborate a currency; institution detection recognizes `-bank` compound brands (`Commerzbank`, `Rabobank`) when the line also carries banking/statement context, plus `Sparkasse`; account labels include `Konto`, `Kontonummer`, and `Compte`. `USD` is corroborated exactly like every other ISO code — via the `$`/`US$` symbol, a currency label, or an adjacent amount — with no bare-word shortcut, so an incidental "usd" substring or a lone card-FX disclosure line never confirms it.
 
@@ -138,10 +138,10 @@ Repeat `--accept-gate` for every listed review code. Add only the resolution fla
 
 - `--confirm-currency COP` accepts one supported ISO 4217 code only when preflight could not corroborate a currency (`ambiguous-dollar` or `unknown-currency`). It cannot override a confirmed or mixed currency set.
 - `--confirm-one-account` records a one-account assertion without collecting an account number. It is required for `unknown-account` or `possible-mixed-accounts` review gates.
-- `--confirm-institution "Example Bank"` records a one-institution issuer name only for an `unknown-institution` review gate. It cannot override `possible-mixed-institutions` evidence.
+- `--confirm-institution "Example Bank"` records a one-institution issuer name for an `unknown-institution` review gate. In opt-in FBAR `one-account --require-institution` intake, it also records the typed selection for `possible-mixed-institutions`; it never removes the source hints or accepted review gate.
 - `--confirm-statement-year 2025` records the requested tax year when year coverage is unknown or needs review. Pair it with `--classify-contextual-year 2024` only for extracted contextual/unresolved prior-year evidence. A genuine `mixed-years` statement-period gate cannot be overridden; correct the year or statement set and rerun preflight.
 
-The reviewed handoff preserves raw preflight evidence unchanged. Its separate `user_resolutions` section contains confirmation state, accepted gates, the source-preflight SHA-256, and only the user-provided year/currency/account-scope/institution assertions. FBAR extraction verifies the source fields, then rechecks the ordered PDF byte-size and SHA-256 fingerprints before and after parsing. `statements-to-interest` can consume a reviewed `one-institution` handoff only when it verifies the same source binding and typed institution resolution. Changed, duplicate, reordered, or legacy-unfingerprinted files require a fresh preflight (and, where applicable, a new reviewed handoff).
+The reviewed handoff preserves raw preflight evidence unchanged. Its separate `user_resolutions` section contains confirmation state, accepted gates, the source-preflight SHA-256, and only the user-provided year/currency/account-scope/institution assertions. FBAR extraction verifies the source fields, validates an opt-in typed institution selection, rejects a conflicting `--institution` argument, then rechecks the ordered PDF byte-size and SHA-256 fingerprints before and after parsing. `statements-to-interest` can consume a reviewed `one-institution` handoff only when it verifies the same source binding and typed institution resolution. Changed, duplicate, reordered, or legacy-unfingerprinted files require a fresh preflight (and, where applicable, a new reviewed handoff).
 
 Downstream tools should retain preflight warnings, profile hints, and coverage hints (including period and contextual-date evidence) in their own JSON output, but they still own domain-specific parsing and review gates.
 

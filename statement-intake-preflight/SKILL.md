@@ -21,14 +21,14 @@ python3 "<package-root>/scripts/statement_intake_preflight.py" preflight \
   --out work/statement-preflight.json
 ```
 
-Use `--scope one-account` before `fbar-threshold-check`. Use `--scope one-institution` before `statements-to-interest`.
+Use `--scope one-account` before `fbar-threshold-check`. FBAR adds `--require-institution` so its one-account handoff also proves issuer evidence or requires a typed reviewed confirmation. Use `--scope one-institution` before `statements-to-interest`.
 
 The command writes:
 
 - JSON handoff at `--out`.
 - Review CSV beside the JSON unless `--csv` is supplied.
 
-Review the JSON and CSV before passing the JSON to downstream tools. Stop for user review when the output reports non-PDF files, missing files, scanned/image-only or low-text PDFs, duplicate inputs, mixed statement periods, unresolved out-of-period year evidence, possible missing statement periods, mixed currencies, ambiguous `$`, possible mixed accounts, possible mixed institutions, or unknown currency/account context required by the requested downstream workflow. Ask only the gate-specific question in `references/workflow.md`: do not ask about a corroborated currency, a clearly contextual prior-year date, or an extracted account identifier. Never ask for a full account number by default. `references/workflow.md` has the full gate catalog, severities, and ready-to-use wording.
+Review the JSON and CSV before passing the JSON to downstream tools. Stop for user review when the output reports non-PDF files, missing files, scanned/image-only or low-text PDFs, duplicate inputs, mixed statement periods, unresolved out-of-period year evidence, possible missing statement periods, mixed currencies, ambiguous `$`, possible mixed accounts, or issuer evidence required by the requested downstream workflow. Ask only the gate-specific question in `references/workflow.md`: do not ask about a corroborated currency, a clearly contextual prior-year date, or an extracted account identifier. Never ask for a full account number by default. `references/workflow.md` has the full gate catalog, severities, and ready-to-use wording.
 
 ## Downstream Handoff
 
@@ -44,7 +44,7 @@ python3 "<package-root>/scripts/statement_intake_preflight.py" review-handoff \
   --out work/statement-preflight-reviewed.json
 ```
 
-Repeat `--accept-gate` for every code shown in `review_gates`. Add resolution flags only when the corresponding gate requires them: `--confirm-currency ISO` for ambiguous/unknown currency, `--confirm-one-account` without supplying an account number, `--confirm-institution "Name"` for an unknown one-institution issuer, and `--confirm-statement-year TAX_YEAR` with any `--classify-contextual-year PRIOR_YEAR` values. The handoff records these separately from the raw preflight evidence. Never create a handoff for a structural `stop` gate or use reviewer input to override a genuine mixed statement period or conflicting institution evidence.
+Repeat `--accept-gate` for every code shown in `review_gates`. Add resolution flags only when the corresponding gate requires them: `--confirm-currency ISO` for ambiguous/unknown currency, `--confirm-one-account` without supplying an account number, `--confirm-institution "Name"` for an unknown one-institution issuer or an issuer gate from opt-in FBAR `one-account --require-institution` intake, and `--confirm-statement-year TAX_YEAR` with any `--classify-contextual-year PRIOR_YEAR` values. The handoff records these separately from the raw preflight evidence. Never create a handoff for a structural `stop` gate or use reviewer input to override a genuine mixed statement period or conflicting currency/account evidence. The opt-in FBAR issuer confirmation can select one typed institution when issuer evidence is absent or conflicting; the original evidence and review gate remain visible.
 
 ```bash
 python3 "<fbar-root>/scripts/fbar_threshold_check.py" extract-account \
@@ -65,7 +65,7 @@ python3 "<interest-root>/scripts/statements_to_interest.py" extract \
   --out work/interest-analysis.json
 ```
 
-FBAR extraction rejects absent, raw review-required, stale, mismatched, or incomplete handoffs. `statements-to-interest` accepts a reviewed `one-institution` handoff only when its typed institution, currency, and year resolutions validate against the unchanged source preflight. Preflight warnings and gate resolutions remain visible to downstream skills, which still own domain-specific parsing and review gates.
+FBAR extraction rejects absent, raw review-required, stale, mismatched, or incomplete handoffs. For an opt-in issuer gate, it validates and uses the typed institution resolution and rejects a conflicting `--institution` override. `statements-to-interest` accepts a reviewed `one-institution` handoff only when its typed institution, currency, and year resolutions validate against the unchanged source preflight. Preflight warnings and gate resolutions remain visible to downstream skills, which still own domain-specific parsing and review gates.
 
 ## Runtime
 
