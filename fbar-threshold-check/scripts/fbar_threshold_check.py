@@ -1937,7 +1937,11 @@ def command_dependency_check(_args: argparse.Namespace) -> int:
     try:
         import pdfplumber  # noqa: F401
     except ImportError:
-        print("pdfplumber missing")
+        print(
+            "pdfplumber missing — extract-account needs a Python runtime with pdfplumber. "
+            "In Codex Desktop, call load_workspace_dependencies and rerun with the bundled Python; "
+            "otherwise use a Python runtime that includes pdfplumber."
+        )
         return 1
     print("pdfplumber ok")
     return 0

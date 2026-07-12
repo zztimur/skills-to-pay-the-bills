@@ -11,6 +11,14 @@ Collect or infer:
 - Work folder, defaulting to `work/`.
 - Output folder, defaulting to `outputs/`.
 
+Start with a plain-language contract. If the year or PDF paths are missing, say:
+
+```text
+I can prepare an FBAR threshold support check, not determine whether a filing is required. Please upload the statement PDFs for one foreign account and confirm the calendar year. We will review one account at a time.
+```
+
+When the year and PDF paths are already supplied, acknowledge them and start preflight. Do not ask for a currency, account number, or institution before the statement evidence requires it.
+
 Before running extraction:
 
 - Use `statement-intake-preflight` to verify shared statement intake scope: one account, one calendar year, one currency bucket, readable PDFs, and account/currency hints.
@@ -38,7 +46,7 @@ For balance extraction, use a Python runtime with `pdfplumber`:
 python3 "<package-root>/scripts/fbar_threshold_check.py" dependency-check
 ```
 
-If `pdfplumber` is unavailable, stop before balance extraction and report the missing dependency. The shared text-layer readiness check is owned by `statement-intake-preflight`; `confirm-account`, `aggregate`, and `self-test` do not require `pdfplumber`.
+If `pdfplumber` is unavailable in Codex Desktop, call `load_workspace_dependencies` and rerun with the bundled Python executable before treating it as unavailable. Outside Codex Desktop, stop before balance extraction, explain that it needs a Python runtime with `pdfplumber`, and give one next step. The shared text-layer readiness check is owned by `statement-intake-preflight`; `confirm-account`, `aggregate`, and `self-test` do not require `pdfplumber`.
 
 ## 4. Preflight One Account
 
@@ -110,6 +118,19 @@ Open the JSON and CSV before confirming. Confirm these fields:
 - Every day in the year has a native balance.
 - Rows with ambiguous-separator notes match the magnitudes printed on the statement.
 - `warnings` are either resolved or explicitly accepted by the user.
+
+Present this as a concise review card before asking for confirmation; do not ask the user to interpret raw JSON or a 365-row CSV unaided. Include:
+
+- Account label, institution when known, and currency.
+- Coverage: observed days, carried-forward days, and any missing days or carry-forward gaps.
+- Flagged dates or rows, summarized in plain language, plus each review artifact path.
+- The exact next step: upload missing statements, correct an assumption, or confirm the ledger.
+
+Use a direct confirmation prompt such as:
+
+```text
+I extracted [account label] for [year]. Coverage: [observed] observed days and [carried] carried-forward days. Flags: [plain-language summary]. Please confirm that the account/currency and flagged rows are correct, or upload the missing statement(s) or corrections. If everything is correct, reply: "I confirm this ledger."
+```
 
 Stop for user review when any of these appear:
 
