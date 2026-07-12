@@ -44,6 +44,7 @@ ANALYSIS_SUPPORTED_SCHEMA_VERSIONS = {"1.1", SCHEMA_VERSION}
 EXCLUSION_RESOLUTION_SCHEMA_VERSION = "1.0"
 MIN_TEXT_CHARS = 40
 PREFLIGHT_SKILL = "statement-intake-preflight"
+SKILL_ROOTS_ENV = "STATEMENTS_TO_INTEREST_SKILL_ROOTS"
 PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0", "1.1"}
 PREFLIGHT_READY_STATUS = "ready-for-domain-extraction"
 PREFLIGHT_REVIEWED_HANDOFF_STATUS = "reviewed-for-domain-extraction"
@@ -1951,16 +1952,26 @@ def dependency_required_message(currency: str, tax_year: object) -> str:
 
 
 def find_installed_skill(skill_name: str) -> Path | None:
-    candidates: list[Path] = []
+    roots: list[Path] = []
+    configured_roots = os.environ.get(SKILL_ROOTS_ENV, "")
+    for value in configured_roots.split(os.pathsep):
+        if value.strip():
+            roots.append(Path(value.strip()).expanduser())
     script_path = Path(__file__).resolve()
     if len(script_path.parents) >= 3:
-        candidates.append(script_path.parents[2] / skill_name / "SKILL.md")
+        roots.append(script_path.parents[2])
     env_codex_home = os.environ.get("CODEX_HOME")
     if env_codex_home:
-        candidates.append(Path(env_codex_home) / "skills" / skill_name / "SKILL.md")
-    candidates.append(Path.home() / ".codex" / "skills" / skill_name / "SKILL.md")
+        roots.append(Path(env_codex_home) / "skills")
+    roots.extend(
+        [
+            Path.home() / ".codex" / "skills",
+            Path.home() / ".claude" / "skills",
+        ]
+    )
     seen: set[Path] = set()
-    for candidate in candidates:
+    for root in roots:
+        candidate = root / skill_name / "SKILL.md"
         resolved = candidate.expanduser()
         if resolved in seen:
             continue
@@ -1997,6 +2008,12 @@ def command_dependency_check(args: argparse.Namespace) -> int:
     if failures:
         for failure in failures:
             print(failure, file=sys.stderr)
+        if not preflight_skill:
+            print(
+                f"For a nonstandard skill location, set {SKILL_ROOTS_ENV} to one or more skill-root directories "
+                f"separated by {os.pathsep!r}.",
+                file=sys.stderr,
+            )
         print("Use the bundled Codex workspace Python or install the missing required dependency.", file=sys.stderr)
         return 2
     print("PDF runtime dependencies available: pdfplumber, reportlab, pypdf.")
@@ -2345,6 +2362,7 @@ def report_rows_and_total(analysis: dict, input_path: Path) -> tuple[list[dict],
 def command_fx_prompt(args: argparse.Namespace) -> int:
     input_path = Path(args.input)
     analysis = load_analysis_payload(input_path)
+    validate_analysis_contract(analysis, input_path)
     rows, _totals, currency, foreign_total = report_rows_and_total(analysis, input_path)
     if foreign_total == 0:
         print("No interest rows were counted, so no FX confirmation is needed.")
@@ -3118,6 +3136,21 @@ def command_self_test(args: argparse.Namespace) -> int:
             "excluded_candidates": [],
         }
         validate_analysis_contract(valid_analysis, tmp_path / "valid-analysis.json")
+        configured_skill_root = tmp_path / "configured-skills"
+        configured_skill_path = configured_skill_root / PREFLIGHT_SKILL / "SKILL.md"
+        configured_skill_path.parent.mkdir(parents=True)
+        configured_skill_path.write_text("---\nname: statement-intake-preflight\n---\n", encoding="utf-8")
+        prior_skill_roots = os.environ.get(SKILL_ROOTS_ENV)
+        os.environ[SKILL_ROOTS_ENV] = str(configured_skill_root)
+        try:
+            configured_skill = find_installed_skill(PREFLIGHT_SKILL)
+            if configured_skill != configured_skill_path:
+                failures.append(f"dependency-search-roots: expected {configured_skill_path}, got {configured_skill}")
+        finally:
+            if prior_skill_roots is None:
+                os.environ.pop(SKILL_ROOTS_ENV, None)
+            else:
+                os.environ[SKILL_ROOTS_ENV] = prior_skill_roots
         review_analysis = dict(valid_analysis)
         review_analysis["excluded_candidates"] = [
             {
@@ -3363,7 +3396,7 @@ def command_self_test(args: argparse.Namespace) -> int:
     print(
         f"Self-test passed: {layout_fixture_count} deidentified layout fixtures, "
         f"{len(cases) + 6} parser/review cases, 5 privacy cases, "
-        "15 FX/dependency/proof cases, strict preflight/provenance identity checks"
+        "16 FX/dependency/proof cases, strict preflight/provenance identity checks"
     )
     return 0
 

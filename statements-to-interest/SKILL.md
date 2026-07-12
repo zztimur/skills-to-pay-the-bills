@@ -124,6 +124,8 @@ To check the required preflight skill, optional FX workpaper skill, and the acti
 python "<package-root>/scripts/statements_to_interest.py" dependency-check
 ```
 
+`dependency-check` searches sibling skill folders, Codex installs, and `~/.claude/skills`. For another host layout, set `STATEMENTS_TO_INTEREST_SKILL_ROOTS` to one or more skill-root directories separated by the platform path separator. This improves the diagnostic only; the host must still discover and load each companion skill.
+
 ## Package Compatibility
 
 This is a single dual-runtime package. Codex/OpenAI Agent Skills use this root `SKILL.md`, `agents/openai.yaml`, `scripts/`, and `references/`. Claude Code uses `.claude-plugin/plugin.json` plus `commands/statements-to-interest.md`, while reusing the same scripts and references. Do not maintain separate workflow copies.
