@@ -35,6 +35,11 @@ except BaseException as _exc:  # noqa: BLE001 - see below  # pragma: no cover
 # schema versions they accept, so bump this only on a breaking JSON change and
 # update those consumers in lockstep.
 SCHEMA_VERSION = "1.0"
+PREFLIGHT_SKILL = "statement-intake-preflight"
+READY_STATUS = "ready-for-domain-extraction"
+REVIEW_REQUIRED_STATUS = "review-required"
+REVIEWED_HANDOFF_STATUS = "reviewed-for-domain-extraction"
+REVIEWED_HANDOFF_TYPE = "reviewed-handoff"
 MIN_TEXT_CHARS = 40
 MIN_TAX_YEAR = 1970
 MAX_TAX_YEAR = 2100
@@ -1152,11 +1157,11 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
     title_values = stable_unique((title for item in statement_files for title in item.get("statement_titles", [])), limit=20)
     period_values = stable_unique((period for item in statement_files for period in item.get("detected_periods", [])), limit=30)
     primary_institution = most_common_hint(institution_hints)
-    status = "review-required" if gates else "ready-for-domain-extraction"
+    status = REVIEW_REQUIRED_STATUS if gates else READY_STATUS
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "skill": "statement-intake-preflight",
+        "skill": PREFLIGHT_SKILL,
         "status": status,
         "tax_year": tax_year,
         "scope": scope,
@@ -1296,8 +1301,144 @@ def check_output_paths(out_path: Path, csv_path: Path, pdf_paths: list[str]) -> 
 
 
 def review_exit_code(status: str, exit_nonzero_on_review: bool) -> int:
-    if exit_nonzero_on_review and status == "review-required":
+    if exit_nonzero_on_review and status == REVIEW_REQUIRED_STATUS:
         return REVIEW_EXIT_CODE
+    return 0
+
+
+def load_json_artifact(path: Path, label: str) -> dict[str, object]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise PreflightError(f"Could not read {label} {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise PreflightError(f"{label.capitalize()} {path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise PreflightError(f"{label.capitalize()} {path} must contain a JSON object.")
+    return data
+
+
+def review_gates_for_handoff(data: dict[str, object]) -> list[dict[str, str]]:
+    if data.get("skill") != PREFLIGHT_SKILL:
+        raise PreflightError(f"Preflight JSON must come from {PREFLIGHT_SKILL}.")
+    if str(data.get("schema_version", "")) != SCHEMA_VERSION:
+        raise PreflightError(
+            f"Unsupported preflight schema_version {data.get('schema_version')!r}; rerun preflight with the current skill."
+        )
+    if data.get("status") != REVIEW_REQUIRED_STATUS:
+        raise PreflightError(
+            "review-handoff requires a preflight with status review-required; pass a ready preflight directly to the downstream skill."
+        )
+    raw_gates = data.get("review_gates")
+    if not isinstance(raw_gates, list) or not raw_gates:
+        raise PreflightError("review-required preflight has no review_gates to acknowledge; rerun preflight.")
+
+    gates: list[dict[str, str]] = []
+    seen_codes: set[str] = set()
+    for raw_gate in raw_gates:
+        if not isinstance(raw_gate, dict):
+            raise PreflightError("Preflight review_gates must contain objects; rerun preflight.")
+        code = str(raw_gate.get("code") or "").strip()
+        severity = str(raw_gate.get("severity") or "").strip()
+        message = str(raw_gate.get("message") or "").strip()
+        if not code or not severity or not message:
+            raise PreflightError("Every preflight review gate needs code, severity, and message; rerun preflight.")
+        if code in seen_codes:
+            raise PreflightError(f"Preflight has duplicate review gate code {code!r}; rerun preflight.")
+        seen_codes.add(code)
+        gates.append({"code": code, "severity": severity, "message": message})
+
+    stop_codes = sorted(gate["code"] for gate in gates if gate["severity"] == "stop")
+    if stop_codes:
+        raise PreflightError(
+            "Cannot create a reviewed handoff while structural stop gate(s) remain: "
+            f"{', '.join(stop_codes)}. Fix or remove those input files, then rerun preflight."
+        )
+    unexpected_severities = sorted({gate["severity"] for gate in gates if gate["severity"] != "review"})
+    if unexpected_severities:
+        raise PreflightError(
+            "Preflight review gate severities must be review or stop; found "
+            f"{', '.join(unexpected_severities)}. Rerun preflight with the current skill."
+        )
+    return gates
+
+
+def command_review_handoff(args: argparse.Namespace) -> int:
+    input_path = Path(args.input)
+    out_path = Path(args.out)
+    if normalize_path(input_path) == normalize_path(out_path):
+        raise PreflightError("--input and --out resolve to the same path; preserve the original preflight JSON.")
+    if not args.user_review_confirmed:
+        raise PreflightError("Pass --user-review-confirmed only after the user has reviewed every listed preflight gate.")
+
+    source = load_json_artifact(input_path, "preflight JSON")
+    gates = review_gates_for_handoff(source)
+    expected_codes = {gate["code"] for gate in gates}
+    accepted_codes = [str(code).strip() for code in (args.accept_gate or []) if str(code).strip()]
+    accepted_set = set(accepted_codes)
+    if len(accepted_set) != len(accepted_codes):
+        raise PreflightError("Pass each --accept-gate code exactly once.")
+    if accepted_set != expected_codes:
+        missing = sorted(expected_codes - accepted_set)
+        unexpected = sorted(accepted_set - expected_codes)
+        details: list[str] = []
+        if missing:
+            details.append(f"missing acceptance for {', '.join(missing)}")
+        if unexpected:
+            details.append(f"unknown gate code(s) {', '.join(unexpected)}")
+        raise PreflightError("Accepted gate codes must exactly match the review gates: " + "; ".join(details))
+
+    source_sha256 = file_sha256(input_path)
+    if not source_sha256:
+        raise PreflightError(f"Could not hash source preflight JSON {input_path}.")
+    statement_files = source.get("statement_files")
+    if not isinstance(statement_files, list):
+        raise PreflightError("Preflight JSON has no statement_files list; rerun preflight.")
+    protected_paths = {normalize_path(input_path)}
+    for item in statement_files:
+        if isinstance(item, dict):
+            source_file = item.get("resolved_file") or item.get("file")
+            if source_file:
+                protected_paths.add(normalize_path(str(source_file)))
+    source_artifacts = source.get("artifacts")
+    if isinstance(source_artifacts, dict) and source_artifacts.get("review_csv"):
+        protected_paths.add(normalize_path(str(source_artifacts["review_csv"])))
+    if normalize_path(out_path) in protected_paths:
+        raise PreflightError("--out would overwrite the source preflight, its review CSV, or an input statement; choose another path.")
+
+    handoff: dict[str, object] = {
+        "schema_version": SCHEMA_VERSION,
+        "skill": PREFLIGHT_SKILL,
+        "artifact_type": REVIEWED_HANDOFF_TYPE,
+        "status": REVIEWED_HANDOFF_STATUS,
+        "tax_year": source.get("tax_year"),
+        "scope": source.get("scope"),
+        "statement_files": statement_files,
+        "currency": source.get("currency"),
+        "profile": source.get("profile"),
+        "account_hints": source.get("account_hints", []),
+        "institution_hints": source.get("institution_hints", []),
+        "warnings": source.get("warnings", []),
+        "review_gates": gates,
+        "source_preflight": {
+            "path": str(input_path),
+            "resolved_path": normalize_path(input_path),
+            "sha256": source_sha256,
+            "schema_version": source.get("schema_version"),
+            "status": source.get("status"),
+            "tax_year": source.get("tax_year"),
+            "scope": source.get("scope"),
+        },
+        "review": {
+            "user_review_confirmed": True,
+            "accepted_gate_codes": sorted(accepted_set),
+            "confirmed_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        },
+        "artifacts": {"source_preflight_json": str(input_path)},
+    }
+    write_json(out_path, handoff)
+    print(f"Wrote reviewed handoff JSON: {out_path}")
+    print(f"Accepted review gates: {', '.join(sorted(accepted_set))}")
     return 0
 
 
@@ -2027,6 +2168,87 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if review_exit_code("ready-for-domain-extraction", True) != 0:
             failures.append("exit-code: a ready result must exit 0 even with the opt-in flag")
 
+        # A review-required preflight becomes usable downstream only through a
+        # separate, user-confirmed handoff that acknowledges every review gate.
+        reviewed_source = root / "review-required.json"
+        write_json(reviewed_source, mixed_currency)
+        reviewed_handoff = root / "reviewed-handoff.json"
+        handoff_args = argparse.Namespace(
+            input=str(reviewed_source),
+            out=str(reviewed_handoff),
+            accept_gate=["mixed-currencies"],
+            user_review_confirmed=True,
+        )
+        if command_review_handoff(handoff_args) != 0:
+            failures.append("review-handoff: expected reviewed preflight to produce a handoff")
+        handoff_data = load_json_artifact(reviewed_handoff, "reviewed handoff")
+        if handoff_data.get("status") != REVIEWED_HANDOFF_STATUS:
+            failures.append("review-handoff: expected reviewed-for-domain-extraction status")
+        review = handoff_data.get("review")
+        if not isinstance(review, dict) or review.get("accepted_gate_codes") != ["mixed-currencies"]:
+            failures.append("review-handoff: expected accepted gate record")
+        source_meta = handoff_data.get("source_preflight")
+        if not isinstance(source_meta, dict) or source_meta.get("sha256") != file_sha256(reviewed_source):
+            failures.append("review-handoff: expected source preflight digest")
+
+        for label, handoff_arg in (
+            (
+                "no user confirmation",
+                argparse.Namespace(
+                    input=str(reviewed_source),
+                    out=str(root / "unconfirmed-handoff.json"),
+                    accept_gate=["mixed-currencies"],
+                    user_review_confirmed=False,
+                ),
+            ),
+            (
+                "incomplete acceptance",
+                argparse.Namespace(
+                    input=str(reviewed_source),
+                    out=str(root / "incomplete-handoff.json"),
+                    accept_gate=[],
+                    user_review_confirmed=True,
+                ),
+            ),
+        ):
+            try:
+                command_review_handoff(handoff_arg)
+                failures.append(f"review-handoff: expected {label} to be rejected")
+            except PreflightError:
+                pass
+
+        protected_statement = mixed_currency["statement_files"][0]["resolved_file"]  # type: ignore[index]
+        try:
+            command_review_handoff(
+                argparse.Namespace(
+                    input=str(reviewed_source),
+                    out=str(protected_statement),
+                    accept_gate=["mixed-currencies"],
+                    user_review_confirmed=True,
+                )
+            )
+            failures.append("review-handoff: expected input-statement overwrite to be rejected")
+        except PreflightError:
+            pass
+
+        stop_source = dict(mixed_currency)
+        stop_source["review_gates"] = [{"code": "low-text-pdf", "severity": "stop", "message": "too little text"}]
+        stop_source["status"] = REVIEW_REQUIRED_STATUS
+        stop_path = root / "stop-preflight.json"
+        write_json(stop_path, stop_source)
+        try:
+            command_review_handoff(
+                argparse.Namespace(
+                    input=str(stop_path),
+                    out=str(root / "stop-handoff.json"),
+                    accept_gate=["low-text-pdf"],
+                    user_review_confirmed=True,
+                )
+            )
+            failures.append("review-handoff: expected structural stop gate to be rejected")
+        except PreflightError:
+            pass
+
         write_json(root / "clean.json", clean)
         write_review_csv(root / "clean-review.csv", clean)
         if not (root / "clean-review.csv").exists():
@@ -2036,7 +2258,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         for failure in failures:
             print(f"FAIL: {failure}", file=sys.stderr)
         return 1
-    print("Self-test passed: 43 preflight cases")
+    print("Self-test passed: deterministic preflight coverage")
     return 0
 
 
@@ -2066,6 +2288,25 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Exit {REVIEW_EXIT_CODE} (instead of 0) when the result is review-required, for scripted callers.",
     )
     preflight.set_defaults(func=command_preflight)
+
+    handoff = subparsers.add_parser(
+        "review-handoff",
+        help="Create a reviewed handoff for a preflight with non-structural review gates.",
+    )
+    handoff.add_argument("--input", required=True, help="review-required preflight JSON to preserve and acknowledge.")
+    handoff.add_argument("--out", required=True, help="Output reviewed-handoff JSON path.")
+    handoff.add_argument(
+        "--accept-gate",
+        action="append",
+        required=True,
+        help="One review gate code explicitly confirmed by the user; repeat for every gate.",
+    )
+    handoff.add_argument(
+        "--user-review-confirmed",
+        action="store_true",
+        help="Required after the user reviewed every listed non-structural preflight gate.",
+    )
+    handoff.set_defaults(func=command_review_handoff)
 
     dependency = subparsers.add_parser("dependency-check", help="Check extraction dependency availability.")
     dependency.set_defaults(func=command_dependency_check)

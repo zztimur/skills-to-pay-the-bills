@@ -49,7 +49,7 @@ Ask for the skill directly:
 Use $statement-intake-preflight to check these 2025 statement PDFs before FBAR extraction.
 ```
 
-Codex should read the root `SKILL.md`, then `references/workflow.md`, run the script, review the JSON/CSV, and only then hand the JSON to `fbar-threshold-check` or `statements-to-interest`.
+Codex should read the root `SKILL.md`, then `references/workflow.md`, run the script, and review the JSON/CSV. A clean preflight can go to the downstream skill; for FBAR, a review-required preflight needs a separate user-confirmed handoff first.
 
 ## Use It In Claude Code
 
@@ -85,13 +85,23 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py preflig
   --out work/statement-preflight.json
 ```
 
-Then pass the reviewed JSON to the downstream skill:
+Then either pass a clean FBAR preflight JSON to the downstream skill, or create a reviewed handoff after explicit user confirmation of every non-structural review gate:
+
+```bash
+python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-handoff \
+  --input work/statement-preflight.json \
+  --accept-gate ambiguous-dollar \
+  --user-review-confirmed \
+  --out work/statement-preflight-reviewed.json
+```
+
+Repeat `--accept-gate` for each gate. Structural `stop` gates cannot be accepted: correct the inputs and rerun preflight. For a reviewed handoff, use the new JSON path below:
 
 ```bash
 python3 fbar-threshold-check/scripts/fbar_threshold_check.py extract-account \
   --pdf statement-01.pdf statement-02.pdf \
   --tax-year 2025 \
-  --preflight-json work/statement-preflight.json \
+  --preflight-json work/statement-preflight-reviewed.json \
   --out work/account-1.json
 ```
 
