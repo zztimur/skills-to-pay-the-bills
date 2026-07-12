@@ -578,14 +578,57 @@ def infer_currency(text: str, override: str | None, warnings: list[str]) -> str:
     return "UNKNOWN"
 
 
+def account_hint_token(raw: object) -> str | None:
+    """Keep a numeric, masked, or IBAN-shaped account identifier only."""
+    cleaned = clean_text(raw).strip(" .:-")
+    if not cleaned:
+        return None
+    iban = re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9 ]{6,34}", cleaned, re.I)
+    if iban:
+        return re.sub(r"\s+", "", cleaned).upper()
+    match = re.match(r"[A-Za-z]{0,4}[*Xx0-9](?:[*Xx0-9]|[ .\-](?=[*Xx0-9]))*", cleaned)
+    if not match:
+        return None
+    token = match.group(0).strip(" .-")
+    compact = re.sub(r"[ .\-]", "", token)
+    digits = sum(char.isdigit() for char in compact)
+    masks = sum(char in "*Xx" for char in compact)
+    return token if digits + masks >= 4 else None
+
+
+def stable_account_hints(values: Iterable[object]) -> list[str]:
+    hints: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        hint = account_hint_token(raw)
+        if not hint:
+            continue
+        key = re.sub(r"[ .\-]", "", hint).upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        hints.append(hint)
+    return hints
+
+
 def extract_account_hints(text: str) -> list[str]:
     hints: list[str] = []
     for pattern in ACCOUNT_PATTERNS:
         for match in pattern.finditer(text):
-            hint = re.sub(r"\s+", " ", match.group(1)).strip(" .:-")
-            if len(re.sub(r"[^A-Za-z0-9]", "", hint)) >= 3:
-                hints.append(hint[:48])
-    return sorted(set(hints))
+            hint = account_hint_token(match.group(1))
+            if hint:
+                hints.append(hint)
+    return stable_account_hints(hints)
+
+
+def selected_account_hints(preflight: dict[str, object], full_text: str) -> list[str]:
+    """Prefer the source-bound preflight identity over local text heuristics."""
+    preflight_hints = preflight.get("account_hints")
+    if isinstance(preflight_hints, list):
+        validated = stable_account_hints(preflight_hints)
+        if validated:
+            return validated
+    return extract_account_hints(full_text)
 
 
 def load_pdf_lines(pdf_paths: list[str]) -> tuple[list[tuple[SourceRef, str]], list[dict[str, object]], str, list[str]]:
@@ -1428,11 +1471,7 @@ def command_extract_account(args: argparse.Namespace) -> int:
             preflight_code = str(preflight_currency.get("code") or "").upper()
             if preflight_code not in {"", "UNKNOWN", "MIXED"}:
                 currency = preflight_code
-    account_hints = extract_account_hints(full_text)
-    if not account_hints and preflight:
-        preflight_account_hints = preflight.get("account_hints")
-        if isinstance(preflight_account_hints, list):
-            account_hints = [str(hint) for hint in preflight_account_hints if str(hint).strip()]
+    account_hints = selected_account_hints(preflight, full_text)
     if len(account_hints) > 1:
         warnings.append(f"Multiple account hints found; verify this is one account: {', '.join(account_hints[:8])}.")
     if not account_hints:
@@ -2095,6 +2134,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         test_sign_formats()
         test_line_extraction()
         test_source_bound_short_dates(root)
+        test_account_hint_selection()
         test_build_daily_rows()
         test_native_balance_precision()
         test_leap_year()
@@ -2446,6 +2486,13 @@ def test_source_bound_short_dates(root: Path) -> None:
     candidates, warnings = extract_balance_candidates(mismatched_lines, 2025, "COP", page_period_contexts=contexts)
     assert not candidates, candidates
     assert any("No balance candidates" in warning for warning in warnings), warnings
+
+
+def test_account_hint_selection() -> None:
+    assert extract_account_hints("Cuenta 76543210") == ["76543210"]
+    assert extract_account_hints("Cuenta DE AHORROS") == []
+    assert selected_account_hints({"account_hints": ["76543210"]}, "Cuenta 12345678") == ["76543210"]
+    assert selected_account_hints({"account_hints": ["DE AHORROS"]}, "Cuenta 12345678") == ["12345678"]
 
 
 def test_fx_rate_guards(root: Path) -> None:
