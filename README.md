@@ -74,7 +74,7 @@ The pre-commit hook runs the `privacy-gate` scan and auto-syncs the vendored `wo
 
 ## Using A Skill
 
-Each top-level folder is its own skill package. Install or copy the package you need into your agent's skill location, then invoke it by name.
+Each top-level skill folder is its own agent package. Install or copy the package you need into your agent's skill location, then invoke it by name. `workpaper-kit/` is the one internal-library exception; use its README only when changing shared workpaper code.
 
 Codex/OpenAI-style prompts look like:
 
