@@ -140,7 +140,7 @@ python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py self-test
 python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py map-check
 ```
 
-The workpaper machinery — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — is vendored here as `scripts/_workpaper.py` and shared with `get-year-end-fx-rate`. In the source repository, edit the canonical `workpaper-kit/workpaper.py`, never the generated copy; the pre-commit hook re-syncs it (or run `workpaper-kit/sync.sh`). A standalone installed package is runtime-only and does not include that canonical kit. The IRS lookup, currency handling, and rate parsing stay here in the skill.
+The workpaper machinery — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — is vendored here as `scripts/_workpaper.py` and shared with `get-year-end-fx-rate`. The installed skill runs standalone: it imports this local copy, never `workpaper-kit` at runtime. For shared proof-packet changes in the source repository, edit the canonical `workpaper-kit/workpaper.py`, never the generated copy; the pre-commit hook re-syncs it (or run `workpaper-kit/sync.sh`). Standalone installs do not include the canonical kit. The IRS lookup, currency handling, and rate parsing stay here in the skill.
 
 If the PDF layout changes, render a sample PDF and actually look at the pages. A passing byte check is nice. A readable workpaper is the point.
 
