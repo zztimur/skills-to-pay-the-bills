@@ -40,10 +40,12 @@ Those are related but not identical. The skill keeps them separate so the suppor
 Ask for the skill directly:
 
 ```text
-Use $fbar-threshold-check to check whether my foreign accounts crossed the FBAR threshold for 2025.
+Use $fbar-threshold-check to check my 2025 foreign-account statements against the $10,000 FBAR threshold; start with one account and tell me exactly what you need.
 ```
 
 Codex should read the root `SKILL.md`, then `references/workflow.md`, run `statement-intake-preflight` for shared intake, and use this script for extraction, confirmation, and aggregation. It must stop on preflight review gates, create a reviewed handoff only after explicit user confirmation, and pause again for FBAR ledger review when the script reports coverage gaps, ambiguous balance amounts, conflicting balance candidates, or low-confidence balance rows.
+
+Have the PDFs for one account ready. Codex asks only for the calendar year and files that are still missing, then summarizes coverage and any flags in plain language before asking you to confirm a ledger.
 
 ## Use It In Claude Code
 
@@ -56,6 +58,14 @@ The same package carries a Claude plugin command:
 The command file is only an adapter. The root `SKILL.md`, `references/`, and script are the source of truth.
 
 ## Run The Script Manually
+
+Before balance extraction, check the parser runtime:
+
+```bash
+python3 fbar-threshold-check/scripts/fbar_threshold_check.py dependency-check
+```
+
+If it reports `pdfplumber missing` in Codex Desktop, use the bundled Python runtime after `load_workspace_dependencies`; otherwise use a Python runtime that includes `pdfplumber`.
 
 Preflight one account:
 

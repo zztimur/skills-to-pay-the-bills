@@ -103,6 +103,8 @@ If the daily threshold is exceeded, list the dates. If records are incomplete, s
 python3 "<package-root>/scripts/fbar_threshold_check.py" dependency-check
 ```
 
+If it reports `pdfplumber missing` in Codex Desktop, call `load_workspace_dependencies` and rerun with the bundled Python executable. Otherwise, explain that extraction needs a Python runtime with `pdfplumber` and give one next step; `confirm-account`, `aggregate`, and `self-test` can still run without it.
+
 `confirm-account`, `aggregate`, and `self-test` use only Python standard-library modules.
 
 ## Maintainer Checks
