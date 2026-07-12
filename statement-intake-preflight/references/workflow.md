@@ -112,11 +112,19 @@ For `fbar-threshold-check` specifically:
 python3 "<package-root>/scripts/statement_intake_preflight.py" review-handoff \
   --input "work/statement-preflight.json" \
   --accept-gate "ambiguous-dollar" \
+  --confirm-currency COP \
+  --confirm-one-account \
   --user-review-confirmed \
   --out "work/statement-preflight-reviewed.json"
 ```
 
-Repeat `--accept-gate` for every listed review code. The handoff preserves the original preflight path, SHA-256, scope, tax year, PDF metadata, gate list, and explicit acceptance record. FBAR extraction verifies all of those fields, then rechecks the ordered PDF byte-size and SHA-256 fingerprints before and after parsing. Changed, duplicate, reordered, or legacy-unfingerprinted files require a fresh preflight (and, where applicable, a new reviewed handoff).
+Repeat `--accept-gate` for every listed review code. Add only the resolution flags required by the source gates:
+
+- `--confirm-currency COP` accepts one supported ISO 4217 code only when preflight could not corroborate a currency (`ambiguous-dollar` or `unknown-currency`). It cannot override a confirmed or mixed currency set.
+- `--confirm-one-account` records a one-account assertion without collecting an account number. It is required for `unknown-account` or `possible-mixed-accounts` review gates.
+- `--confirm-statement-year 2025` records the requested tax year when year coverage is unknown or needs review. Pair it with `--classify-contextual-year 2024` only for extracted contextual/unresolved prior-year evidence. A genuine `mixed-years` statement-period gate cannot be overridden; correct the year or statement set and rerun preflight.
+
+The reviewed handoff preserves raw preflight evidence unchanged. Its separate `user_resolutions` section contains confirmation state, accepted gates, the source-preflight SHA-256, and only the user-provided year/currency/account-scope assertions. FBAR extraction verifies the source fields, then rechecks the ordered PDF byte-size and SHA-256 fingerprints before and after parsing. Changed, duplicate, reordered, or legacy-unfingerprinted files require a fresh preflight (and, where applicable, a new reviewed handoff).
 
 Downstream tools should retain preflight warnings, profile hints, and coverage hints (including period and contextual-date evidence) in their own JSON output, but they still own domain-specific parsing and review gates.
 

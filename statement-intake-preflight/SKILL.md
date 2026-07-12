@@ -38,11 +38,13 @@ Pass a `ready-for-domain-extraction` JSON directly into downstream extraction. F
 python3 "<package-root>/scripts/statement_intake_preflight.py" review-handoff \
   --input work/statement-preflight.json \
   --accept-gate ambiguous-dollar \
+  --confirm-currency COP \
+  --confirm-one-account \
   --user-review-confirmed \
   --out work/statement-preflight-reviewed.json
 ```
 
-Repeat `--accept-gate` for every code shown in `review_gates`. Never create a handoff for a structural `stop` gate.
+Repeat `--accept-gate` for every code shown in `review_gates`. Add resolution flags only when the corresponding gate requires them: `--confirm-currency ISO` for ambiguous/unknown currency, `--confirm-one-account` without supplying an account number, and `--confirm-statement-year TAX_YEAR` with any `--classify-contextual-year PRIOR_YEAR` values. The handoff records these separately from the raw preflight evidence. Never create a handoff for a structural `stop` gate or use reviewer input to override a genuine mixed statement period.
 
 ```bash
 python3 "<fbar-root>/scripts/fbar_threshold_check.py" extract-account \

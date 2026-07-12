@@ -1766,6 +1766,148 @@ def review_gates_for_handoff(data: dict[str, object]) -> list[dict[str, str]]:
     return gates
 
 
+def _unique_year_arguments(args: argparse.Namespace, attribute: str) -> list[int]:
+    values = [int(value) for value in (getattr(args, attribute, None) or [])]
+    if len(set(values)) != len(values):
+        raise PreflightError(f"Pass each {attribute.replace('_', '-')} value only once.")
+    return sorted(values)
+
+
+def _coverage_years(coverage: dict[str, object], key: str) -> set[int]:
+    raw_values = coverage.get(key, [])
+    if not isinstance(raw_values, list):
+        return set()
+    years: set[int] = set()
+    for value in raw_values:
+        try:
+            years.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return years
+
+
+def build_user_resolutions(
+    source: dict[str, object], gates: list[dict[str, str]], args: argparse.Namespace
+) -> dict[str, object]:
+    """Validate explicit reviewer input without changing source preflight evidence."""
+    gate_codes = {gate["code"] for gate in gates}
+    try:
+        tax_year = int(source.get("tax_year"))
+    except (TypeError, ValueError):
+        raise PreflightError("Preflight tax_year is invalid; rerun preflight with the current skill.") from None
+    if not (MIN_TAX_YEAR <= tax_year <= MAX_TAX_YEAR):
+        raise PreflightError("Preflight tax_year is outside the supported range; rerun preflight.")
+
+    coverage = source.get("coverage_hints") if isinstance(source.get("coverage_hints"), dict) else {}
+    contextual_years = _coverage_years(coverage, "contextual_years")
+    unresolved_years = _coverage_years(coverage, "unresolved_years")
+    outside_period_years = _coverage_years(coverage, "outside_requested_years")
+
+    confirmed_years = _unique_year_arguments(args, "confirm_statement_year")
+    classified_contextual_years = _unique_year_arguments(args, "classify_contextual_year")
+    year_gate_codes = {"mixed-years", "unresolved-year-evidence", "unknown-year-coverage"} & gate_codes
+    if "mixed-years" in year_gate_codes:
+        # A source-referenced period that actually crosses years cannot be made
+        # into a one-year statement by accepting a gate. The user must select the
+        # correct tax year or supply corrected statement files and preflight again.
+        raise PreflightError(
+            "mixed-years cannot be resolved by reviewed input; rerun preflight with the corrected tax year or statement set."
+        )
+    if confirmed_years and confirmed_years != [tax_year]:
+        raise PreflightError(
+            f"Confirmed statement years must be exactly the requested tax year {tax_year}; rerun preflight to use another year."
+        )
+    if year_gate_codes and not confirmed_years:
+        raise PreflightError(
+            f"Pass --confirm-statement-year {tax_year} after reviewing {', '.join(sorted(year_gate_codes))}."
+        )
+    if classified_contextual_years and not confirmed_years:
+        raise PreflightError("--classify-contextual-year requires --confirm-statement-year for the requested tax year.")
+    allowed_contextual_years = contextual_years | {year for year in unresolved_years if year != tax_year}
+    unexpected_contextual_years = sorted(set(classified_contextual_years) - allowed_contextual_years)
+    if unexpected_contextual_years:
+        raise PreflightError(
+            "Contextual-year classifications must match extracted contextual or unresolved year evidence: "
+            + ", ".join(str(year) for year in unexpected_contextual_years)
+        )
+    required_contextual_years = {year for year in unresolved_years if year != tax_year}
+    if "unresolved-year-evidence" in year_gate_codes and set(classified_contextual_years) != required_contextual_years:
+        raise PreflightError(
+            "Resolve every out-of-period unresolved year with --classify-contextual-year before creating a reviewed handoff."
+        )
+    if outside_period_years:
+        # Defensive guard for legacy/hand-edited artifacts whose gate list was
+        # altered: a period outside the requested year is never reviewer-overridable.
+        raise PreflightError(
+            "Source evidence contains statement-period year(s) outside the requested tax year; rerun preflight with corrected scope."
+        )
+
+    currency = source.get("currency") if isinstance(source.get("currency"), dict) else {}
+    source_currency = str(currency.get("code") or "")
+    currency_gate_codes = {"ambiguous-dollar", "unknown-currency"} & gate_codes
+    confirmed_currency = str(getattr(args, "confirm_currency", "") or "").strip().upper()
+    if currency_gate_codes:
+        if source_currency != "UNKNOWN":
+            raise PreflightError("Currency review input is allowed only when preflight could not corroborate a currency.")
+        if not confirmed_currency:
+            raise PreflightError(
+                "Pass --confirm-currency with an ISO 4217 code after reviewing ambiguous or unknown currency evidence."
+            )
+        if confirmed_currency not in CURRENCY_CODES:
+            raise PreflightError(f"{confirmed_currency!r} is not a supported ISO 4217 currency code.")
+    elif confirmed_currency:
+        raise PreflightError("--confirm-currency is only allowed when preflight reports ambiguous-dollar or unknown-currency.")
+
+    account_gate_codes = {"unknown-account", "possible-mixed-accounts"} & gate_codes
+    confirmed_one_account = bool(getattr(args, "confirm_one_account", False))
+    if account_gate_codes:
+        if source.get("scope") != "one-account":
+            raise PreflightError("Account-scope confirmation is valid only for a one-account preflight.")
+        if not confirmed_one_account:
+            raise PreflightError("Pass --confirm-one-account after reviewing the supplied statement set.")
+    elif confirmed_one_account:
+        raise PreflightError("--confirm-one-account is only allowed when preflight reports unknown-account or possible-mixed-accounts.")
+
+    return {
+        "statement_years": (
+            {
+                "status": "user-confirmed",
+                "confirmed_years": confirmed_years,
+                "contextual_year_classifications": [
+                    {
+                        "year": year,
+                        "classification": "user-confirmed-contextual-prior-year",
+                        "source": "user-review",
+                    }
+                    for year in classified_contextual_years
+                ],
+            }
+            if confirmed_years or classified_contextual_years
+            else {"status": "not-required"}
+        ),
+        "currency": (
+            {
+                "status": "user-confirmed",
+                "code": confirmed_currency,
+                "source_currency_code": source_currency,
+                "resolved_gate_codes": sorted(currency_gate_codes),
+            }
+            if confirmed_currency
+            else {"status": "not-required"}
+        ),
+        "one_account": (
+            {
+                "status": "user-confirmed",
+                "confirmed": True,
+                "account_identifier_provided": False,
+                "resolved_gate_codes": sorted(account_gate_codes),
+            }
+            if confirmed_one_account
+            else {"status": "not-required"}
+        ),
+    }
+
+
 def command_review_handoff(args: argparse.Namespace) -> int:
     input_path = Path(args.input)
     out_path = Path(args.out)
@@ -1790,6 +1932,8 @@ def command_review_handoff(args: argparse.Namespace) -> int:
         if unexpected:
             details.append(f"unknown gate code(s) {', '.join(unexpected)}")
         raise PreflightError("Accepted gate codes must exactly match the review gates: " + "; ".join(details))
+
+    user_resolutions = build_user_resolutions(source, gates, args)
 
     source_sha256 = file_sha256(input_path)
     if not source_sha256:
@@ -1837,6 +1981,10 @@ def command_review_handoff(args: argparse.Namespace) -> int:
             "user_review_confirmed": True,
             "accepted_gate_codes": sorted(accepted_set),
             "confirmed_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        },
+        "user_resolutions": {
+            "source_preflight_sha256": source_sha256,
+            **user_resolutions,
         },
         "artifacts": {"source_preflight_json": str(input_path)},
     }
@@ -2657,6 +2805,101 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if handoff_data.get("coverage_hints") != mixed_currency.get("coverage_hints"):
             failures.append("review-handoff: expected coverage hints to remain visible downstream")
 
+        # Structured reviewer resolutions are separate from the immutable source
+        # preflight. This covers a 2025 period carrying unclassified 2024 date
+        # evidence, a bare dollar sign, and no account hint.
+        resolution_preflight = build_preflight(
+            [
+                synthetic_file(
+                    "resolution.pdf",
+                    "Example Bank Statement\nStatement period January 1 2025 to March 31 2025\n"
+                    "Historic reference 31/12/2024\nClosing balance $100.00",
+                )
+            ],
+            2025,
+            "one-account",
+            root / "resolution.json",
+            root / "resolution-review.csv",
+        )
+        resolution_source = root / "resolution-source.json"
+        write_json(resolution_source, resolution_preflight)
+        resolution_before = load_json_artifact(resolution_source, "resolution source")
+        resolution_codes = [str(gate.get("code")) for gate in resolution_preflight["review_gates"]]  # type: ignore[index]
+        resolution_out = root / "resolution-handoff.json"
+        resolution_args = argparse.Namespace(
+            input=str(resolution_source),
+            out=str(resolution_out),
+            accept_gate=resolution_codes,
+            user_review_confirmed=True,
+            confirm_statement_year=[2025],
+            classify_contextual_year=[2024],
+            confirm_currency="cop",
+            confirm_one_account=True,
+        )
+        if command_review_handoff(resolution_args) != 0:
+            failures.append("review-handoff-resolutions: expected valid structured reviewer resolutions")
+        if load_json_artifact(resolution_source, "resolution source") != resolution_before:
+            failures.append("review-handoff-resolutions: source preflight must remain unchanged")
+        resolved_data = load_json_artifact(resolution_out, "resolved handoff")
+        resolutions = resolved_data.get("user_resolutions")
+        if not isinstance(resolutions, dict):
+            failures.append("review-handoff-resolutions: expected user_resolutions object")
+        else:
+            statement_resolution = resolutions.get("statement_years")
+            currency_resolution = resolutions.get("currency")
+            account_resolution = resolutions.get("one_account")
+            if not isinstance(statement_resolution, dict) or statement_resolution.get("confirmed_years") != [2025]:
+                failures.append(f"review-handoff-resolutions: expected confirmed 2025 statement year, got {statement_resolution}")
+            if not isinstance(currency_resolution, dict) or currency_resolution.get("code") != "COP":
+                failures.append(f"review-handoff-resolutions: expected COP confirmation, got {currency_resolution}")
+            if not isinstance(account_resolution, dict) or account_resolution.get("account_identifier_provided") is not False:
+                failures.append(f"review-handoff-resolutions: expected identifier-free account confirmation, got {account_resolution}")
+            if resolutions.get("source_preflight_sha256") != file_sha256(resolution_source):
+                failures.append("review-handoff-resolutions: expected source fingerprint alongside user resolutions")
+
+        for label, overrides in (
+            ("missing currency", {"confirm_currency": None}),
+            ("invalid currency", {"confirm_currency": "USDX"}),
+            ("wrong statement year", {"confirm_statement_year": [2024]}),
+            ("unknown contextual year", {"classify_contextual_year": [2023]}),
+        ):
+            values = {
+                "input": str(resolution_source),
+                "out": str(root / f"resolution-{label}.json"),
+                "accept_gate": resolution_codes,
+                "user_review_confirmed": True,
+                "confirm_statement_year": [2025],
+                "classify_contextual_year": [2024],
+                "confirm_currency": "COP",
+                "confirm_one_account": True,
+            }
+            values.update(overrides)
+            try:
+                command_review_handoff(argparse.Namespace(**values))
+                failures.append(f"review-handoff-resolutions: expected {label} to be rejected")
+            except PreflightError:
+                pass
+
+        mixed_year_source = root / "mixed-year-resolution.json"
+        write_json(mixed_year_source, mixed_year)
+        mixed_year_codes = [str(gate.get("code")) for gate in mixed_year["review_gates"]]  # type: ignore[index]
+        try:
+            command_review_handoff(
+                argparse.Namespace(
+                    input=str(mixed_year_source),
+                    out=str(root / "mixed-year-resolution-handoff.json"),
+                    accept_gate=mixed_year_codes,
+                    user_review_confirmed=True,
+                    confirm_statement_year=[2025],
+                    classify_contextual_year=[],
+                    confirm_currency=None,
+                    confirm_one_account=False,
+                )
+            )
+            failures.append("review-handoff-resolutions: expected genuine mixed-years to require a fresh preflight")
+        except PreflightError:
+            pass
+
         for label, handoff_arg in (
             (
                 "no user confirmation",
@@ -2771,6 +3014,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--user-review-confirmed",
         action="store_true",
         help="Required after the user reviewed every listed non-structural preflight gate.",
+    )
+    handoff.add_argument(
+        "--confirm-statement-year",
+        action="append",
+        type=_year_arg,
+        help="Confirm the requested statement year after review; repeat only if the handoff requests it.",
+    )
+    handoff.add_argument(
+        "--classify-contextual-year",
+        action="append",
+        type=_year_arg,
+        help="Classify one extracted prior year as contextual after confirming the requested statement year.",
+    )
+    handoff.add_argument(
+        "--confirm-currency",
+        metavar="ISO",
+        help="Confirm one ISO 4217 currency only when preflight reports ambiguous-dollar or unknown-currency.",
+    )
+    handoff.add_argument(
+        "--confirm-one-account",
+        action="store_true",
+        help="Confirm the supplied PDFs represent one account without recording an account number.",
     )
     handoff.set_defaults(func=command_review_handoff)
 

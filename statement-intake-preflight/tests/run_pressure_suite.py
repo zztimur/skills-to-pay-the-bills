@@ -75,6 +75,24 @@ def run(tag: str, pdfs: list[str], year: str = "2025", scope: str = "one-account
     return proc, data
 
 
+def run_handoff(tag: str, source: Path, gate_codes: list[str], extra=None):
+    out = WORK / f"{tag}.json"
+    cmd = [sys.executable, str(SCRIPT), "review-handoff", "--input", str(source), "--out", str(out)]
+    for code in gate_codes:
+        cmd += ["--accept-gate", code]
+    cmd.append("--user-review-confirmed")
+    if extra:
+        cmd += extra
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    data = None
+    if out.exists():
+        try:
+            data = json.loads(out.read_text())
+        except json.JSONDecodeError:
+            pass
+    return proc, data
+
+
 def gates_of(data) -> list[str]:
     return [g["code"] for g in data["review_gates"]] if data else []
 
@@ -487,6 +505,64 @@ check("PER-4 omitted Q2 trips possible-missing-statement-period",
 proc, d = run("period-missing-q4", [str(q1), str(q2), str(q3)])
 check("PER-5 omitted Q4 trips possible-missing-statement-period",
       d and "possible-missing-statement-period" in gates_of(d), f"gates={gates_of(d)}")
+
+# --------------------------------------------------------------------------- #
+# Reviewed handoff resolutions -- user input stays separate from raw evidence
+# --------------------------------------------------------------------------- #
+
+resolution_pdf = make_pdf("resolution-review.pdf", [
+    "Example Bank Statement",
+    "Statement period January 1 2025 to March 31 2025",
+    "Historic reference 31/12/2024",
+    "Closing balance $100.00",
+])
+proc, d = run("resolution-review-preflight", [str(resolution_pdf)])
+resolution_source = WORK / "resolution-review-preflight.json"
+resolution_gates = gates_of(d)
+proc, handoff = run_handoff(
+    "resolution-review-handoff",
+    resolution_source,
+    resolution_gates,
+    [
+        "--confirm-statement-year", "2025",
+        "--classify-contextual-year", "2024",
+        "--confirm-currency", "COP",
+        "--confirm-one-account",
+    ],
+)
+resolutions = handoff.get("user_resolutions", {}) if handoff else {}
+check("HANDOFF-1 structured year, currency, and one-account confirmations produce a reviewed handoff",
+      proc.returncode == 0 and handoff and handoff.get("status") == "reviewed-for-domain-extraction"
+      and isinstance(resolutions, dict)
+      and resolutions.get("source_preflight_sha256")
+      and isinstance(resolutions.get("statement_years"), dict)
+      and resolutions["statement_years"].get("confirmed_years") == [2025]
+      and isinstance(resolutions.get("currency"), dict) and resolutions["currency"].get("code") == "COP"
+      and isinstance(resolutions.get("one_account"), dict) and resolutions["one_account"].get("account_identifier_provided") is False,
+      f"exit={proc.returncode} stderr={proc.stderr.strip()} resolutions={resolutions}")
+
+proc, handoff = run_handoff(
+    "resolution-missing-currency",
+    resolution_source,
+    resolution_gates,
+    ["--confirm-statement-year", "2025", "--classify-contextual-year", "2024", "--confirm-one-account"],
+)
+check("HANDOFF-2 unresolved currency cannot be accepted without an ISO confirmation",
+      proc.returncode != 0 and handoff is None, f"exit={proc.returncode} stderr={proc.stderr.strip()}")
+
+proc, handoff = run_handoff(
+    "resolution-wrong-year",
+    resolution_source,
+    resolution_gates,
+    [
+        "--confirm-statement-year", "2024",
+        "--classify-contextual-year", "2024",
+        "--confirm-currency", "COP",
+        "--confirm-one-account",
+    ],
+)
+check("HANDOFF-3 a contradictory statement-year confirmation is rejected",
+      proc.returncode != 0 and handoff is None, f"exit={proc.returncode} stderr={proc.stderr.strip()}")
 
 # --------------------------------------------------------------------------- #
 # Duplicate detection -- same path, symlink, relative alias, and byte-identical
