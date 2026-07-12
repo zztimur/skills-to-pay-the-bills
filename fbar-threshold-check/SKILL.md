@@ -1,6 +1,6 @@
 ---
 name: fbar-threshold-check
-description: Check whether foreign accounts crossed the $10,000 FBAR (FinCEN Form 114) threshold for a tax year. Use for account statements, daily ledgers, multi-account aggregation, year-end FX conversion.
+description: Check the $10,000 FBAR threshold from foreign account statements. Use for reviewed preflight handoffs, daily ledgers, multi-account aggregation, and year-end FX conversion.
 ---
 
 # FBAR Threshold Check
