@@ -30,7 +30,7 @@ Do not use:
 - Spot rates; they are outside this yearly-average workflow.
 - Unsourced search snippets, LLM memory, or a page that does not expose the actual year/rate.
 
-For an IRS lookup, use the canonical IRS yearly-average page. A saved `--html-file` is only a retained offline replay of that page; do not substitute a different URL or label another table as IRS data.
+For an IRS lookup, use the canonical IRS yearly-average page. A saved `--html-file` is only a local replay of that page: retain and hash it, but do not treat the file itself as independently IRS-verified. The final answer and workpaper must visibly identify it as a local HTML replay and say the retained snapshot needs verification. Do not substitute a different URL or label another table as IRS data.
 
 Treasury reporting rates are government data, but they are quarterly reporting rates for U.S. government agency reporting and are not annual averages. Use them only with an explicit caveat and only when the user or preparer accepts that source.
 
@@ -79,7 +79,7 @@ The proof packet supports later review. It is not automatically attached to a ta
 For non-IRS/manual sources, require both:
 
 - Explicit confirmation that the source labels the rate as a yearly/annual average.
-- A local proof file saved before the workpaper is created.
+- A local, regular non-symlink proof file saved before the workpaper is created.
 - A nonempty absolute `http://` or `https://` source URL.
 - A specific source note of at least 16 characters that identifies yearly/annual-average support.
 
@@ -103,7 +103,7 @@ Stop instead of answering when:
 
 - No published annual average can be found.
 - Only daily/monthly/quarterly data is available and no user/preparer custom rate was supplied.
-- A manual non-IRS source has no saved local proof artifact.
+- A manual non-IRS source has no saved local regular proof artifact, or its proof path is a symlink.
 - A manual non-IRS source has not been explicitly confirmed as a published yearly/annual average.
 - A manual source URL/note is empty or malformed, its retrieval date is in the future, or its metadata identifies a non-annual rate.
 - Rate direction cannot be determined.

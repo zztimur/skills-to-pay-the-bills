@@ -82,7 +82,7 @@ python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py lookup \
   --output-root work/fx-rate-proof
 ```
 
-If the script cannot reach the IRS page (exit code 5, common in sandboxed or proxied environments), fetch the canonical IRS page yourself, save its raw HTML as a regular UTF-8 file no larger than 5 MiB, and rerun `lookup` with `--html-file <saved.html>`. The saved file replays the IRS source; it cannot replace the source URL or make another table look IRS-backed.
+If the script cannot reach the IRS page (exit code 5, common in sandboxed or proxied environments), fetch the canonical IRS page yourself, save its raw HTML as a regular UTF-8 file no larger than 5 MiB, and rerun `lookup` with `--html-file <saved.html>`. The saved file is a local replay, not independently IRS-verified evidence: the output and workpaper label it as such and add a caveat. Verify the retained snapshot before relying on it.
 
 Manual workpaper for a non-IRS published annual source:
 
@@ -102,7 +102,7 @@ python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py manual \
 
 `foreign-per-usd` means `1 USD = <rate> foreign currency`. Use `usd-per-foreign` only when the source is quoted as `1 foreign currency = <rate> USD`.
 
-For non-IRS manual sources, the proof file is required. Save the source page as PDF/HTML, take a screenshot, or download the source data first. A folder, broken link, or missing path is not proof; the command stops before it creates a packet. The script copies a valid proof into the workpaper folder and hashes it. It also requires a real absolute source URL, a specific note that says why the rate is a yearly/annual average, and a retrieval date that is not in the future. Daily, monthly, quarterly, intraday, spot, year-end, and FBAR source labels are rejected instead of getting a yearly-average costume.
+For non-IRS manual sources, the proof file is required. Save the source page as PDF/HTML, take a screenshot, or download the source data first. A folder, symlink, broken link, or missing path is not proof; the command stops before it creates a packet. The script copies a valid proof into the workpaper folder and hashes it. It also requires a real absolute source URL, a specific note that says why the rate is a yearly/annual average, and a retrieval date that is not in the future. Daily, monthly, quarterly, intraday, spot, year-end, and FBAR source labels are rejected instead of getting a yearly-average costume.
 
 Pass `--rate` as a plain number with no thousands separators (`4200` or `4200.00`, never `4,200`); an ambiguous value is rejected rather than silently rescaled into a workpaper. For a real ISO 4217 code the skill does not already know (outside the IRS table and its aliases), add `--allow-unknown-code` to confirm it is not a typo.
 
@@ -140,7 +140,7 @@ python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py self-test
 python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py map-check
 ```
 
-The workpaper machinery — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — lives in [`workpaper-kit`](../workpaper-kit/), vendored here as `scripts/_workpaper.py` and shared with `get-year-end-fx-rate` so both proof packets look the same. Edit the canonical `workpaper-kit/workpaper.py`, never the generated copy; the pre-commit hook re-syncs it (or run `workpaper-kit/sync.sh`). The IRS lookup, currency handling, and rate parsing stay here in the skill.
+The workpaper machinery — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — is vendored here as `scripts/_workpaper.py` and shared with `get-year-end-fx-rate`. In the source repository, edit the canonical `workpaper-kit/workpaper.py`, never the generated copy; the pre-commit hook re-syncs it (or run `workpaper-kit/sync.sh`). A standalone installed package is runtime-only and does not include that canonical kit. The IRS lookup, currency handling, and rate parsing stay here in the skill.
 
 If the PDF layout changes, render a sample PDF and actually look at the pages. A passing byte check is nice. A readable workpaper is the point.
 

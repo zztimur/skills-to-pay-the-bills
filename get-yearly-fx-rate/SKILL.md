@@ -37,7 +37,7 @@ python3 "<package-root>/scripts/get_yearly_fx_rate.py" lookup \
   --output-root work/fx-rate-proof
 ```
 
-If the script cannot reach the IRS page (exit code 5, common in sandboxed or proxied environments), fetch the IRS yearly-average page with your web tool, save its raw HTML as a regular UTF-8 file no larger than 5 MiB, and rerun `lookup` with `--html-file <saved.html>`. The lookup always records the canonical IRS page as its source; `--html-file` is only an offline snapshot replay.
+If the script cannot reach the IRS page (exit code 5, common in sandboxed or proxied environments), fetch the IRS yearly-average page with your web tool, save its raw HTML as a regular UTF-8 file no larger than 5 MiB, and rerun `lookup` with `--html-file <saved.html>`. This is a local HTML replay: the script retains and hashes the snapshot but cannot independently verify its IRS origin. It labels the source and packet as a local replay and prints a caveat; verify the retained snapshot before relying on it.
 
 Manual published-source workpaper after the agent has found a non-IRS annual source:
 
@@ -57,7 +57,7 @@ python3 "<package-root>/scripts/get_yearly_fx_rate.py" manual \
 
 Use `foreign-per-usd` when the rate means one U.S. dollar equals the foreign-currency amount. Use `usd-per-foreign` only when the published rate means one unit of foreign currency equals the U.S. dollar amount.
 
-For manual non-IRS workpapers, do not run the script until there is a local proof file and the source explicitly labels the rate as a yearly/annual average. The proof file can be a screenshot, PDF save/print, HTML snapshot, downloaded source data file, or another retained source artifact. `--source-url` must be a nonempty absolute `http://` or `https://` URL, `--source-note` must explain annual-average support, and `--retrieved` must be today or earlier. The helper refuses metadata that identifies daily, weekly, monthly, quarterly, intraday, spot, year-end, or FBAR use.
+For manual non-IRS workpapers, do not run the script until there is a local, regular non-symlink proof file and the source explicitly labels the rate as a yearly/annual average. The proof file can be a screenshot, PDF save/print, HTML snapshot, downloaded source data file, or another retained source artifact. `--source-url` must be a nonempty absolute `http://` or `https://` URL, `--source-note` must explain annual-average support, and `--retrieved` must be today or earlier. The helper refuses metadata that identifies daily, weekly, monthly, quarterly, intraday, spot, year-end, or FBAR use.
 
 ## Proof Packet
 
@@ -104,13 +104,13 @@ Use Markdown links for every retained local artifact so the chat UI can expose t
 
 A Markdown link to a local absolute path is only clickable/downloadable when the chat client has direct filesystem access to this machine, true for a local desktop session but not for a hosted/remote session (for example, Claude Code on the web) where the user's browser cannot reach this container's filesystem. When running in such a session, also deliver each retained artifact using the host's file-delivery capability (for example, Claude Code's `SendUserFile` tool) in addition to the links above.
 
-Add one short caveat only when needed, such as `The IRS table did not list this currency, so this uses a non-IRS published annual average.` Do not call the rate IRS-approved.
+Add one short caveat only when needed, such as `The IRS table did not list this currency, so this uses a non-IRS published annual average.` A local IRS HTML replay must say: `Uses a locally supplied IRS HTML snapshot; verify the retained snapshot before relying on it.` Do not call the rate IRS-approved.
 
 ## Runtime And Validation
 
 The script uses only Python standard-library modules. Use `python3` unless the active environment provides `python`.
 
-`scripts/get_yearly_fx_rate.py` imports `scripts/_workpaper.py`, a generated, byte-identical copy of the shared `workpaper-kit/workpaper.py` proof-packet engine. Do not hand-edit `_workpaper.py`; update the canonical kit and run `workpaper-kit/sync.sh` to regenerate both FX skills.
+`scripts/get_yearly_fx_rate.py` imports `scripts/_workpaper.py`, a generated, byte-identical copy of the shared proof-packet engine. Do not hand-edit `_workpaper.py`. In the source repository, update `workpaper-kit/workpaper.py` and run `workpaper-kit/sync.sh` to regenerate both FX skills. A standalone installed package is runtime-only and does not include the canonical kit.
 
 After changing this skill, run:
 
