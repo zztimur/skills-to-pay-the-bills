@@ -1,0 +1,10 @@
+Sanitized pdfplumber text fixture. This is not a customer statement.
+Layout Test Bank
+Account Statement
+Account currency: COP
+Account No. 123.456.789 # privacy-gate: allow
+Statement period: 2025-01-01 to 2025-01-31
+Page 2 of 2
+Fecha | Descripcion | Debito | Credito | Saldo
+2025-01-31 18:03:11 Interest credited REF-REDACTED $0.00 $2,017.75 $5,434,227.97
+Page footer | Layout Test Bank | 2 / 2

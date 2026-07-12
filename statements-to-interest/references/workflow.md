@@ -364,6 +364,8 @@ After editing `scripts/statements_to_interest.py`, run:
 python "<package-root>/scripts/statements_to_interest.py" self-test
 ```
 
+The canonical `workpaper-kit` exists only in the source repository. An installed package treats `scripts/_workpaper.py` as a read-only vendored dependency; do not try to edit or regenerate it there.
+
 To verify the published-yearly-average FX dependency is discoverable:
 
 ```bash

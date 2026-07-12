@@ -106,7 +106,7 @@ The final answer after a completed run should lead with the PDF path, then inclu
 
 Use a Python environment with `pdfplumber`, `reportlab`, and `pypdf`. In Codex desktop, call `load_workspace_dependencies` and prefer the bundled workspace Python when system Python lacks these packages. If no compatible runtime is available, stop before analysis and report the missing dependency.
 
-The PDF layout is vendored from the canonical `workpaper-kit/workpaper.py` as `scripts/_workpaper.py`. Edit the kit, then run `workpaper-kit/sync.sh`; never hand-edit the vendored copy. Its optional ReportLab renderer is used only for the support-packet PDF, so the FX skills keep their standard-library runtime.
+In the source repository only, the PDF layout is vendored from canonical `workpaper-kit/workpaper.py` as `scripts/_workpaper.py`. Change the canonical kit there, then run `workpaper-kit/sync.sh`; never hand-edit the vendored copy. An installed package is a read-only consumer of `scripts/_workpaper.py` and does not contain `workpaper-kit`. Its optional ReportLab renderer is used only for the support-packet PDF, so the FX skills keep their standard-library runtime.
 
 After changing the parser, run:
 
