@@ -140,6 +140,15 @@ python3 fbar-threshold-check/scripts/fbar_threshold_check.py self-test
 python3 -S skill-forge/scripts/inspect_skill_package.py fbar-threshold-check --json --strict
 ```
 
+Before shipping a preflight-handoff change, also run the real-PDF integration
+suite from this repository. It exercises the `statement-intake-preflight` and
+FBAR CLIs together, including reviewed handoffs and file-identity refusals
+(needs `reportlab` + `pdfplumber`; it skips cleanly when they are absent):
+
+```bash
+python3 fbar-threshold-check/tests/run_preflight_integration.py
+```
+
 If Claude Code is available locally:
 
 ```bash

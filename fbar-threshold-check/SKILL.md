@@ -115,6 +115,11 @@ python3 -S skill-forge/scripts/inspect_skill_package.py "<package-root>" --json 
 claude plugin validate --strict "<package-root>"  # when Claude tooling is available
 ```
 
+For changes to the `statement-intake-preflight` handoff, run
+`tests/run_preflight_integration.py` from a checkout where the required sibling
+skill is available; it uses real PDFs and skips cleanly without test-only
+`reportlab` and `pdfplumber`.
+
 ## Package Compatibility
 
 This is a single multi-agent package. The root `SKILL.md`, `references/`, and `scripts/` are the source of truth. `agents/openai.yaml` is OpenAI/Codex discovery metadata only. `.claude-plugin/plugin.json` and `commands/fbar-threshold-check.md` are Claude adapters only; do not duplicate workflow or source policy in adapter files.
