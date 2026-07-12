@@ -148,6 +148,11 @@ DATE_PATTERNS = (
     re.compile(r"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b"),
     re.compile(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})\b"),
 )
+# A short date is accepted only at the start of a transaction row and only
+# after a verified preflight period supplies its missing year.  Do not add a
+# global DD/MM fallback: statements use both orders and a bare tax year is not
+# enough source evidence to choose one.
+SHORT_TRANSACTION_DATE_RE = re.compile(r"^\s*(\d{1,2})\s*/\s*(\d{1,2})(?=\s|$)")
 
 MONTHS = {
     "jan": 1,
@@ -244,6 +249,22 @@ class BalanceCandidate:
     confidence: str
     source: SourceRef
     notes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PagePeriodContext:
+    """A preflight period whose source line was re-verified in the PDF."""
+
+    start: date
+    end: date
+    source_line: int
+
+
+@dataclass(frozen=True)
+class InferredShortDate:
+    value: date
+    note: str
+    span: tuple[int, int]
 
 
 def clean_text(value: object) -> str:
@@ -382,7 +403,7 @@ def iso_day(value: date) -> str:
     return value.isoformat()
 
 
-def parse_line_dates(line: str) -> list[tuple[date, str, str]]:
+def parse_line_dates(line: str, inferred_short_date: InferredShortDate | None = None) -> list[tuple[date, str, str]]:
     dates: list[tuple[date, str, str]] = []
     for match in DATE_PATTERNS[0].finditer(line):
         year, month, day = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
@@ -428,6 +449,9 @@ def parse_line_dates(line: str) -> list[tuple[date, str, str]]:
         except ValueError:
             continue
 
+    if not dates and inferred_short_date is not None:
+        dates.append((inferred_short_date.value, "medium", inferred_short_date.note))
+
     unique: dict[str, tuple[date, str, str]] = {}
     for item in dates:
         unique[item[0].isoformat()] = item
@@ -446,7 +470,7 @@ MASK_ONLY_PATTERNS = (
 )
 
 
-def mask_date_spans(line: str) -> str:
+def mask_date_spans(line: str, extra_spans: Iterable[tuple[int, int]] = ()) -> str:
     """Blank out date substrings so their fragments cannot parse as money.
 
     Uses '#' (not alphanumeric) so masking never bridges or blocks adjacent
@@ -457,7 +481,53 @@ def mask_date_spans(line: str) -> str:
         for match in pattern.finditer(line):
             for index in range(match.start(), match.end()):
                 chars[index] = "#"
+    for start, end in extra_spans:
+        for index in range(max(0, start), min(len(chars), end)):
+            chars[index] = "#"
     return "".join(chars)
+
+
+def infer_short_transaction_date(
+    line: str, period_contexts: tuple[PagePeriodContext, ...], day_first: bool
+) -> InferredShortDate | None:
+    """Resolve an anchored short transaction date from one verified page period.
+
+    A table value such as ``4/01`` has no year and may be DD/MM or MM/DD.  It
+    is therefore useful only when one high-confidence preflight period was
+    re-verified in the same PDF page.  Spanish ``DESDE ... HASTA`` pages use
+    DD/MM; all other pages must yield exactly one in-period interpretation.
+    """
+    if len(period_contexts) != 1:
+        return None
+    match = SHORT_TRANSACTION_DATE_RE.search(line)
+    if not match:
+        return None
+
+    first, second = int(match.group(1)), int(match.group(2))
+    context = period_contexts[0]
+    day_month_pairs = ((first, second),) if day_first else ((first, second), (second, first))
+    candidates: set[date] = set()
+    for day, month in day_month_pairs:
+        for year in range(context.start.year, context.end.year + 1):
+            try:
+                candidate = date(year, month, day)
+            except ValueError:
+                continue
+            if context.start <= candidate <= context.end:
+                candidates.add(candidate)
+    if len(candidates) != 1:
+        return None
+
+    value = next(iter(candidates))
+    style = "DD/MM" if day_first else "short numeric"
+    return InferredShortDate(
+        value=value,
+        note=(
+            f"{style} date inferred from source-bound page statement period "
+            f"{context.start.isoformat()} through {context.end.isoformat()}."
+        ),
+        span=(match.start(), match.end()),
+    )
 
 
 def parse_money_values(line: str) -> list[tuple[Decimal, str, int, tuple[str, ...]]]:
@@ -566,6 +636,7 @@ def extract_balance_candidates(
     lines: list[tuple[SourceRef, str]],
     tax_year: int,
     currency: str,
+    page_period_contexts: dict[tuple[str, int], tuple[PagePeriodContext, ...]] | None = None,
 ) -> tuple[list[BalanceCandidate], list[str]]:
     warnings: list[str] = []
     candidates: list[BalanceCandidate] = []
@@ -576,20 +647,30 @@ def extract_balance_candidates(
     outside_year = 0
     low_confidence = 0
     ambiguous_amount_lines = 0
+    period_contexts = page_period_contexts or {}
     for ref, line in lines:
         lower = line.lower()
-        date_hits = parse_line_dates(line)
+        page_key = (normalize_preflight_path(ref.file), ref.page)
+        page_lower = page_text[(ref.file, ref.page)]
+        inferred_short_date = infer_short_transaction_date(
+            line,
+            period_contexts.get(page_key, ()),
+            day_first="desde" in page_lower and "hasta" in page_lower,
+        )
+        date_hits = parse_line_dates(line, inferred_short_date)
         if not date_hits:
             continue
         # Mask date substrings first so fragments like "31/12" or "31, 2023"
         # can never be selected as the day's balance.
-        money_values = parse_money_values(mask_date_spans(line))
+        extra_spans = (inferred_short_date.span,) if inferred_short_date is not None else ()
+        money_values = parse_money_values(mask_date_spans(line, extra_spans))
         if not money_values:
             continue
 
         has_balance_term = any(term in lower for term in BALANCE_TERMS)
-        header_has_balance = any(term in page_text[(ref.file, ref.page)] for term in BALANCE_TERMS)
-        if not has_balance_term and not (header_has_balance and len(money_values) >= 3):
+        header_has_balance = any(term in page_lower for term in BALANCE_TERMS)
+        table_minimum_amounts = 2 if inferred_short_date is not None else 3
+        if not has_balance_term and not (header_has_balance and len(money_values) >= table_minimum_amounts):
             continue
         if any(term in lower for term in LOW_VALUE_TERMS) and not has_balance_term:
             continue
@@ -882,6 +963,62 @@ def write_account_csv(path: Path, account_data: dict[str, object]) -> None:
 
 def normalize_preflight_path(path: str | Path) -> str:
     return str(Path(path).expanduser().resolve(strict=False))
+
+
+def preflight_page_period_contexts(
+    preflight: dict[str, object], lines: list[tuple[SourceRef, str]]
+) -> dict[tuple[str, int], tuple[PagePeriodContext, ...]]:
+    """Return only preflight periods whose source line still matches the PDF.
+
+    Period hints are useful for restoring a missing transaction-row year, but
+    they must not become an independent source of truth.  Require the exact
+    preflight source line to still contain both recorded full dates after the
+    extraction-time PDF fingerprint check.
+    """
+    source_lines = {
+        (normalize_preflight_path(ref.file), ref.page, ref.line): text for ref, text in lines
+    }
+    raw_files = preflight.get("statement_files")
+    if not isinstance(raw_files, list):
+        return {}
+
+    contexts: dict[tuple[str, int], list[PagePeriodContext]] = defaultdict(list)
+    for raw_file in raw_files:
+        if not isinstance(raw_file, dict):
+            continue
+        source_path = raw_file.get("resolved_file") or raw_file.get("file")
+        if not source_path:
+            continue
+        normalized_path = normalize_preflight_path(str(source_path))
+        raw_periods = raw_file.get("period_intervals")
+        if not isinstance(raw_periods, list):
+            continue
+        for raw_period in raw_periods:
+            if not isinstance(raw_period, dict) or str(raw_period.get("confidence")) != "high":
+                continue
+            source_ref = raw_period.get("source_ref")
+            if not isinstance(source_ref, dict):
+                continue
+            try:
+                start = date.fromisoformat(str(raw_period.get("start")))
+                end = date.fromisoformat(str(raw_period.get("end")))
+                page = int(source_ref.get("page"))
+                line_number = int(source_ref.get("line"))
+            except (TypeError, ValueError):
+                continue
+            if end < start or page <= 0 or line_number <= 0:
+                continue
+            source_line = source_lines.get((normalized_path, page, line_number))
+            if not source_line:
+                continue
+            verified_dates = {parsed_date for parsed_date, _confidence, _note in parse_line_dates(source_line)}
+            if start not in verified_dates or end not in verified_dates:
+                continue
+            key = (normalized_path, page)
+            context = PagePeriodContext(start=start, end=end, source_line=line_number)
+            if context not in contexts[key]:
+                contexts[key].append(context)
+    return {key: tuple(value) for key, value in contexts.items()}
 
 
 def preflight_file_sha256(path: Path) -> str:
@@ -1264,6 +1401,7 @@ def command_extract_account(args: argparse.Namespace) -> int:
     lines, file_profiles, full_text, pdf_warnings = load_pdf_lines(args.pdf)
     verify_preflight_statement_fingerprints(preflight, args.pdf)
     warnings.extend(pdf_warnings)
+    page_period_contexts = preflight_page_period_contexts(preflight, lines)
 
     user_resolutions = preflight.get("user_resolutions") if isinstance(preflight.get("user_resolutions"), dict) else {}
     reviewed_currency = user_resolutions.get("currency") if isinstance(user_resolutions.get("currency"), dict) else {}
@@ -1302,7 +1440,9 @@ def command_extract_account(args: argparse.Namespace) -> int:
     if currency in {"UNKNOWN", "MIXED"}:
         warnings.append("Account currency is not confirmed; do not confirm this ledger until resolved.")
 
-    candidates, candidate_warnings = extract_balance_candidates(lines, args.tax_year, currency)
+    candidates, candidate_warnings = extract_balance_candidates(
+        lines, args.tax_year, currency, page_period_contexts=page_period_contexts
+    )
     warnings.extend(candidate_warnings)
     daily_rows, coverage, coverage_warnings = build_daily_rows(args.tax_year, currency, candidates)
     warnings.extend(coverage_warnings)
@@ -1954,6 +2094,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         test_money_tokenization()
         test_sign_formats()
         test_line_extraction()
+        test_source_bound_short_dates(root)
         test_build_daily_rows()
         test_native_balance_precision()
         test_leap_year()
@@ -2226,6 +2367,85 @@ def test_line_extraction() -> None:
     assert any("space-separated" in note for note in french.notes), french.notes
     bare = extract_one("31/12/2023 balance 5")
     assert bare.amount == Decimal("5") and bare.confidence == "low"
+
+
+def test_source_bound_short_dates(root: Path) -> None:
+    """Exercise Spanish table dates without making a global DD/MM assumption."""
+    pdf = root / "short-date-statement.pdf"
+    pdf.write_bytes(b"synthetic short date statement")
+    preflight_path = write_preflight_fixture(root, "short-date-preflight", 2025, "one-account", [pdf])
+    preflight = load_json(preflight_path)
+    statement_files = preflight.get("statement_files")
+    assert isinstance(statement_files, list) and isinstance(statement_files[0], dict)
+
+    def with_period(start: str, end: str, line_number: int = 1) -> dict[str, object]:
+        statement_files[0]["period_intervals"] = [
+            {
+                "start": start,
+                "end": end,
+                "confidence": "high",
+                "source_ref": {"page": 1, "line": line_number},
+            }
+        ]
+        return preflight
+
+    header = "DESDE: 2024/12/31 HASTA: 2025/03/31"
+    lines = [
+        (SourceRef(str(pdf), 1, 1, header), header),
+        (SourceRef(str(pdf), 1, 2, "FECHA VALOR SALDO"), "FECHA VALOR SALDO"),
+        (
+            SourceRef(str(pdf), 1, 3, "4/01 COMPRA 100,000.00 9,876,543.21"),
+            "4/01 COMPRA 100,000.00 9,876,543.21",
+        ),
+    ]
+    contexts = preflight_page_period_contexts(with_period("2024-12-31", "2025-03-31"), lines)
+    candidates, warnings = extract_balance_candidates(lines, 2025, "COP", page_period_contexts=contexts)
+    assert not warnings, warnings
+    assert len(candidates) == 1, candidates
+    candidate = candidates[0]
+    assert candidate.balance_date == date(2025, 1, 4), candidate.balance_date
+    assert candidate.amount == Decimal("9876543.21"), candidate.amount
+    assert candidate.confidence == "medium", candidate.confidence
+    assert candidate.source.line == 3, candidate.source
+    assert any("source-bound page statement period" in note for note in candidate.notes), candidate.notes
+
+    cross_year_lines = [
+        (SourceRef(str(pdf), 1, 1, header), header),
+        (SourceRef(str(pdf), 1, 2, "FECHA VALOR SALDO"), "FECHA VALOR SALDO"),
+        (SourceRef(str(pdf), 1, 3, "31/12 CIERRE 10.00 900.00"), "31/12 CIERRE 10.00 900.00"),
+        (SourceRef(str(pdf), 1, 4, "1/01 APERTURA 10.00 950.00"), "1/01 APERTURA 10.00 950.00"),
+    ]
+    contexts = preflight_page_period_contexts(with_period("2024-12-31", "2025-03-31"), cross_year_lines)
+    candidates, warnings = extract_balance_candidates(cross_year_lines, 2025, "COP", page_period_contexts=contexts)
+    assert len(candidates) == 1 and candidates[0].balance_date == date(2025, 1, 1), candidates
+    assert any("outside" in warning for warning in warnings), warnings
+
+    neutral_header = "Statement period 2025/01/01 through 2025/03/31"
+    ambiguous_lines = [
+        (SourceRef(str(pdf), 1, 1, neutral_header), neutral_header),
+        (SourceRef(str(pdf), 1, 2, "DATE VALUE BALANCE"), "DATE VALUE BALANCE"),
+        (SourceRef(str(pdf), 1, 3, "1/02 ITEM 10.00 950.00"), "1/02 ITEM 10.00 950.00"),
+    ]
+    contexts = preflight_page_period_contexts(with_period("2025-01-01", "2025-03-31"), ambiguous_lines)
+    candidates, warnings = extract_balance_candidates(ambiguous_lines, 2025, "USD", page_period_contexts=contexts)
+    assert not candidates, candidates
+    assert any("No balance candidates" in warning for warning in warnings), warnings
+
+    candidates, warnings = extract_balance_candidates(lines, 2025, "COP")
+    assert not candidates, candidates
+    assert any("No balance candidates" in warning for warning in warnings), warnings
+
+    mismatched_header = "DESDE: 2025/04/01 HASTA: 2025/06/30"
+    mismatched_lines = [
+        (SourceRef(str(pdf), 1, 1, mismatched_header), mismatched_header),
+        (SourceRef(str(pdf), 1, 2, "FECHA VALOR SALDO"), "FECHA VALOR SALDO"),
+        (SourceRef(str(pdf), 1, 3, "4/01 COMPRA 100,000.00 9,876,543.21"), "4/01 COMPRA 100,000.00 9,876,543.21"),
+    ]
+    contexts = preflight_page_period_contexts(with_period("2024-12-31", "2025-03-31"), mismatched_lines)
+    assert not contexts, contexts
+    candidates, warnings = extract_balance_candidates(mismatched_lines, 2025, "COP", page_period_contexts=contexts)
+    assert not candidates, candidates
+    assert any("No balance candidates" in warning for warning in warnings), warnings
 
 
 def test_fx_rate_guards(root: Path) -> None:
