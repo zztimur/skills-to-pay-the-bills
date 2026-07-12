@@ -32,7 +32,17 @@ Review the JSON and CSV before passing the JSON to downstream tools. Stop for us
 
 ## Downstream Handoff
 
-Pass the preflight JSON into downstream extraction after review:
+Pass a `ready-for-domain-extraction` JSON directly into downstream extraction. For FBAR only, turn a `review-required` preflight with no structural `stop` gates into a separate reviewed handoff after the user confirms every review gate:
+
+```bash
+python3 "<package-root>/scripts/statement_intake_preflight.py" review-handoff \
+  --input work/statement-preflight.json \
+  --accept-gate ambiguous-dollar \
+  --user-review-confirmed \
+  --out work/statement-preflight-reviewed.json
+```
+
+Repeat `--accept-gate` for every code shown in `review_gates`. Never create a handoff for a structural `stop` gate.
 
 ```bash
 python3 "<fbar-root>/scripts/fbar_threshold_check.py" extract-account \
@@ -41,6 +51,8 @@ python3 "<fbar-root>/scripts/fbar_threshold_check.py" extract-account \
   --preflight-json work/statement-preflight.json \
   --out work/account-1.json
 ```
+
+For a reviewed handoff, replace `work/statement-preflight.json` with `work/statement-preflight-reviewed.json`.
 
 ```bash
 python3 "<interest-root>/scripts/statements_to_interest.py" extract \
@@ -51,7 +63,7 @@ python3 "<interest-root>/scripts/statements_to_interest.py" extract \
   --out work/interest-analysis.json
 ```
 
-Downstream skills must reject preflight JSON when its skill name, tax year, scope, or PDF set does not match the extraction run. Preflight warnings remain review hints; the downstream skill still owns its domain-specific review gates.
+FBAR extraction rejects absent, raw review-required, stale, mismatched, or incomplete handoffs. Other downstream skills retain their own handoff contracts. Preflight warnings and gate resolutions remain visible to downstream skills, which still own domain-specific parsing and review gates.
 
 ## Runtime
 

@@ -97,6 +97,23 @@ Downstream tools should accept only JSON where:
 
 `status` is `ready-for-domain-extraction` (no gates) or `review-required` (one or more gates). `currency.candidates` lists the confirmed ISO codes that decide `currency.code` (an adjacent amount or a currency label corroborated each one); `currency.weak_candidates` lists uncorroborated all-caps tokens surfaced for the human but deliberately not used to decide `currency.code`.
 
+For `fbar-threshold-check` specifically:
+
+- Pass a `ready-for-domain-extraction` JSON directly.
+- Never pass a raw `review-required` JSON to extraction.
+- A `stop` gate requires corrected inputs and a fresh preflight.
+- After the user reviews every `review` gate, create a separate handoff:
+
+```bash
+python3 "<package-root>/scripts/statement_intake_preflight.py" review-handoff \
+  --input "work/statement-preflight.json" \
+  --accept-gate "ambiguous-dollar" \
+  --user-review-confirmed \
+  --out "work/statement-preflight-reviewed.json"
+```
+
+Repeat `--accept-gate` for every listed review code. The handoff preserves the original preflight path, SHA-256, scope, tax year, PDF metadata, gate list, and explicit acceptance record. FBAR extraction verifies all of those fields before it reads the PDFs.
+
 Downstream tools should import preflight warnings and profile hints into their own JSON output, but they still own domain-specific parsing and review gates.
 
 ## 6. Final Response
