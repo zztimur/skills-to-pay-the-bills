@@ -12,7 +12,7 @@ import sys
 import tempfile
 import unicodedata
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -337,6 +337,33 @@ MONTH_NAMES = (
     "diciembre",
 )
 
+MONTH_NUMBERS = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+    "enero": 1,
+    "febrero": 2,
+    "marzo": 3,
+    "abril": 4,
+    "mayo": 5,
+    "junio": 6,
+    "julio": 7,
+    "agosto": 8,
+    "septiembre": 9,
+    "octubre": 10,
+    "noviembre": 11,
+    "diciembre": 12,
+}
+
 # Structural statement words stripped before comparing two institution hints, so
 # that the same bank across months ("Example Bank January Statement" vs
 # "... February Statement") collapses to one signature instead of looking like
@@ -437,6 +464,34 @@ NUMERIC_PERIOD_RE = re.compile(
     r"\d{1,4}[./-]\d{1,2}[./-]\d{1,4}"
     r"(?:\s*[-–—]\s*|\s+(?:to|al?|bis|hasta|through)\s+)"
     r"\d{1,4}[./-]\d{1,2}[./-]\d{1,4}",
+    re.I,
+)
+
+# Structured period evidence is deliberately narrower than the existing
+# ``detect_periods`` display helper. It accepts only complete date ranges on one
+# line, so a page number and extracted-line number can be retained without
+# emitting raw statement text in the machine-readable handoff.
+NUMERIC_DATE_RE = re.compile(
+    r"\b(?P<first>\d{1,4})[./-](?P<second>\d{1,2})[./-](?P<third>\d{1,4})\b"
+)
+_MONTH_TOKEN = "|".join(re.escape(month) for month in MONTH_NAMES)
+TEXT_DATE_MONTH_FIRST_RE = re.compile(
+    rf"\b(?P<month>{_MONTH_TOKEN})\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?[,]?\s+(?P<year>19\d{{2}}|20\d{{2}})\b",
+    re.I,
+)
+TEXT_DATE_DAY_FIRST_RE = re.compile(
+    rf"\b(?P<day>\d{{1,2}})(?:st|nd|rd|th)?(?:\s+de)?\s+(?P<month>{_MONTH_TOKEN})[,]?\s+(?P<year>19\d{{2}}|20\d{{2}})\b",
+    re.I,
+)
+PERIOD_CONNECTOR_RE = re.compile(r"(?:[-–—]|\b(?:to|through|al|hasta|bis|desde)\b)", re.I)
+
+# A prior-year date belongs in evidence when the statement labels it as an
+# opening/prior balance. It must not silently become a second statement period.
+# Keep the vocabulary focused on balance context so transaction rows do not get
+# reclassified just because they contain a prior-year date.
+CONTEXTUAL_BALANCE_RE = re.compile(
+    r"\b(?:opening|beginning|prior|previous)\s+balance\b|"
+    r"\b(?:saldo|balance)\s+(?:inicial|anterior|previo)\b",
     re.I,
 )
 
@@ -638,6 +693,13 @@ def file_profile(
 ) -> dict[str, object]:
     text = "\n".join(str(page.get("text", "")) for page in pages)
     lines = split_lines(text)
+    page_lines = [
+        {
+            "page": int(page.get("page", index)),
+            "lines": split_lines(str(page.get("text", ""))),
+        }
+        for index, page in enumerate(pages, start=1)
+    ]
     char_count = len(text.strip())
     if is_pdf and text_layer_expected and char_count < MIN_TEXT_CHARS:
         warnings.append(f"{path.name} has little machine-readable text; scanned/image-only PDFs are out of scope for v1.")
@@ -650,6 +712,9 @@ def file_profile(
         "content_sha256": content_sha256,
         "content_bytes": content_bytes,
         "lines": lines,
+        # Internal parsing aid. build_preflight converts this to compact source
+        # references and never serializes the extracted page text itself.
+        "page_lines": page_lines,
         "warnings": stable_unique(warnings),
     }
 
@@ -764,6 +829,207 @@ def detect_periods(lines: Iterable[str]) -> list[str]:
         if (has_period_term and has_year) or (has_month and has_year) or NUMERIC_PERIOD_RE.search(line):
             periods.append(line)
     return stable_unique(periods, limit=20)
+
+
+def _calendar_date(year: int, month: int, day: int) -> date | None:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _numeric_date(match: re.Match[str]) -> tuple[date, str] | None:
+    first, second, third = (match.group("first"), match.group("second"), match.group("third"))
+    a, b, c = int(first), int(second), int(third)
+    if len(first) == 4:
+        parsed = _calendar_date(a, b, c)
+        return (parsed, "high") if parsed else None
+    if len(third) != 4:
+        return None
+    if a > 12 and b <= 12:
+        parsed = _calendar_date(c, b, a)
+        return (parsed, "high") if parsed else None
+    if b > 12 and a <= 12:
+        parsed = _calendar_date(c, a, b)
+        return (parsed, "high") if parsed else None
+    # dd/mm and mm/dd are indistinguishable when both components are <= 12.
+    # Preserve a usable conservative interpretation, but mark it medium so a
+    # downstream reviewer can see that the numeric ordering was ambiguous.
+    parsed = _calendar_date(c, b, a)
+    return (parsed, "medium") if parsed else None
+
+
+def line_dates(line: str) -> list[tuple[date, tuple[int, int], str]]:
+    """Extract complete calendar dates with spans and parse confidence."""
+    found: list[tuple[date, tuple[int, int], str]] = []
+    for match in NUMERIC_DATE_RE.finditer(line):
+        parsed = _numeric_date(match)
+        if parsed:
+            found.append((parsed[0], match.span(), parsed[1]))
+    for pattern in (TEXT_DATE_MONTH_FIRST_RE, TEXT_DATE_DAY_FIRST_RE):
+        for match in pattern.finditer(line):
+            month = MONTH_NUMBERS[match.group("month").casefold()]
+            day = int(match.group("day"))
+            parsed = _calendar_date(int(match.group("year")), month, day)
+            if parsed:
+                found.append((parsed, match.span(), "high"))
+    # The textual patterns are intentionally disjoint, but retain this guard so
+    # a future locale expansion cannot create duplicate date evidence.
+    deduped: list[tuple[date, tuple[int, int], str]] = []
+    seen: set[tuple[date, tuple[int, int]]] = set()
+    for item in sorted(found, key=lambda value: value[1]):
+        key = (item[0], item[1])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(item)
+    return deduped
+
+
+def detect_period_intervals(page_lines: Iterable[object]) -> list[dict[str, object]]:
+    """Return complete, source-referenced statement-period intervals.
+
+    This intentionally requires two complete dates joined in one extracted line.
+    Month-only labels remain in ``detected_periods`` for human review, but are
+    not upgraded into calendar coverage claims.
+    """
+    intervals: list[dict[str, object]] = []
+    seen: set[tuple[str, str, int, int]] = set()
+    for raw_page in page_lines:
+        if not isinstance(raw_page, dict):
+            continue
+        page = int(raw_page.get("page", 0) or 0)
+        raw_lines = raw_page.get("lines")
+        if not isinstance(raw_lines, list):
+            continue
+        for line_number, raw_line in enumerate(raw_lines, start=1):
+            line = str(raw_line)
+            dates = line_dates(line)
+            if len(dates) < 2:
+                continue
+            start, start_span, start_confidence = dates[0]
+            end, end_span, end_confidence = dates[-1]
+            connector = line[start_span[1]:end_span[0]]
+            if end < start or not PERIOD_CONNECTOR_RE.search(connector):
+                continue
+            key = (start.isoformat(), end.isoformat(), page, line_number)
+            if key in seen:
+                continue
+            seen.add(key)
+            intervals.append(
+                {
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                    "confidence": "high" if start_confidence == end_confidence == "high" else "medium",
+                    "source_ref": {"page": page, "line": line_number},
+                }
+            )
+    return intervals
+
+
+def detect_contextual_date_evidence(
+    page_lines: Iterable[object], period_intervals: Iterable[dict[str, object]]
+) -> list[dict[str, object]]:
+    """Keep labelled opening/prior dates without promoting them to periods."""
+    period_refs = {
+        (int(interval.get("source_ref", {}).get("page", 0)), int(interval.get("source_ref", {}).get("line", 0)))
+        for interval in period_intervals
+        if isinstance(interval.get("source_ref"), dict)
+    }
+    evidence: list[dict[str, object]] = []
+    seen: set[tuple[int, int, int, str | None]] = set()
+    for raw_page in page_lines:
+        if not isinstance(raw_page, dict):
+            continue
+        page = int(raw_page.get("page", 0) or 0)
+        raw_lines = raw_page.get("lines")
+        if not isinstance(raw_lines, list):
+            continue
+        for line_number, raw_line in enumerate(raw_lines, start=1):
+            line = str(raw_line)
+            if (page, line_number) in period_refs or not CONTEXTUAL_BALANCE_RE.search(line):
+                continue
+            dates = line_dates(line)
+            if dates:
+                values = [(parsed.year, parsed.isoformat()) for parsed, _span, _confidence in dates]
+            else:
+                values = [(int(match.group(1)), None) for match in YEAR_RE.finditer(line)]
+            for year, value in values:
+                key = (page, line_number, year, value)
+                if key in seen:
+                    continue
+                seen.add(key)
+                item: dict[str, object] = {
+                    "year": year,
+                    "classification": "opening-or-prior-balance",
+                    "source_ref": {"page": page, "line": line_number},
+                }
+                if value:
+                    item["date"] = value
+                evidence.append(item)
+    return evidence
+
+
+def interval_years(intervals: Iterable[dict[str, object]]) -> list[int]:
+    years: set[int] = set()
+    for interval in intervals:
+        try:
+            start = date.fromisoformat(str(interval.get("start")))
+            end = date.fromisoformat(str(interval.get("end")))
+        except ValueError:
+            continue
+        years.update(range(start.year, end.year + 1))
+    return sorted(years)
+
+
+def period_coverage_review(intervals: Iterable[dict[str, object]], tax_year: int) -> dict[str, object]:
+    """Describe gaps in multiple labelled periods without asserting completeness."""
+    year_start = date(tax_year, 1, 1)
+    year_end = date(tax_year, 12, 31)
+    clipped: list[tuple[date, date]] = []
+    for interval in intervals:
+        try:
+            start = date.fromisoformat(str(interval.get("start")))
+            end = date.fromisoformat(str(interval.get("end")))
+        except ValueError:
+            continue
+        if end < year_start or start > year_end:
+            continue
+        clipped.append((max(start, year_start), min(end, year_end)))
+    clipped.sort()
+    # A lone monthly statement is common and cannot establish a statement-set
+    # cadence. Do not add a coverage gap gate until two labelled periods exist.
+    if len(clipped) < 2:
+        return {
+            "intervals_detected": len(clipped),
+            "calendar_gaps": [],
+            "review_note": "Detected period labels are intake hints, not proof of transaction or balance coverage.",
+        }
+
+    merged: list[list[date]] = []
+    for start, end in clipped:
+        if not merged or start > merged[-1][1] + timedelta(days=1):
+            merged.append([start, end])
+        elif end > merged[-1][1]:
+            merged[-1][1] = end
+
+    gaps: list[dict[str, object]] = []
+    if merged[0][0] > year_start:
+        gaps.append({"start": year_start.isoformat(), "end": (merged[0][0] - timedelta(days=1)).isoformat()})
+    for previous, current in zip(merged, merged[1:]):
+        if current[0] > previous[1] + timedelta(days=1):
+            gaps.append(
+                {
+                    "start": (previous[1] + timedelta(days=1)).isoformat(),
+                    "end": (current[0] - timedelta(days=1)).isoformat(),
+                }
+            )
+    if merged[-1][1] < year_end:
+        gaps.append({"start": (merged[-1][1] + timedelta(days=1)).isoformat(), "end": year_end.isoformat()})
+    return {
+        "intervals_detected": len(clipped),
+        "calendar_gaps": gaps,
+        "review_note": "Detected period labels are intake hints, not proof of transaction or balance coverage.",
+    }
 
 
 def account_token(raw: str) -> str | None:
@@ -1058,9 +1324,27 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
             add_gate(gates, "low-text-pdf", f"{Path(str(item.get('file'))).name} has little machine-readable text.", "stop")
             structural_stop = True
         lines = [str(line) for line in item.get("lines", [])]
+        page_lines = item.get("page_lines", [])
         if not structural_stop:
             all_lines.extend(lines)
         years = detect_years(lines)
+        period_intervals = detect_period_intervals(page_lines if isinstance(page_lines, list) else [])
+        contextual_date_evidence = detect_contextual_date_evidence(
+            page_lines if isinstance(page_lines, list) else [], period_intervals
+        )
+        statement_period_years = interval_years(period_intervals)
+        contextual_years = sorted(
+            {
+                int(evidence["year"])
+                for evidence in contextual_date_evidence
+                if isinstance(evidence.get("year"), int)
+            }
+        )
+        unresolved_years = sorted(set(years) - set(statement_period_years) - set(contextual_years))
+        # Prefer explicit statement-period ranges. When a source only supplies a
+        # month/year label, retain the legacy non-contextual year detector as the
+        # safe fallback rather than inventing an interval.
+        coverage_years = statement_period_years or sorted(set(years) - set(contextual_years))
         statement_files.append(
             {
                 "file": item.get("file"),
@@ -1072,6 +1356,12 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
                 "content_bytes": item.get("content_bytes"),
                 "detected_years": years,
                 "detected_periods": detect_periods(lines),
+                "statement_period_years": statement_period_years,
+                "period_intervals": period_intervals,
+                "contextual_date_evidence": contextual_date_evidence,
+                "contextual_years": contextual_years,
+                "unresolved_years": unresolved_years,
+                "coverage_years": coverage_years,
                 "statement_titles": detect_statement_titles(lines),
                 "currency": detect_currency(lines),
                 "account_hints": detect_account_hints(lines),
@@ -1107,14 +1397,61 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
             add_gate(gates, "duplicate-content", message)
 
     detected_years = sorted({year for item in statement_files for year in item.get("detected_years", [])})
-    outside_years = [year for year in detected_years if year != tax_year]
+    statement_period_years = sorted(
+        {year for item in statement_files for year in item.get("statement_period_years", [])}
+    )
+    contextual_years = sorted({year for item in statement_files for year in item.get("contextual_years", [])})
+    unresolved_years = sorted({year for item in statement_files for year in item.get("unresolved_years", [])})
+    coverage_years = sorted({year for item in statement_files for year in item.get("coverage_years", [])})
+    period_intervals: list[dict[str, object]] = []
+    contextual_date_evidence: list[dict[str, object]] = []
+    for item in statement_files:
+        source_file = str(item.get("file") or "")
+        for interval in item.get("period_intervals", []):
+            if not isinstance(interval, dict):
+                continue
+            copied = dict(interval)
+            source_ref = interval.get("source_ref") if isinstance(interval.get("source_ref"), dict) else {}
+            copied["source_ref"] = {"file": source_file, **source_ref}
+            period_intervals.append(copied)
+        for evidence in item.get("contextual_date_evidence", []):
+            if not isinstance(evidence, dict):
+                continue
+            copied = dict(evidence)
+            source_ref = evidence.get("source_ref") if isinstance(evidence.get("source_ref"), dict) else {}
+            copied["source_ref"] = {"file": source_file, **source_ref}
+            contextual_date_evidence.append(copied)
+    outside_years = [year for year in coverage_years if year != tax_year]
     if outside_years:
-        message = f"Detected year(s) outside requested tax year {tax_year}: {', '.join(str(year) for year in outside_years)}."
+        message = f"Detected statement-period year(s) outside requested tax year {tax_year}: {', '.join(str(year) for year in outside_years)}."
         warnings.append(message)
         add_gate(gates, "mixed-years", message)
-    if all_lines and not detected_years:
+    unresolved_outside_years = [year for year in unresolved_years if year != tax_year]
+    if unresolved_outside_years:
+        message = (
+            "Detected year evidence outside the requested statement periods that could not be classified as contextual: "
+            f"{', '.join(str(year) for year in unresolved_outside_years)}."
+        )
+        warnings.append(message)
+        add_gate(gates, "unresolved-year-evidence", message)
+    if all_lines and not coverage_years:
         warnings.append("No statement years were detected; verify the PDFs belong to the requested tax year.")
         add_gate(gates, "unknown-year-coverage", "No statement years were detected; verify statement periods manually.")
+
+    coverage_review = period_coverage_review(period_intervals, tax_year)
+    possible_gaps = coverage_review.get("calendar_gaps")
+    if isinstance(possible_gaps, list) and possible_gaps:
+        ranges = ", ".join(
+            f"{gap.get('start')} through {gap.get('end')}"
+            for gap in possible_gaps
+            if isinstance(gap, dict)
+        )
+        message = (
+            "Detected statement-period labels leave possible calendar coverage gap(s): "
+            f"{ranges}. Obtain the missing statements or review the source periods."
+        )
+        warnings.append(message)
+        add_gate(gates, "possible-missing-statement-period", message)
 
     currency = detect_currency(all_lines)
     if currency["ambiguous_dollar"]:
@@ -1191,8 +1528,14 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
         "coverage_hints": {
             "requested_tax_year": tax_year,
             "detected_years": detected_years,
+            "statement_period_years": statement_period_years,
+            "contextual_years": contextual_years,
+            "unresolved_years": unresolved_years,
             "outside_requested_years": outside_years,
             "detected_periods": period_values,
+            "period_intervals": period_intervals,
+            "contextual_date_evidence": contextual_date_evidence,
+            "period_coverage_review": coverage_review,
             "low_text_files": [
                 str(item.get("file"))
                 for item in statement_files
@@ -1260,6 +1603,11 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
         "content_sha256",
         "detected_years",
         "detected_periods",
+        "statement_period_years",
+        "period_intervals",
+        "contextual_years",
+        "contextual_date_evidence",
+        "unresolved_years",
         "statement_titles",
         "currency_code",
         "currency_candidates",
@@ -1280,6 +1628,17 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
             if not isinstance(item, dict):
                 continue
             currency = item.get("currency") if isinstance(item.get("currency"), dict) else {}
+            intervals = item.get("period_intervals") if isinstance(item.get("period_intervals"), list) else []
+            contextual = item.get("contextual_date_evidence") if isinstance(item.get("contextual_date_evidence"), list) else []
+
+            def compact_source_ref(value: object) -> str:
+                source_ref = value.get("source_ref") if isinstance(value, dict) else None
+                if not isinstance(source_ref, dict):
+                    return ""
+                page = source_ref.get("page")
+                line = source_ref.get("line")
+                return f"p{page}/l{line}" if page and line else ""
+
             row = {
                 "file": item.get("file"),
                 "is_pdf": item.get("is_pdf"),
@@ -1289,6 +1648,35 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
                 "content_sha256": item.get("content_sha256"),
                 "detected_years": "; ".join(str(year) for year in item.get("detected_years", [])),
                 "detected_periods": "; ".join(str(period) for period in item.get("detected_periods", [])),
+                "statement_period_years": "; ".join(str(year) for year in item.get("statement_period_years", [])),
+                "period_intervals": "; ".join(
+                    " ".join(
+                        part
+                        for part in (
+                            f"{interval.get('start')}..{interval.get('end')}" if isinstance(interval, dict) else "",
+                            str(interval.get("confidence")) if isinstance(interval, dict) else "",
+                            compact_source_ref(interval),
+                        )
+                        if part
+                    )
+                    for interval in intervals
+                    if isinstance(interval, dict)
+                ),
+                "contextual_years": "; ".join(str(year) for year in item.get("contextual_years", [])),
+                "contextual_date_evidence": "; ".join(
+                    " ".join(
+                        part
+                        for part in (
+                            str(evidence.get("date") or evidence.get("year")),
+                            str(evidence.get("classification") or ""),
+                            compact_source_ref(evidence),
+                        )
+                        if part
+                    )
+                    for evidence in contextual
+                    if isinstance(evidence, dict)
+                ),
+                "unresolved_years": "; ".join(str(year) for year in item.get("unresolved_years", [])),
                 "statement_titles": "; ".join(str(title) for title in item.get("statement_titles", [])),
                 "currency_code": currency.get("code") if isinstance(currency, dict) else "",
                 "currency_candidates": "; ".join(str(code) for code in currency.get("candidates", []) if isinstance(currency, dict)),
@@ -1431,6 +1819,7 @@ def command_review_handoff(args: argparse.Namespace) -> int:
         "statement_files": statement_files,
         "currency": source.get("currency"),
         "profile": source.get("profile"),
+        "coverage_hints": source.get("coverage_hints"),
         "account_hints": source.get("account_hints", []),
         "institution_hints": source.get("institution_hints", []),
         "warnings": source.get("warnings", []),
@@ -2138,6 +2527,62 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if detect_periods(["Ref 12/34 amount 56.00"]):
             failures.append("numeric-period: a lone fraction-like token must not read as a period range")
 
+        # Source-aware period evidence keeps an opening balance's prior-year
+        # date visible, but does not mistake it for a second statement period.
+        def quarterly_statement(name: str, start: str, end: str, opening: str = "") -> dict[str, object]:
+            lines = [
+                "Example Bank Quarterly Statement",
+                "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+                f"Statement period {start} to {end}",
+                "Currency USD",
+            ]
+            if opening:
+                lines.append(opening)
+            return synthetic_file(name, "\n".join(lines))
+
+        q1 = quarterly_statement(
+            "q1.pdf", "January 1 2025", "March 31 2025", "Opening balance as of 31/12/2024"
+        )
+        q2 = quarterly_statement("q2.pdf", "April 1 2025", "June 30 2025")
+        q3 = quarterly_statement("q3.pdf", "July 1 2025", "September 30 2025")
+        q4 = quarterly_statement("q4.pdf", "October 1 2025", "December 31 2025")
+        contextual_year = build_preflight(
+            [q1, q2, q3, q4], 2025, "one-account", root / "contextual-year.json", root / "contextual-year-review.csv"
+        )
+        contextual_coverage = contextual_year["coverage_hints"]  # type: ignore[index]
+        contextual_evidence = contextual_coverage.get("contextual_date_evidence", []) if isinstance(contextual_coverage, dict) else []
+        if any(gate.get("code") == "mixed-years" for gate in contextual_year["review_gates"]):  # type: ignore[index]
+            failures.append("contextual-year: a labelled 2024 opening balance must not trip mixed-years for 2025 periods")
+        if not isinstance(contextual_coverage, dict) or contextual_coverage.get("statement_period_years") != [2025]:
+            failures.append(f"contextual-year: expected only 2025 statement-period coverage, got {contextual_coverage}")
+        if not any(
+            isinstance(item, dict)
+            and item.get("date") == "2024-12-31"
+            and item.get("classification") == "opening-or-prior-balance"
+            and isinstance(item.get("source_ref"), dict)
+            and item["source_ref"].get("page") == 1
+            and item["source_ref"].get("line") == 5
+            for item in contextual_evidence
+        ):
+            failures.append(f"contextual-year: expected source-referenced 2024 opening-balance evidence, got {contextual_evidence}")
+
+        genuine_mixed_period = build_preflight(
+            [quarterly_statement("cross-year.pdf", "December 1 2024", "January 31 2025")],
+            2025,
+            "one-account",
+            root / "cross-year.json",
+            root / "cross-year-review.csv",
+        )
+        if not any(gate.get("code") == "mixed-years" for gate in genuine_mixed_period["review_gates"]):  # type: ignore[index]
+            failures.append("contextual-year: a genuine 2024-2025 statement period must still trip mixed-years")
+
+        for label, files in (("missing-q2", [q1, q3, q4]), ("missing-q4", [q1, q2, q3])):
+            missing_period = build_preflight(
+                files, 2025, "one-account", root / f"{label}.json", root / f"{label}-review.csv"
+            )
+            if not any(gate.get("code") == "possible-missing-statement-period" for gate in missing_period["review_gates"]):  # type: ignore[index]
+                failures.append(f"{label}: expected possible-missing-statement-period gate")
+
         # CSV cells that begin with a formula lead are neutralized.
         if csv_safe("=HYPERLINK(\"http://x\")") != "'=HYPERLINK(\"http://x\")":
             failures.append("csv_safe: expected leading '=' to be quoted")
@@ -2209,6 +2654,8 @@ def command_self_test(_args: argparse.Namespace) -> int:
         source_meta = handoff_data.get("source_preflight")
         if not isinstance(source_meta, dict) or source_meta.get("sha256") != file_sha256(reviewed_source):
             failures.append("review-handoff: expected source preflight digest")
+        if handoff_data.get("coverage_hints") != mixed_currency.get("coverage_hints"):
+            failures.append("review-handoff: expected coverage hints to remain visible downstream")
 
         for label, handoff_arg in (
             (

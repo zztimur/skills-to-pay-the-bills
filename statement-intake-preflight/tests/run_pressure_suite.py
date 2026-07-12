@@ -444,6 +444,51 @@ check("PER-1 numeric period '01.01.2025 - 31.01.2025' is detected",
       f"periods={d['coverage_hints']['detected_periods'] if d else '?'}")
 
 # --------------------------------------------------------------------------- #
+# Source-aware period evidence and statement-set coverage
+# --------------------------------------------------------------------------- #
+
+def quarterly_period_pdf(name: str, start: str, end: str, opening: str = "") -> Path:
+    lines = [
+        "Example Bank Quarterly Statement",
+        "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+        f"Statement period {start} to {end}",
+        "Currency USD",
+    ]
+    if opening:
+        lines.append(opening)
+    return make_pdf(name, lines)
+
+
+q1 = quarterly_period_pdf(
+    "period-q1.pdf", "January 1 2025", "March 31 2025", "Opening balance as of 31/12/2024"
+)
+q2 = quarterly_period_pdf("period-q2.pdf", "April 1 2025", "June 30 2025")
+q3 = quarterly_period_pdf("period-q3.pdf", "July 1 2025", "September 30 2025")
+q4 = quarterly_period_pdf("period-q4.pdf", "October 1 2025", "December 31 2025")
+proc, d = run("period-contextual", [str(q1), str(q2), str(q3), str(q4)])
+contextual_evidence = d["coverage_hints"].get("contextual_date_evidence", []) if d else []
+check("PER-2 a prior-year opening balance stays contextual, not mixed-year coverage",
+      d and "mixed-years" not in gates_of(d) and d["coverage_hints"].get("statement_period_years") == [2025]
+      and any(isinstance(item, dict) and item.get("date") == "2024-12-31"
+              and item.get("classification") == "opening-or-prior-balance"
+              and isinstance(item.get("source_ref"), dict) and item["source_ref"].get("page") == 1
+              for item in contextual_evidence),
+      f"gates={gates_of(d)} coverage={d['coverage_hints'] if d else '?'}")
+
+cross_year = quarterly_period_pdf("period-cross-year.pdf", "December 1 2024", "January 31 2025")
+proc, d = run("period-cross-year", [str(cross_year)])
+check("PER-3 an actual 2024-2025 statement period still trips mixed-years",
+      d and "mixed-years" in gates_of(d), f"gates={gates_of(d)}")
+
+proc, d = run("period-missing-q2", [str(q1), str(q3), str(q4)])
+check("PER-4 omitted Q2 trips possible-missing-statement-period",
+      d and "possible-missing-statement-period" in gates_of(d), f"gates={gates_of(d)}")
+
+proc, d = run("period-missing-q4", [str(q1), str(q2), str(q3)])
+check("PER-5 omitted Q4 trips possible-missing-statement-period",
+      d and "possible-missing-statement-period" in gates_of(d), f"gates={gates_of(d)}")
+
+# --------------------------------------------------------------------------- #
 # Duplicate detection -- same path, symlink, relative alias, and byte-identical
 # --------------------------------------------------------------------------- #
 
