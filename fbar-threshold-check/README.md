@@ -12,7 +12,7 @@ The point is not to file FinCEN Form 114 or give legal advice. The point is to t
 
 One calendar year. One account at a time. Confirm the ledger before aggregation.
 
-For each account, preflight the machine-readable statement PDFs with `statement-intake-preflight`. A clean preflight can go straight to extraction; a review-required one needs a separate reviewed-handoff after the user accepts every non-structural gate. The preflight does not pester users about corroborated currency, clearly contextual prior-year dates with clear coverage (including an exact prior December 31 opening boundary), or an account it already identified. For weak currency evidence it asks for an ISO code; where account identity cannot be extracted, it asks only for confirmation that the PDFs are one account—not for the account number. Ambiguous/unknown currency, account, and year gates also require the preflight's structured, source-bound user resolution. Extraction uses a reviewed ISO currency rather than guessing from a bare `$`, can make a safe local label when one-account scope was confirmed without an account number, and accepts only the same PDFs in the same order, with the byte size and SHA-256 fingerprints preflight recorded. Then extract daily balances, review the generated JSON/CSV, and confirm the account only after the user has looked at the coverage and balance assumptions. For non-USD accounts, use a retained FX workpaper from `get-year-end-fx-rate`.
+For each account, preflight the machine-readable statement PDFs with `statement-intake-preflight --scope one-account --require-institution`. A clean preflight can go straight to extraction; a review-required one needs a separate reviewed-handoff after the user accepts every non-structural gate. The preflight does not pester users about corroborated currency, clearly contextual prior-year dates with clear coverage (including an exact prior December 31 opening boundary), an account it already identified, or an issuer it already corroborated. For weak currency evidence it asks for an ISO code; where account identity cannot be extracted, it asks only for confirmation that the PDFs are one account—not for the account number; and where issuer evidence is absent or conflicts, it asks for the institution name. Ambiguous/unknown currency, account, year, and required-institution gates use structured, source-bound user resolutions. Extraction uses a reviewed ISO currency rather than guessing from a bare `$`, a reviewed institution rather than a conflicting CLI label, and only the same PDFs in the same order, with the byte size and SHA-256 fingerprints preflight recorded. A short day/month balance-table date is accepted only when the same page carries one verified statement period that resolves it; the generated ledger marks that row medium confidence for review. Then extract daily balances, review the generated JSON/CSV, and confirm the account only after the user has looked at the coverage and balance assumptions. For non-USD accounts, use a retained FX workpaper from `get-year-end-fx-rate`.
 
 Required companion skill: `statement-intake-preflight`. This skill assumes the intake JSON/CSV has already been reviewed before FBAR balance extraction starts.
 
@@ -74,6 +74,7 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py preflig
   --pdf statement-01.pdf statement-02.pdf \
   --tax-year 2025 \
   --scope one-account \
+  --require-institution \
   --out work/statement-preflight.json
 ```
 
@@ -97,7 +98,7 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-
   --out work/statement-preflight-reviewed.json
 ```
 
-Repeat `--accept-gate` for every listed gate, then replace the extraction command’s `--preflight-json` value with `work/statement-preflight-reviewed.json`.
+Repeat `--accept-gate` for every listed gate. If the opt-in issuer gate is present, also pass `--confirm-institution "Example Bank"`. Then replace the extraction command’s `--preflight-json` value with `work/statement-preflight-reviewed.json`.
 
 Extraction rejects a missing, duplicated, reordered, or modified statement PDF, as well as an incomplete or source-mismatched reviewed resolution. If any PDF changed since preflight, rerun preflight and recreate the reviewed handoff when one is required.
 

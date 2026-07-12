@@ -17,6 +17,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 
 try:  # Test-only dependencies; keep a dependency-free CI runner green.
@@ -46,6 +47,80 @@ def make_pdf(path: Path, lines: list[str]) -> None:
         document.drawString(40, y, line)
         y -= 14
     document.save()
+
+
+def make_sanitized_cop_style_fixture(work: Path) -> list[Path]:
+    """Generate redacted quarter statements for the Spanish-table FBAR path.
+
+    Keep this fixture generated and synthetic: it models only the structural
+    properties that previously failed on a real statement (page-bound
+    ``DESDE/HASTA`` dates, a standalone ``NÚMERO`` account header, and short
+    DD/MM table dates). It contains no statement-derived data.
+    """
+    quarters = (
+        (
+            "q1",
+            "2025/01/01",
+            "2025/03/31",
+            [
+                "1/01 SALDO INICIAL 9,800,000.00",
+                "4/01 COMPRA 100,000.00 9,876,543.21",
+                "31/01 CIERRE 25,000.00 9,850,000.00",
+                "28/02 CIERRE 25,000.00 9,875,000.00",
+                "31/03 CIERRE 50,000.00 9,900,000.00",
+            ],
+        ),
+        (
+            "q2",
+            "2025/04/01",
+            "2025/06/30",
+            [
+                "1/04 SALDO INICIAL 9,950,000.00",
+                "30/04 CIERRE 20,000.00 9,930,000.00",
+                "31/05 CIERRE 10,000.00 9,940,000.00",
+                "15/06 ABONO 25,000.00 9,925,000.00",
+                "30/06 CIERRE 35,000.00 9,960,000.00",
+            ],
+        ),
+        (
+            "q3",
+            "2025/07/01",
+            "2025/09/30",
+            [
+                "1/07 SALDO INICIAL 9,975,000.00",
+                "31/07 CIERRE 25,000.00 10,000,000.00",
+                "31/08 CIERRE 100,000.00 10,100,000.00",
+                "15/09 ABONO 275,000.00 10,250,000.00",
+                "30/09 CIERRE 50,000.00 10,200,000.00",
+            ],
+        ),
+        (
+            "q4",
+            "2025/10/01",
+            "2025/12/31",
+            [
+                "1/10 SALDO INICIAL 10,300,000.00",
+                "10/10 AJUSTE -50,000.00 10,500,000.00",
+                "31/10 CIERRE 100,000.00 10,400,000.00",
+                "30/11 CIERRE 50,000.00 10,350,000.00",
+                "31/12 CIERRE 250,000.00 10,250,000.00",
+            ],
+        ),
+    )
+    paths: list[Path] = []
+    for quarter, start, end, rows in quarters:
+        path = work / f"cop-style-{quarter}.pdf"
+        make_pdf(path, [
+            "ESTADO DE CUENTA",
+            "CUENTA DE AHORROS",
+            "NÚMERO 76543210",  # privacy-gate: allow (synthetic account fixture)
+            f"DESDE {start} HASTA {end}",
+            "MONEDA COP",
+            "FECHA DETALLE MOVIMIENTO SALDO",
+            *rows,
+        ])
+        paths.append(path)
+    return paths
 
 
 def run(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -184,6 +259,131 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         "READY-2 FBAR extracts the preflighted real PDFs and records verified fingerprints",
         extract_process.returncode == 0 and account_data is not None and observed == 4 and fingerprints_match,
         extract_process.stderr.strip(),
+    )
+
+    # Exercise the exact end-to-end shape that a Spanish, page-period-bound
+    # balance table needs. The generated fixtures intentionally omit an issuer
+    # name so the opt-in FBAR institution confirmation is part of the same
+    # reviewed handoff, without using a real statement or account number.
+    cop_style = make_sanitized_cop_style_fixture(work)
+    spanish_process, spanish_path, spanish_data = preflight(
+        work, "cop-style", cop_style, require_institution=True
+    )
+    spanish_handoff_process, spanish_handoff_path, spanish_handoff_data = create_reviewed_handoff(
+        work,
+        "cop-style",
+        spanish_path,
+        spanish_data or {},
+        institution="Marca66",
+    )
+    spanish_extract_process, spanish_account_path, spanish_account_data = extract(
+        work, "cop-style", cop_style, spanish_handoff_path
+    )
+    spanish_gates = spanish_data.get("review_gates") if isinstance(spanish_data, dict) else []
+    spanish_currency = spanish_data.get("currency") if isinstance(spanish_data, dict) else None
+    spanish_hints = spanish_data.get("account_hints") if isinstance(spanish_data, dict) else None
+    spanish_files = spanish_data.get("statement_files") if isinstance(spanish_data, dict) else []
+    spanish_periods = [
+        item.get("period_intervals")
+        for item in spanish_files
+        if isinstance(item, dict)
+    ] if isinstance(spanish_files, list) else []
+    spanish_account = spanish_account_data.get("account") if isinstance(spanish_account_data, dict) else None
+    spanish_coverage = spanish_account_data.get("coverage") if isinstance(spanish_account_data, dict) else None
+    spanish_rows = spanish_account_data.get("daily_ledger") if isinstance(spanish_account_data, dict) else []
+    observed_rows = {
+        str(row.get("date")): row
+        for row in spanish_rows
+        if isinstance(row, dict) and row.get("balance_source") == "observed"
+    } if isinstance(spanish_rows, list) else {}
+    expected_observed = {
+        "2025-01-01": Decimal("9800000.00"),
+        "2025-01-04": Decimal("9876543.21"),
+        "2025-01-31": Decimal("9850000.00"),
+        "2025-02-28": Decimal("9875000.00"),
+        "2025-03-31": Decimal("9900000.00"),
+        "2025-04-01": Decimal("9950000.00"),
+        "2025-04-30": Decimal("9930000.00"),
+        "2025-05-31": Decimal("9940000.00"),
+        "2025-06-15": Decimal("9925000.00"),
+        "2025-06-30": Decimal("9960000.00"),
+        "2025-07-01": Decimal("9975000.00"),
+        "2025-07-31": Decimal("10000000.00"),
+        "2025-08-31": Decimal("10100000.00"),
+        "2025-09-15": Decimal("10250000.00"),
+        "2025-09-30": Decimal("10200000.00"),
+        "2025-10-01": Decimal("10300000.00"),
+        "2025-10-10": Decimal("10500000.00"),
+        "2025-10-31": Decimal("10400000.00"),
+        "2025-11-30": Decimal("10350000.00"),
+        "2025-12-31": Decimal("10250000.00"),
+    }
+    observed_values_match = {
+        day: Decimal(str(row.get("native_balance"))) for day, row in observed_rows.items()
+    } == expected_observed
+    maximum_row = max(
+        observed_rows.values(),
+        key=lambda row: Decimal(str(row.get("native_balance"))),
+        default=None,
+    )
+    october_tenth = observed_rows.get("2025-10-10", {})
+    october_notes = october_tenth.get("notes") if isinstance(october_tenth, dict) else []
+    october_sources = october_tenth.get("source_refs") if isinstance(october_tenth, dict) else []
+    spanish_artifacts = spanish_account_data.get("artifacts") if isinstance(spanish_account_data, dict) else None
+    spanish_csv = (
+        Path(str(spanish_artifacts.get("review_csv")))
+        if isinstance(spanish_artifacts, dict) and spanish_artifacts.get("review_csv")
+        else spanish_account_path.with_name(spanish_account_path.stem + "-review.csv")
+    )
+    try:
+        spanish_csv_text = spanish_csv.read_text(encoding="utf-8")
+    except OSError:
+        spanish_csv_text = ""
+    reviewed_institution = (
+        spanish_handoff_data.get("user_resolutions", {}).get("institution")
+        if isinstance(spanish_handoff_data, dict)
+        and isinstance(spanish_handoff_data.get("user_resolutions"), dict)
+        else None
+    )
+    flow_checks = {
+        "preflight": spanish_process.returncode == 0 and isinstance(spanish_data, dict)
+        and spanish_data.get("status") == "review-required"
+        and isinstance(spanish_gates, list)
+        and [gate.get("code") for gate in spanish_gates if isinstance(gate, dict)] == ["unknown-institution"],
+        "intake_evidence": isinstance(spanish_currency, dict) and spanish_currency.get("code") == "COP"
+        and spanish_hints == ["76543210"]
+        and len(spanish_periods) == 4
+        and all(isinstance(periods, list) and len(periods) == 1 for periods in spanish_periods),
+        "reviewed_handoff": spanish_handoff_process.returncode == 0
+        and isinstance(reviewed_institution, dict)
+        and reviewed_institution.get("name") == "Marca66",
+        "account": spanish_extract_process.returncode == 0
+        and isinstance(spanish_account, dict)
+        and spanish_account.get("institution") == "Marca66"
+        and spanish_account.get("currency") == "COP"
+        and spanish_account.get("account_number_hints") == ["76543210"],
+        "coverage": isinstance(spanish_coverage, dict)
+        and spanish_coverage.get("complete_year") is True
+        and spanish_coverage.get("missing_days") == 0
+        and spanish_coverage.get("observed_days") == len(expected_observed)
+        and spanish_coverage.get("carry_gaps") == [],
+        "observed_balances": observed_values_match,
+        "maximum_candidate": isinstance(maximum_row, dict)
+        and maximum_row.get("date") == "2025-10-10"
+        and Decimal(str(maximum_row.get("native_balance"))) == Decimal("10500000.00"),
+        "source_notes": october_tenth.get("confidence") == "medium"
+        and isinstance(october_notes, list)
+        and any("source-bound page statement period" in str(note) for note in october_notes)
+        and isinstance(october_sources, list)
+        and any(cop_style[-1].name in str(source) for source in october_sources),
+        "review_csv": "source-bound page statement period" in spanish_csv_text
+        and cop_style[-1].name in spanish_csv_text,
+    }
+    flow_ok = all(flow_checks.values())
+    check(
+        "FLOW-1 sanitized Spanish table fixture preserves source-bound dates, balances, coverage, and reviewed institution",
+        flow_ok,
+        "" if flow_ok else json.dumps(flow_checks, sort_keys=True),
     )
 
     reordered_process, _reordered_path, _reordered_data = extract(work, "reordered", [february, january], ready_path)
