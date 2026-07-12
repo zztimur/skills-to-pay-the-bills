@@ -596,7 +596,7 @@ def load_pdf_files(paths: list[str]) -> list[dict[str, object]]:
         files.append(
             file_profile(
                 path, pages, warnings, is_pdf=True, text_layer_expected=not read_failed,
-                content_sha256=file_sha256(path),
+                content_sha256=file_sha256(path), content_bytes=file_byte_size(path),
             )
         )
     return files
@@ -619,6 +619,14 @@ def file_sha256(path: Path) -> str | None:
         return None
 
 
+def file_byte_size(path: Path) -> int | None:
+    """Byte size of a file, or None if it cannot be statted."""
+    try:
+        return path.stat().st_size
+    except OSError:  # pragma: no cover - unreadable file already warned elsewhere.
+        return None
+
+
 def file_profile(
     path: Path,
     pages: list[dict[str, object]],
@@ -626,6 +634,7 @@ def file_profile(
     is_pdf: bool,
     text_layer_expected: bool = True,
     content_sha256: str | None = None,
+    content_bytes: int | None = None,
 ) -> dict[str, object]:
     text = "\n".join(str(page.get("text", "")) for page in pages)
     lines = split_lines(text)
@@ -639,6 +648,7 @@ def file_profile(
         "page_count": len(pages),
         "character_count": char_count,
         "content_sha256": content_sha256,
+        "content_bytes": content_bytes,
         "lines": lines,
         "warnings": stable_unique(warnings),
     }
@@ -1059,6 +1069,7 @@ def build_preflight(files: list[dict[str, object]], tax_year: int, scope: str, o
                 "page_count": item.get("page_count"),
                 "character_count": item.get("character_count"),
                 "content_sha256": item.get("content_sha256"),
+                "content_bytes": item.get("content_bytes"),
                 "detected_years": years,
                 "detected_periods": detect_periods(lines),
                 "statement_titles": detect_statement_titles(lines),
@@ -1245,6 +1256,8 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
         "is_pdf",
         "page_count",
         "character_count",
+        "content_bytes",
+        "content_sha256",
         "detected_years",
         "detected_periods",
         "statement_titles",
@@ -1272,6 +1285,8 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
                 "is_pdf": item.get("is_pdf"),
                 "page_count": item.get("page_count"),
                 "character_count": item.get("character_count"),
+                "content_bytes": item.get("content_bytes"),
+                "content_sha256": item.get("content_sha256"),
                 "detected_years": "; ".join(str(year) for year in item.get("detected_years", [])),
                 "detected_periods": "; ".join(str(period) for period in item.get("detected_periods", [])),
                 "statement_titles": "; ".join(str(title) for title in item.get("statement_titles", [])),
@@ -2083,8 +2098,12 @@ def command_self_test(_args: argparse.Namespace) -> int:
         probe.write_bytes(b"example statement bytes")
         if file_sha256(probe) != hashlib.sha256(b"example statement bytes").hexdigest():
             failures.append("file-sha256: digest must match hashlib over the same bytes")
+        if file_byte_size(probe) != len(b"example statement bytes"):
+            failures.append("file-byte-size: byte count must match the source file")
         if file_sha256(root / "does-not-exist.bin") is not None:
             failures.append("file-sha256: an unreadable path must return None")
+        if file_byte_size(root / "does-not-exist.bin") is not None:
+            failures.append("file-byte-size: an unreadable path must return None")
         copy_a = synthetic_file("download.pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nCurrency USD")
         copy_b = synthetic_file("download (1).pdf", "Example Bank\nAccount 12345678\nStatement period January 2025\nCurrency USD")
         copy_a["content_sha256"] = copy_b["content_sha256"] = "0" * 64

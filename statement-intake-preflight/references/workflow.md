@@ -46,7 +46,7 @@ The command writes:
 
 Open the JSON and CSV before continuing. Confirm:
 
-- `statement_files` are the exact PDFs expected for the downstream run. Each carries a `content_sha256` of its bytes, so a downstream run can pin that it parsed the same files preflight saw.
+- `statement_files` are the exact PDFs expected for the downstream run, in that order. Each carries `content_bytes` and `content_sha256`, so a downstream run can reject substituted, reordered, or duplicated files.
 - `tax_year` and `scope` match the intended downstream workflow.
 - The files have enough machine-readable text.
 - `profile.statement_titles` and `coverage_hints.detected_periods` look like the requested year.
@@ -93,7 +93,8 @@ Downstream tools should accept only JSON where:
 - `schema_version` is supported.
 - `tax_year` matches the extraction command.
 - `scope` matches the downstream workflow.
-- The resolved PDF set matches the extraction command.
+- The resolved PDF sequence matches the extraction command.
+- Every expected PDF has a positive `content_bytes` and lower-case SHA-256 `content_sha256` fingerprint.
 
 `status` is `ready-for-domain-extraction` (no gates) or `review-required` (one or more gates). `currency.candidates` lists the confirmed ISO codes that decide `currency.code` (an adjacent amount or a currency label corroborated each one); `currency.weak_candidates` lists uncorroborated all-caps tokens surfaced for the human but deliberately not used to decide `currency.code`.
 
@@ -112,7 +113,7 @@ python3 "<package-root>/scripts/statement_intake_preflight.py" review-handoff \
   --out "work/statement-preflight-reviewed.json"
 ```
 
-Repeat `--accept-gate` for every listed review code. The handoff preserves the original preflight path, SHA-256, scope, tax year, PDF metadata, gate list, and explicit acceptance record. FBAR extraction verifies all of those fields before it reads the PDFs.
+Repeat `--accept-gate` for every listed review code. The handoff preserves the original preflight path, SHA-256, scope, tax year, PDF metadata, gate list, and explicit acceptance record. FBAR extraction verifies all of those fields, then rechecks the ordered PDF byte-size and SHA-256 fingerprints before and after parsing. Changed, duplicate, reordered, or legacy-unfingerprinted files require a fresh preflight (and, where applicable, a new reviewed handoff).
 
 Downstream tools should import preflight warnings and profile hints into their own JSON output, but they still own domain-specific parsing and review gates.
 
