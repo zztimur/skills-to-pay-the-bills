@@ -1,0 +1,47 @@
+name: Release Repository
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out tagged release
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Validate release metadata and deterministic checks
+        run: |
+          bash scripts/release-validate.sh --tag "$GITHUB_REF_NAME"
+          bash scripts/release-check.sh
+
+      - name: Extract release notes
+        run: |
+          version="$(tr -d '\r\n' < VERSION)"
+          awk -v heading="## [$version]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > release-notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Skills To Pay The Bills $GITHUB_REF_NAME" \
+            --notes-file release-notes.md

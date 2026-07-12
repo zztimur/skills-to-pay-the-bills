@@ -2,6 +2,7 @@ name: Skill CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -20,30 +21,5 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Inspect skill packages
-        run: |
-          python3 -S skill-forge/scripts/inspect_skill_package.py privacy-gate --json --strict
-          python3 -S skill-forge/scripts/inspect_skill_package.py skill-forge --json --strict
-          python3 -S skill-forge/scripts/inspect_skill_package.py get-yearly-fx-rate --json --strict
-          python3 -S skill-forge/scripts/inspect_skill_package.py get-year-end-fx-rate --json --strict
-          python3 -S skill-forge/scripts/inspect_skill_package.py statement-intake-preflight --json --strict
-          python3 -S skill-forge/scripts/inspect_skill_package.py fbar-threshold-check --json --strict
-          python3 -S skill-forge/scripts/inspect_skill_package.py statements-to-interest --json --strict
-
-      - name: Verify vendored workpaper-kit copies are in sync
-        run: bash workpaper-kit/sync.sh --check
-
-      - name: Scan repo for secrets and private data
-        run: python3 privacy-gate/scripts/privacy_gate.py scan --path . --strict
-
-      - name: Run deterministic self-tests
-        run: |
-          python3 -S skill-forge/scripts/run_self_tests.py
-          python3 workpaper-kit/test_workpaper.py
-          python3 privacy-gate/scripts/test_privacy_gate.py
-          python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py self-test
-          python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py self-test
-          python3 get-year-end-fx-rate/tests/run_regressions.py
-          python3 statement-intake-preflight/scripts/statement_intake_preflight.py self-test
-          python3 fbar-threshold-check/scripts/fbar_threshold_check.py self-test
-          python3 statements-to-interest/scripts/statements_to_interest.py self-test
+      - name: Run deterministic release checks
+        run: bash scripts/release-check.sh

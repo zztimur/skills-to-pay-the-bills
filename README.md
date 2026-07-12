@@ -36,7 +36,7 @@ The pattern is boring on purpose: one clear `SKILL.md`, thin platform adapters, 
 
 ### Shared Internals
 
-The two FX skills share their workpaper/proof-packet engine — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — through [`workpaper-kit/`](workpaper-kit/). `statements-to-interest` also uses the kit's optional shared ReportLab packet layout. It is internal plumbing, not a skill: no `SKILL.md`, no command, nothing an agent invokes. It does carry its own version in `workpaper-kit/.claude-plugin/plugin.json` so shared-engine changes can be tracked independently. You edit one canonical file, `workpaper-kit/workpaper.py`; each participating skill carries a vendored, auto-synced copy (`scripts/_workpaper.py`) so it still installs standalone. Details in [`workpaper-kit/README.md`](workpaper-kit/README.md).
+The two FX skills share their workpaper/proof-packet engine — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — through [`workpaper-kit/`](workpaper-kit/). `statements-to-interest` also uses the kit's optional shared ReportLab packet layout. It is internal plumbing, not a skill: no `SKILL.md`, no command, nothing an agent invokes. Its `.claude-plugin/plugin.json` is package metadata, not a separate release line. You edit one canonical file, `workpaper-kit/workpaper.py`; each participating skill carries a vendored, auto-synced copy (`scripts/_workpaper.py`) so it still installs standalone. Details in [`workpaper-kit/README.md`](workpaper-kit/README.md).
 
 The FX skills deliberately do different jobs. `get-yearly-fx-rate` documents a published yearly average for income-tax support. `get-year-end-fx-rate` documents a `YYYY-12-31` rate for FBAR-style conversion. They share proof mechanics; they do not swap sources or quietly relabel one rate as the other.
 
@@ -118,19 +118,28 @@ If the package has a Claude plugin manifest and Claude Code is available locally
 claude plugin validate --strict <skill-folder>
 ```
 
-## Releasing A Skill
+## Releasing The Repository
 
-Each skill's `.claude-plugin/plugin.json` versions independently, so releases are tagged per skill (`<skill-folder>-vX.Y.Z`), not for the whole repo. Before tagging, review what actually changed:
+This collection has one public release stream. A change to one skill becomes a release only when you explicitly release the repository; normal edits and commits do not bump [`VERSION`](VERSION), create tags, or publish GitHub Releases.
+
+`VERSION` and [`CHANGELOG.md`](CHANGELOG.md) are the canonical record for every published release. Each release gets one `vX.Y.Z` tag and one GitHub Release. The release version is independent of the package metadata in individual `.claude-plugin/plugin.json` files: those files have no matching tags, changelogs, or GitHub Releases.
+
+Review the next global release before publishing:
 
 ```bash
-scripts/release-diff.sh <skill-folder>
+scripts/release-diff.sh
+scripts/release-repo.sh --dry-run
 ```
 
-This prints the commit log and diff scoped to that skill's directory since its latest `<skill-folder>-v*` tag (or the full history if there is no prior tag), plus the `plugin.json` version change. Pass `--from <ref>` to compare against something other than the latest tag, or `--out <path>` to write the diff to a file instead of stdout. Run `scripts/release-diff.sh --help` for the full option list.
+Publish with a patch bump by default, or choose the SemVer scope explicitly:
 
-## Repository Version
+```bash
+scripts/release-repo.sh
+scripts/release-repo.sh minor
+scripts/release-repo.sh major
+```
 
-Per-skill versioning above is unchanged: each skill's `.claude-plugin/plugin.json` and `<skill-folder>-vX.Y.Z` tag is still the release record for that package. Separately, the repo also tracks a **global** version in [`VERSION`](VERSION) and [`CHANGELOG.md`](CHANGELOG.md) — a snapshot of the collection as a whole, bumped only for cross-cutting changes (a new or removed skill, shared infrastructure such as `workpaper-kit`, `privacy-gate`, or CI, or a repo-wide convention change), not for every individual skill release. Tagged `repo-vX.Y.Z`. See `CHANGELOG.md` for the exact bump policy.
+The command requires a clean `main` branch that is not behind `origin/main`. It generates the root changelog entry from commits since the latest global tag, runs the deterministic release checks, commits the release metadata, creates and pushes `vX.Y.Z`, and then GitHub Actions creates the GitHub Release. The first global release uses the most recent `VERSION` commit as its baseline because this repository has no prior global tag.
 
 ## CI
 

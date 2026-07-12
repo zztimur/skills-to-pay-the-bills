@@ -1,31 +1,30 @@
 #!/usr/bin/env sh
-# Generate a release diff for one skill directory in this repo: the commit
-# log and full diff scoped to <skill-dir> between two refs, plus the
-# .claude-plugin/plugin.json version change if present. Meant to be reviewed
-# before tagging a scoped release such as privacy-gate-v1.1.0.
+# Show repository-wide release changes since the latest global vX.Y.Z tag.
 set -eu
 
 usage() {
     cat <<'EOF'
-Usage: scripts/release-diff.sh <skill-dir> [options]
+Usage: scripts/release-diff.sh [options]
+
+Review the repository changes that would be included in the next global release.
+Without --from, compare HEAD with the latest vX.Y.Z tag. During the migration
+from the previous per-skill release model, it instead uses the most recent
+commit that changed VERSION when no global tag exists.
 
 Options:
-  --from <ref>   Start ref. Defaults to the latest tag matching
-                 '<skill-dir>-v*' (sorted by version). If no such tag
-                 exists, defaults to the full history of <skill-dir>.
+  --from <ref>   Start ref instead of the default global-release baseline.
   --to <ref>     End ref. Defaults to HEAD.
-  --out <path>   Write the diff to <path> instead of stdout. The version
+  --out <path>   Write the full diff to <path> instead of stdout. The release
                  summary and commit log are always printed to stdout.
   -h, --help     Show this help.
 
 Examples:
-  scripts/release-diff.sh privacy-gate
-  scripts/release-diff.sh privacy-gate --from privacy-gate-v1.0.0
-  scripts/release-diff.sh fbar-threshold-check --out /tmp/fbar.diff
+  scripts/release-diff.sh
+  scripts/release-diff.sh --from v1.3.3
+  scripts/release-diff.sh --out /tmp/release.diff
 EOF
 }
 
-skill=""
 from_ref=""
 to_ref="HEAD"
 out_path=""
@@ -54,101 +53,78 @@ while [ $# -gt 0 ]; do
             exit 2
             ;;
         *)
-            if [ -n "$skill" ]; then
-                echo "release-diff: unexpected extra argument: $1" >&2
-                exit 2
-            fi
-            skill="$1"
-            shift
+            echo "release-diff: unexpected argument: $1" >&2
+            usage >&2
+            exit 2
             ;;
     esac
 done
 
-if [ -z "$skill" ]; then
-    echo "release-diff: missing <skill-dir>" >&2
-    usage >&2
-    exit 2
-fi
-
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
-
-# Strip a trailing slash and reject path traversal; this must be a plain
-# directory name at the repo root, not an arbitrary path.
-skill="${skill%/}"
-case "$skill" in
-    */* | . | ..)
-        echo "release-diff: <skill-dir> must be a single directory name at the repo root, got: $skill" >&2
-        exit 2
-        ;;
-esac
-
-if [ ! -d "$skill" ]; then
-    echo "release-diff: no such directory: $skill" >&2
-    exit 2
-fi
-if [ ! -f "$skill/SKILL.md" ] && [ ! -f "$skill/.claude-plugin/plugin.json" ]; then
-    echo "release-diff: $skill does not look like a skill (no SKILL.md or .claude-plugin/plugin.json)" >&2
-    exit 2
-fi
 
 if ! git rev-parse --verify --quiet "${to_ref}^{commit}" >/dev/null; then
     echo "release-diff: --to ref does not resolve to a commit: $to_ref" >&2
     exit 2
 fi
 
-used_default_from=0
-if [ -z "$from_ref" ]; then
-    from_ref="$(git tag -l "${skill}-v*" --sort=-v:refname | head -n 1)"
-    used_default_from=1
-fi
-
 empty_tree="$(git hash-object -t tree /dev/null)"
+from_label=""
 if [ -z "$from_ref" ]; then
-    from_ref="$empty_tree"
-    from_label="(no prior ${skill}-v* tag; full history)"
-else
-    if ! git rev-parse --verify --quiet "${from_ref}^{commit}" >/dev/null 2>&1 \
-        && ! git rev-parse --verify --quiet "${from_ref}^{tree}" >/dev/null 2>&1; then
-        echo "release-diff: --from ref does not resolve: $from_ref" >&2
-        exit 2
-    fi
-    if [ "$used_default_from" -eq 1 ]; then
-        from_label="$from_ref (latest ${skill}-v* tag)"
+    from_ref="$(git tag -l 'v[0-9]*' --sort=-v:refname | head -n 1)"
+    if [ -n "$from_ref" ]; then
+        from_label="$from_ref (latest global release tag)"
     else
-        from_label="$from_ref"
+        from_ref="$(git log -1 --format=%H -- VERSION)"
+        if [ -n "$from_ref" ]; then
+            from_label="$from_ref (VERSION baseline before the first global tag)"
+        else
+            from_ref="$empty_tree"
+            from_label="(no global tag or VERSION baseline; full history)"
+        fi
     fi
+else
+    from_label="$from_ref"
 fi
 
-plugin_json="$skill/.claude-plugin/plugin.json"
-from_version=""
-to_version=""
-if git cat-file -e "${from_ref}:${plugin_json}" 2>/dev/null; then
-    from_version="$(git show "${from_ref}:${plugin_json}" | grep -m1 '"version"' | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')"
-fi
-if git cat-file -e "${to_ref}:${plugin_json}" 2>/dev/null; then
-    to_version="$(git show "${to_ref}:${plugin_json}" | grep -m1 '"version"' | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')"
+if [ "$from_ref" != "$empty_tree" ] \
+    && ! git rev-parse --verify --quiet "${from_ref}^{commit}" >/dev/null; then
+    echo "release-diff: --from ref does not resolve to a commit: $from_ref" >&2
+    exit 2
 fi
 
-echo "== Release diff: $skill =="
+echo "== Repository release diff =="
 echo "From: $from_label"
 echo "To:   $to_ref"
-if [ -n "$from_version" ] || [ -n "$to_version" ]; then
-    echo "Version: ${from_version:-?} -> ${to_version:-?}"
+echo ""
+echo "-- Changed top-level areas --"
+git diff --name-only "$from_ref" "$to_ref" \
+    | awk -F/ '
+        NF == 1 { root = 1; next }
+        { seen[$1] = 1 }
+        END {
+            if (root) print "repository root"
+            for (area in seen) print area
+        }
+    ' \
+    | sort \
+    | sed 's/^/- /'
+echo ""
+echo "-- Commits --"
+if [ "$from_ref" = "$empty_tree" ]; then
+    git log --oneline "$to_ref"
+else
+    git log --oneline "${from_ref}..${to_ref}"
 fi
 echo ""
-echo "-- Commits touching $skill/ --"
-if [ "$from_ref" = "$empty_tree" ]; then
-    git log --oneline "$to_ref" -- "$skill" || true
-else
-    git log --oneline "${from_ref}..${to_ref}" -- "$skill" || true
-fi
+echo "-- Diff stat --"
+git diff --stat "$from_ref" "$to_ref"
 echo ""
 
 if [ -n "$out_path" ]; then
-    git diff "$from_ref" "$to_ref" -- "$skill" >"$out_path"
+    git diff "$from_ref" "$to_ref" >"$out_path"
     echo "Diff written to $out_path"
 else
     echo "-- Diff --"
-    git diff "$from_ref" "$to_ref" -- "$skill"
+    git diff "$from_ref" "$to_ref"
 fi
