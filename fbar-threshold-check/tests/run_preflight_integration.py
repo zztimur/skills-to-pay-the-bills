@@ -203,6 +203,33 @@ def make_compact_cop_column_fixture(work: Path, *, saldo_header: str = "SALDO") 
     return paths
 
 
+def make_period_end_only_quarterly_fixture(work: Path) -> list[Path]:
+    """Generate four complete-period statements with summaries, not transactions.
+
+    This guards the end-to-end distinction between an exact period-end summary
+    and transaction-row balance evidence. All values and account identifiers
+    are synthetic.
+    """
+    quarters = (
+        ("q1", "January 1", "March 31", "9,800.00"),
+        ("q2", "April 1", "June 30", "9,950.00"),
+        ("q3", "July 1", "September 30", "10,100.00"),
+        ("q4", "October 1", "December 31", "10,250.00"),
+    )
+    paths: list[Path] = []
+    for quarter, start, end, balance in quarters:
+        path = work / f"period-end-only-{quarter}.pdf"
+        make_pdf(path, [
+            "Example Bank Quarterly Statement",
+            "Account Number: 44445555",  # privacy-gate: allow (synthetic account fixture)
+            f"Statement period {start} 2025 to {end} 2025",
+            "Currency USD",
+            f"Statement ending balance {balance} USD",
+        ])
+        paths.append(path)
+    return paths
+
+
 def run(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, capture_output=True, text=True)
 
@@ -339,6 +366,122 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         "READY-2 FBAR extracts the preflighted real PDFs and records verified fingerprints",
         extract_process.returncode == 0 and account_data is not None and observed == 4 and fingerprints_match,
         extract_process.stderr.strip(),
+    )
+
+    # Complete quarterly statement-period coverage alone must not make four
+    # labelled closing summaries look like an annual daily ledger. Exercise
+    # preflight, extraction, JSON, and the generated review CSV together.
+    period_end_only = make_period_end_only_quarterly_fixture(work)
+    summary_preflight_process, summary_preflight_path, summary_preflight_data = preflight(
+        work, "period-end-only", period_end_only
+    )
+    summary_extract_process, summary_account_path, summary_account_data = extract(
+        work, "period-end-only", period_end_only, summary_preflight_path
+    )
+    summary_coverage = (
+        summary_account_data.get("coverage", {})
+        if isinstance(summary_account_data, dict) and isinstance(summary_account_data.get("coverage"), dict)
+        else {}
+    )
+    summary_sufficiency = (
+        summary_account_data.get("data_sufficiency", {})
+        if isinstance(summary_account_data, dict) and isinstance(summary_account_data.get("data_sufficiency"), dict)
+        else {}
+    )
+    summary_review = (
+        summary_account_data.get("review_summary", {})
+        if isinstance(summary_account_data, dict) and isinstance(summary_account_data.get("review_summary"), dict)
+        else {}
+    )
+    summary_rows = summary_account_data.get("daily_ledger", []) if isinstance(summary_account_data, dict) else []
+    period_end_rows = [
+        row for row in summary_rows
+        if isinstance(row, dict) and row.get("evidence_class") == "period-end-summary"
+    ] if isinstance(summary_rows, list) else []
+    expected_period_ends = {
+        "2025-03-31": Decimal("9800.00"),
+        "2025-06-30": Decimal("9950.00"),
+        "2025-09-30": Decimal("10100.00"),
+        "2025-12-31": Decimal("10250.00"),
+    }
+    period_end_values = {
+        str(row.get("date")): Decimal(str(row.get("native_balance")))
+        for row in period_end_rows
+    }
+    highest_summary = max(
+        period_end_rows,
+        key=lambda row: Decimal(str(row.get("native_balance"))),
+        default=None,
+    )
+    summary_period_review = summary_review.get("period_end_summaries") if isinstance(summary_review, dict) else {}
+    summary_warnings = summary_account_data.get("warnings", []) if isinstance(summary_account_data, dict) else []
+    summary_artifacts = summary_account_data.get("artifacts", {}) if isinstance(summary_account_data, dict) else {}
+    summary_csv = (
+        Path(str(summary_artifacts.get("review_csv")))
+        if isinstance(summary_artifacts, dict) and summary_artifacts.get("review_csv")
+        else summary_account_path.with_name(summary_account_path.stem + "-review.csv")
+    )
+    try:
+        summary_csv_rows = list(csv.DictReader(summary_csv.read_text(encoding="utf-8").splitlines()))
+    except (OSError, csv.Error):
+        summary_csv_rows = []
+    summary_csv_period_ends = [
+        row for row in summary_csv_rows if row.get("evidence_class") == "period-end-summary"
+    ]
+    summary_checks = {
+        "complete_statement_periods": summary_preflight_process.returncode == 0
+        and isinstance(summary_preflight_data, dict)
+        and summary_preflight_data.get("status") == "ready-for-domain-extraction",
+        "period_end_rows": period_end_values == expected_period_ends
+        and all(row.get("balance_source") == "period-end-summary" and row.get("confidence") == "medium" for row in period_end_rows),
+        "source_references": all(
+            isinstance(row.get("source_refs"), list)
+            and len(row["source_refs"]) == 2
+            and period_end_only[index].name in str(row["source_refs"][0])
+            and period_end_only[index].name in str(row["source_refs"][1])
+            for index, row in enumerate(period_end_rows)
+        ),
+        "coverage_is_not_daily_proof": summary_coverage.get("observed_days") == 4
+        and summary_coverage.get("transaction_observed_days") == 0
+        and summary_coverage.get("period_end_summary_days") == 4
+        and summary_coverage.get("missing_days") == 89
+        and summary_coverage.get("complete_year") is False
+        and isinstance(summary_coverage.get("carry_gaps"), list)
+        and len(summary_coverage["carry_gaps"]) == 3
+        and all(int(gap.get("days", 0)) > 40 for gap in summary_coverage["carry_gaps"] if isinstance(gap, dict)),
+        "maximum_is_not_determined": isinstance(highest_summary, dict)
+        and highest_summary.get("date") == "2025-12-31"
+        and Decimal(str(highest_summary.get("native_balance"))) == Decimal("10250.00")
+        and summary_sufficiency == {
+            "evidence_profile": "period-end-only",
+            "daily_threshold": {
+                "answer": "insufficient-records",
+                "reason_codes": ["period-end-only", "missing-opening-coverage", "long-carry-forward-gap"],
+            },
+            "maximum_account_value": {
+                "answer": "not-determinable",
+                "reason_codes": ["period-end-only", "missing-opening-coverage", "long-carry-forward-gap"],
+            },
+        }
+        and isinstance(summary_account_data, dict)
+        and "daily_threshold" not in summary_account_data,
+        "review_artifacts": isinstance(summary_period_review, dict)
+        and summary_period_review.get("count") == 4
+        and summary_period_review.get("requires_user_review") is True
+        and len(summary_csv_rows) == 365
+        and len(summary_csv_period_ends) == 4
+        and all(
+            "period-end summary" in row.get("review_flags", "")
+            and period_end_only[index].name in row.get("source_refs", "")
+            for index, row in enumerate(summary_csv_period_ends)
+        )
+        and isinstance(summary_warnings, list)
+        and any("carry-forward gap" in str(warning) for warning in summary_warnings),
+    }
+    check(
+        "COVERAGE-0 four period-end-only statements retain exact summaries but refuse an annual maximum",
+        summary_extract_process.returncode == 0 and all(summary_checks.values()),
+        "" if all(summary_checks.values()) else json.dumps(summary_checks, sort_keys=True),
     )
 
     # Exercise the exact end-to-end shape that a Spanish, page-period-bound
