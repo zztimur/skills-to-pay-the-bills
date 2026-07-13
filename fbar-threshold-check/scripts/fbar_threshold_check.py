@@ -1109,6 +1109,8 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
     last_observed: date | None = None
     rows: list[dict[str, object]] = []
     observed_days = 0
+    transaction_observed_days = 0
+    period_end_summary_days = 0
     carried_days = 0
     missing_days = 0
     low_confidence_days = 0
@@ -1186,6 +1188,10 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                 first_observed = day
             last_observed = day
             observed_days += 1
+            if selected.candidate_type == "period-end-summary":
+                period_end_summary_days += 1
+            else:
+                transaction_observed_days += 1
             if confidence == "low":
                 low_confidence_days += 1
             source_refs = [source_ref_to_string(selected.source)]
@@ -1201,6 +1207,7 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                     "usd_balance": None,
                     "threshold_usd_value": None,
                     "balance_source": "period-end-summary" if selected.candidate_type == "period-end-summary" else "observed",
+                    "evidence_class": "period-end-summary" if selected.candidate_type == "period-end-summary" else "transaction",
                     "confidence": confidence,
                     "source_refs": source_refs,
                     "notes": notes,
@@ -1220,6 +1227,7 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                     "usd_balance": None,
                     "threshold_usd_value": None,
                     "balance_source": "carried-forward",
+                    "evidence_class": "carried-forward",
                     "confidence": "medium",
                     "source_refs": [source_ref_to_string(last_ref)] if last_ref else [],
                     "notes": ["No same-day balance found; carried forward most recent observed account balance."],
@@ -1236,6 +1244,7 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                     "usd_balance": None,
                     "threshold_usd_value": None,
                     "balance_source": "missing-opening-coverage",
+                    "evidence_class": "missing-opening",
                     "confidence": "missing",
                     "source_refs": [],
                     "notes": ["No opening or prior balance was available for this day."],
@@ -1271,7 +1280,12 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
     coverage = {
         "year": tax_year,
         "calendar_days": len(rows),
+        # Keep observed_days for compatibility. These two selected-source
+        # counts partition it so sparse period-end summaries cannot look like
+        # equivalent transaction-row evidence in a review artifact.
         "observed_days": observed_days,
+        "transaction_observed_days": transaction_observed_days,
+        "period_end_summary_days": period_end_summary_days,
         "carried_forward_days": carried_days,
         "missing_days": missing_days,
         "complete_year": missing_days == 0,
@@ -1285,6 +1299,56 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
         "material_same_day_variance_days": material_variance_days,
     }
     return rows, coverage, warnings
+
+
+def build_data_sufficiency(coverage: dict[str, object]) -> dict[str, object]:
+    """Describe whether extracted evidence can support a later threshold review.
+
+    This is deliberately not a threshold decision and cannot replace the
+    confirmation gate. It makes sparse period-end-only statements explicit so
+    a reviewer cannot mistake a displayed zero balance for an annual maximum.
+    """
+    observed_days = as_int(coverage.get("observed_days", 0), "coverage.observed_days")
+    transaction_observed_days = as_int(
+        coverage.get("transaction_observed_days", 0), "coverage.transaction_observed_days"
+    )
+    period_end_summary_days = as_int(
+        coverage.get("period_end_summary_days", 0), "coverage.period_end_summary_days"
+    )
+    missing_days = as_int(coverage.get("missing_days", 0), "coverage.missing_days")
+    carry_gaps = coverage.get("carry_gaps") if isinstance(coverage.get("carry_gaps"), list) else []
+
+    if transaction_observed_days and period_end_summary_days:
+        evidence_profile = "mixed-transaction-and-period-end"
+    elif transaction_observed_days:
+        evidence_profile = "transaction-rows"
+    elif period_end_summary_days:
+        evidence_profile = "period-end-only"
+    else:
+        evidence_profile = "no-balance-observations"
+
+    reason_codes: list[str] = []
+    if evidence_profile == "period-end-only":
+        reason_codes.append("period-end-only")
+    if observed_days == 0:
+        reason_codes.append("no-balance-observations")
+    if missing_days:
+        reason_codes.append("missing-opening-coverage")
+    if carry_gaps:
+        reason_codes.append("long-carry-forward-gap")
+
+    records_insufficient = bool(missing_days or carry_gaps or observed_days == 0)
+    return {
+        "evidence_profile": evidence_profile,
+        "daily_threshold": {
+            "answer": "insufficient-records" if records_insufficient else "review-required",
+            "reason_codes": reason_codes,
+        },
+        "maximum_account_value": {
+            "answer": "not-determinable" if records_insufficient else "review-required",
+            "reason_codes": reason_codes,
+        },
+    }
 
 
 def source_ref_to_string(ref: SourceRef | None) -> str:
@@ -1380,7 +1444,27 @@ def print_period_end_summary_review_card(account_data: dict[str, object]) -> Non
         return
     print(
         f"Period-end summary review: {len(items)} source-bound summary observation(s) need user review. "
-        "Exact period ends and source references are in review_summary and the review CSV."
+        "They are exact period-end observations only, not daily coverage or an annual maximum; "
+        "exact period ends and source references are in review_summary and the review CSV."
+    )
+
+
+def print_data_sufficiency_review_card(account_data: dict[str, object]) -> None:
+    sufficiency = account_data.get("data_sufficiency")
+    if not isinstance(sufficiency, dict):
+        return
+    daily = sufficiency.get("daily_threshold")
+    maximum = sufficiency.get("maximum_account_value")
+    if not isinstance(daily, dict) or not isinstance(maximum, dict):
+        return
+    if daily.get("answer") != "insufficient-records" and maximum.get("answer") != "not-determinable":
+        return
+    print(
+        "Evidence sufficiency: "
+        f"profile={sufficiency.get('evidence_profile')}; "
+        f"daily threshold={daily.get('answer')}; "
+        f"maximum account value={maximum.get('answer')}. "
+        "Do not treat period-end observations or carried balances as an annual maximum."
     )
 
 
@@ -1428,6 +1512,7 @@ def write_account_csv(path: Path, account_data: dict[str, object]) -> None:
         "usd_balance",
         "threshold_usd_value",
         "balance_source",
+        "evidence_class",
         "confidence",
         "source_refs",
         "notes",
@@ -1452,6 +1537,7 @@ def write_account_csv(path: Path, account_data: dict[str, object]) -> None:
                     "usd_balance": row.get("usd_balance"),
                     "threshold_usd_value": row.get("threshold_usd_value"),
                     "balance_source": row.get("balance_source"),
+                    "evidence_class": row.get("evidence_class"),
                     "confidence": row.get("confidence"),
                     "source_refs": "; ".join(row.get("source_refs", []) if isinstance(row.get("source_refs"), list) else []),
                     "notes": "; ".join(row.get("notes", []) if isinstance(row.get("notes"), list) else []),
@@ -2057,6 +2143,7 @@ def command_extract_account(args: argparse.Namespace) -> int:
         "preflight": preflight_profile(preflight, args.preflight_json),
         "statement_files": file_profiles,
         "coverage": coverage,
+        "data_sufficiency": build_data_sufficiency(coverage),
         "fx": {
             "required": currency not in {"USD", "UNKNOWN", "MIXED"},
             "workpaper_json": None,
@@ -2075,6 +2162,7 @@ def command_extract_account(args: argparse.Namespace) -> int:
     print(f"Wrote review CSV: {csv_path}")
     print_same_day_candidate_review_card(data)
     print_period_end_summary_review_card(data)
+    print_data_sufficiency_review_card(data)
     if warnings:
         print("Review warnings:")
         for warning in sorted(set(warnings)):
@@ -2677,6 +2765,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         test_confirmed_cop_table_context(root)
         test_account_hint_selection()
         test_build_daily_rows()
+        test_period_end_only_data_sufficiency()
         test_native_balance_precision()
         test_leap_year()
         test_same_day_variance()
@@ -3141,8 +3230,10 @@ def test_source_bound_period_end_summaries(root: Path) -> None:
 
     rows, coverage, _warnings = build_daily_rows(2025, "COP", candidates)
     assert rows[-1]["balance_source"] == "period-end-summary", rows[-1]
+    assert rows[-1]["evidence_class"] == "period-end-summary", rows[-1]
     assert rows[-1]["source_refs"] == ["period-end-statement.pdf:p1:l2", "period-end-statement.pdf:p1:l1"], rows[-1]
     assert rows[-2]["balance_source"] == "missing-opening-coverage", rows[-2]
+    assert rows[-2]["evidence_class"] == "missing-opening", rows[-2]
     assert coverage["observed_days"] == 1 and coverage["carried_forward_days"] == 0, coverage
     assert coverage["trailing_carry_days"] == 0, coverage
     flags = rows[-1]["review_flags"]
@@ -3158,6 +3249,12 @@ def test_source_bound_period_end_summaries(root: Path) -> None:
     assert review_summary["same_day_balance_candidates"]["count"] == 0, review_summary
     assert review_summary["period_end_summaries"]["count"] == 1, review_summary
     assert "period-end summary (period_end=2025-12-31;" in format_review_flags(flags)
+    csv_path = root / "period-end-review.csv"
+    write_account_csv(csv_path, {"account": {}, "daily_ledger": rows})
+    with csv_path.open(encoding="utf-8", newline="") as handle:
+        csv_rows = list(csv.DictReader(handle))
+    assert csv_rows[-1]["evidence_class"] == "period-end-summary", csv_rows[-1]
+    assert csv_rows[-2]["evidence_class"] == "missing-opening", csv_rows[-2]
 
     unbound_candidates, _warnings = extract_balance_candidates(lines, 2025, "COP")
     assert not unbound_candidates, unbound_candidates
@@ -3463,7 +3560,9 @@ def test_build_daily_rows() -> None:
     rows, coverage, warnings = build_daily_rows(2025, "USD", candidates)
     assert len(rows) == 365
     assert rows[0]["native_balance"] == "150"
+    assert rows[0]["evidence_class"] == "transaction"
     assert rows[1]["native_balance"] == "150"
+    assert rows[1]["evidence_class"] == "carried-forward"
     assert rows[2]["native_balance"] == "125"
     assert rows[0]["confidence"] == "high"
     assert coverage["complete_year"] is True
@@ -3473,6 +3572,40 @@ def test_build_daily_rows() -> None:
     assert coverage["carry_gap_review_required"] is True
     assert coverage["carry_gaps"] and coverage["carry_gaps"][-1]["end"] == "2025-12-31"
     assert any("carried forward" in warning for warning in warnings)
+
+
+def test_period_end_only_data_sufficiency() -> None:
+    candidates = [
+        BalanceCandidate(
+            end,
+            Decimal("0"),
+            "COP",
+            "medium",
+            SourceRef("summary.pdf", index, 2, "Cierre del periodo 0"),
+            candidate_type="period-end-summary",
+            period_end=end,
+            period_end_source=SourceRef("summary.pdf", index, 1, "Statement period"),
+        )
+        for index, end in enumerate(
+            (date(2025, 3, 31), date(2025, 6, 30), date(2025, 9, 30), date(2025, 12, 31)), start=1
+        )
+    ]
+    _rows, coverage, _warnings = build_daily_rows(2025, "COP", candidates)
+    sufficiency = build_data_sufficiency(coverage)
+    assert coverage["observed_days"] == 4, coverage
+    assert coverage["transaction_observed_days"] == 0, coverage
+    assert coverage["period_end_summary_days"] == 4, coverage
+    assert sufficiency == {
+        "evidence_profile": "period-end-only",
+        "daily_threshold": {
+            "answer": "insufficient-records",
+            "reason_codes": ["period-end-only", "missing-opening-coverage", "long-carry-forward-gap"],
+        },
+        "maximum_account_value": {
+            "answer": "not-determinable",
+            "reason_codes": ["period-end-only", "missing-opening-coverage", "long-carry-forward-gap"],
+        },
+    }, sufficiency
 
 
 def test_native_balance_precision() -> None:

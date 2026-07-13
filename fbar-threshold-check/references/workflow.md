@@ -104,7 +104,7 @@ The script writes:
 - Account JSON at `--out`.
 - Review CSV beside the JSON unless `--csv` is supplied.
 
-The review CSV has one row per day with native balance, USD balance placeholder, confidence, source references, notes, and a compact `review_flags` field. The account JSON also has `review_summary.same_day_balance_candidates`, which groups every materially different same-day candidate set with its date, candidate count/range, selected value, and source references. When a labelled closing amount is on a page with exactly one re-verified statement period, `review_summary.period_end_summaries` records the summary and exact period-end source references. A period-end summary is an exact-date observation only: it never backfills intervening days or clears carry-gap review. For user-confirmed COP, the exact `Fecha Descripción Movimiento Tarjeta Débito Abono Saldo` text header or the compact PDF-column header `Fecha | Descripción | Saldo`, plus one re-verified page period, permits whole-COP comma grouping only in the final `Saldo` column. The compact form also requires one left-column `DD/MM` date and exactly one monetary `Saldo` cell on the same visual row; generic separator ambiguity remains reviewable. The extraction console reports only the number of flagged dates; inspect values only in the retained review artifacts.
+The review CSV has one row per day with native balance, USD balance placeholder, an `evidence_class`, confidence, source references, notes, and a compact `review_flags` field. `evidence_class` is one of `transaction`, `period-end-summary`, `carried-forward`, or `missing-opening`; only `transaction` is a transaction-row balance observation. The account JSON also has `data_sufficiency`: `evidence_profile` distinguishes transaction rows from period-end-only evidence, while its daily-threshold and maximum-account-value answers make an incomplete evidence set explicit without producing a threshold result. It also has `review_summary.same_day_balance_candidates`, which groups every materially different same-day candidate set with its date, candidate count/range, selected value, and source references. When a labelled closing amount is on a page with exactly one re-verified statement period, `review_summary.period_end_summaries` records the summary and exact period-end source references. A period-end summary is an exact-date observation only: it never backfills intervening days, clears carry-gap review, or proves the annual maximum. For user-confirmed COP, the exact `Fecha Descripción Movimiento Tarjeta Débito Abono Saldo` text header or the compact PDF-column header `Fecha | Descripción | Saldo`, plus one re-verified page period, permits whole-COP comma grouping only in the final `Saldo` column. The compact form also requires one left-column `DD/MM` date and exactly one monetary `Saldo` cell on the same visual row; generic separator ambiguity remains reviewable. The extraction console reports only the number of flagged dates; inspect values only in the retained review artifacts.
 
 ## 6. Review Gate
 
@@ -116,6 +116,7 @@ Open the JSON and CSV before confirming. Confirm these fields:
 - `coverage.complete_year` is true.
 - `coverage.carry_gaps` is empty and `coverage.trailing_carry_days` is small; carried balances near year-end are evidence gaps, not observations.
 - `coverage.carried_forward_days` is plausible for the statement cycle. Carried spans under the 40-day gap threshold (for example one missing monthly statement) pass the automated gates, so a high carried-to-observed ratio still needs the user's explicit acceptance.
+- `data_sufficiency.daily_threshold.answer` is not `insufficient-records` and `data_sufficiency.maximum_account_value.answer` is not `not-determinable`. If either appears, say the records cannot support that conclusion; do not confirm or infer a maximum from period-end summaries.
 - Every day in the year has a native balance.
 - Rows with ambiguous-separator notes match the magnitudes printed on the statement.
 - `warnings` are either resolved or explicitly accepted by the user.
@@ -124,6 +125,8 @@ Present this as a concise review card before asking for confirmation; do not ask
 
 - Account label, institution when known, and currency.
 - Coverage: observed days, carried-forward days, and any missing days or carry-forward gaps.
+- Evidence profile and any insufficiency result from `data_sufficiency`.
+- Evidence classes for any period-end, carried-forward, or missing-opening rows.
 - Flagged dates or rows, summarized in plain language, plus each review artifact path.
 - When `review_summary.same_day_balance_candidates.requires_user_review` is true, list its count and each flagged date's selected candidate/range and source references; do not ask the user to infer this from the raw ledger.
 - When `review_summary.period_end_summaries.requires_user_review` is true, list each exact period end plus its summary and period-end source references, and state that intervening carry gaps remain unobserved.

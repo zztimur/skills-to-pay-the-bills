@@ -13,6 +13,7 @@ available); 1 when an integration assertion fails. Fixtures are synthetic.
 """
 from __future__ import annotations
 
+import csv
 import json
 import subprocess
 import sys
@@ -418,6 +419,10 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         spanish_csv_text = spanish_csv.read_text(encoding="utf-8")
     except OSError:
         spanish_csv_text = ""
+    try:
+        spanish_csv_rows = list(csv.DictReader(spanish_csv_text.splitlines()))
+    except csv.Error:
+        spanish_csv_rows = []
     reviewed_institution = (
         spanish_handoff_data.get("user_resolutions", {}).get("institution")
         if isinstance(spanish_handoff_data, dict)
@@ -456,7 +461,11 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         and isinstance(october_sources, list)
         and any(cop_style[-1].name in str(source) for source in october_sources),
         "review_csv": "source-bound page statement period" in spanish_csv_text
-        and cop_style[-1].name in spanish_csv_text,
+        and cop_style[-1].name in spanish_csv_text
+        and spanish_csv_rows
+        and "evidence_class" in (spanish_csv_rows[0] or {})
+        and any(row.get("evidence_class") == "transaction" for row in spanish_csv_rows)
+        and any(row.get("evidence_class") == "carried-forward" for row in spanish_csv_rows),
     }
     flow_ok = all(flow_checks.values())
     check(
@@ -810,6 +819,7 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
     mid_extract_process, _mid_account_path, mid_account = extract(work, "missing-midyear", missing_midyear, mid_handoff_path)
     mid_coverage = mid_account.get("coverage", {}) if isinstance(mid_account, dict) and isinstance(mid_account.get("coverage"), dict) else {}
     mid_warnings = mid_account.get("warnings", []) if isinstance(mid_account, dict) else []
+    mid_sufficiency = mid_account.get("data_sufficiency", {}) if isinstance(mid_account, dict) and isinstance(mid_account.get("data_sufficiency"), dict) else {}
     mid_preflight = mid_account.get("preflight", {}) if isinstance(mid_account, dict) and isinstance(mid_account.get("preflight"), dict) else {}
     mid_hints = mid_preflight.get("coverage_hints", {}) if isinstance(mid_preflight, dict) else {}
     mid_gaps = mid_coverage.get("carry_gaps", []) if isinstance(mid_coverage, dict) else []
@@ -820,6 +830,8 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         and isinstance(mid_hints, dict) and isinstance(mid_hints.get("period_coverage_review"), dict)
         and isinstance(mid_gaps, list) and any(isinstance(gap, dict) and int(gap.get("days", 0)) > 40 for gap in mid_gaps)
         and isinstance(mid_warnings, list) and any("possible calendar coverage gap" in str(warning) for warning in mid_warnings)
+        and isinstance(mid_sufficiency.get("daily_threshold"), dict) and mid_sufficiency["daily_threshold"].get("answer") == "insufficient-records"
+        and isinstance(mid_sufficiency.get("maximum_account_value"), dict) and mid_sufficiency["maximum_account_value"].get("answer") == "not-determinable"
         and isinstance(mid_account, dict) and mid_account.get("status") == "extracted-review-required" and "daily_threshold" not in mid_account,
         mid_extract_process.stderr.strip(),
     )
@@ -845,6 +857,7 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
     end_extract_process, _end_account_path, end_account = extract(work, "missing-year-end", missing_year_end, end_handoff_path)
     end_coverage = end_account.get("coverage", {}) if isinstance(end_account, dict) and isinstance(end_account.get("coverage"), dict) else {}
     end_warnings = end_account.get("warnings", []) if isinstance(end_account, dict) else []
+    end_sufficiency = end_account.get("data_sufficiency", {}) if isinstance(end_account, dict) and isinstance(end_account.get("data_sufficiency"), dict) else {}
     check(
         "COVERAGE-2 an omitted year-end statement retains trailing-gap warnings and no daily answer",
         end_process.returncode == 0 and end_handoff_process.returncode == 0 and end_extract_process.returncode == 0
@@ -852,6 +865,8 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         and isinstance(end_coverage, dict) and int(end_coverage.get("trailing_carry_days", 0)) > 40
         and end_coverage.get("carry_gap_review_required") is True
         and isinstance(end_warnings, list) and any("final" in str(warning) and "carried forward" in str(warning) for warning in end_warnings)
+        and isinstance(end_sufficiency.get("daily_threshold"), dict) and end_sufficiency["daily_threshold"].get("answer") == "insufficient-records"
+        and isinstance(end_sufficiency.get("maximum_account_value"), dict) and end_sufficiency["maximum_account_value"].get("answer") == "not-determinable"
         and isinstance(end_account, dict) and end_account.get("status") == "extracted-review-required" and "daily_threshold" not in end_account,
         end_extract_process.stderr.strip(),
     )
