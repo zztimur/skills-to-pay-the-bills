@@ -1802,7 +1802,7 @@ def validate_reviewed_user_resolutions(
     """
     gate_codes = {gate["code"] for gate in gates}
     currency_gate_codes = {"ambiguous-dollar", "unknown-currency"} & gate_codes
-    account_gate_codes = {"unknown-account", "possible-mixed-accounts"} & gate_codes
+    account_gate_codes = {"unknown-account", "possible-mixed-accounts", "incomplete-account-linkage"} & gate_codes
     year_gate_codes = {"mixed-years", "unresolved-year-evidence", "unknown-year-coverage"} & gate_codes
     institution_gate_codes = {"unknown-institution", "possible-mixed-institutions"} & gate_codes
     raw_resolutions = handoff.get("user_resolutions")
@@ -2015,6 +2015,7 @@ def preflight_profile(preflight: dict[str, object], source_path: str) -> dict[st
         "requirements": preflight.get("requirements"),
         "currency": preflight.get("currency"),
         "profile": preflight.get("profile"),
+        "account_linkage": preflight.get("account_linkage"),
         "coverage_hints": preflight.get("coverage_hints"),
         "review_gates": preflight.get("review_gates", []),
         "review_csv": (preflight.get("artifacts") or {}).get("review_csv") if isinstance(preflight.get("artifacts"), dict) else None,
@@ -3937,6 +3938,51 @@ def test_preflight_handoff(root: Path) -> None:
         assert "conflicts with the user-confirmed institution" in str(exc), str(exc)
     else:
         raise AssertionError("a CLI institution must not override a reviewed institution resolution")
+
+    linkage_gate = {
+        "code": "incomplete-account-linkage",
+        "severity": "review",
+        "message": "one statement PDF is not source-linked to the detected account",
+    }
+    linkage_source = write_preflight_fixture(
+        root,
+        "preflight-account-linkage-review",
+        2025,
+        "one-account",
+        [pdf],
+        status=PREFLIGHT_REVIEW_REQUIRED_STATUS,
+        gates=[linkage_gate],
+    )
+    linkage_handoff = write_reviewed_handoff_fixture(root, "preflight-account-linkage-reviewed", linkage_source)
+    linkage_handoff_data = load_json(linkage_handoff)
+    linkage_handoff_data["user_resolutions"] = {
+        "source_preflight_sha256": preflight_file_sha256(linkage_source),
+        "statement_years": {"status": "not-required"},
+        "currency": {"status": "not-required"},
+        "one_account": {
+            "status": "user-confirmed",
+            "confirmed": True,
+            "account_identifier_provided": False,
+            "resolved_gate_codes": ["incomplete-account-linkage"],
+        },
+        "institution": {"status": "not-required"},
+    }
+    write_json(linkage_handoff, linkage_handoff_data)
+    linkage_reviewed = load_preflight_json(str(linkage_handoff), "one-account", 2025, [str(pdf)])
+    linkage_resolutions = linkage_reviewed.get("user_resolutions")
+    assert isinstance(linkage_resolutions, dict)
+    linkage_one_account = linkage_resolutions.get("one_account")
+    assert isinstance(linkage_one_account, dict) and linkage_one_account.get("confirmed") is True
+
+    linkage_handoff_data = load_json(linkage_handoff)
+    linkage_handoff_data["user_resolutions"]["one_account"] = {"status": "not-required"}
+    write_json(linkage_handoff, linkage_handoff_data)
+    try:
+        load_preflight_json(str(linkage_handoff), "one-account", 2025, [str(pdf)])
+    except FbarError as exc:
+        assert "one-account resolution" in str(exc), str(exc)
+    else:
+        raise AssertionError("incomplete account linkage must require a one-account resolution")
 
     incomplete_handoff = write_reviewed_handoff_fixture(root, "preflight-incomplete", review_required, accepted_codes=[])
     try:

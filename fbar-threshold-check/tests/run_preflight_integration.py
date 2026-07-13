@@ -328,7 +328,7 @@ def create_reviewed_handoff(
     # preflight. The handoff keeps these separate from its raw evidence.
     if {"ambiguous-dollar", "unknown-currency"} & set(gate_codes):
         command.extend(["--confirm-currency", "COP"])
-    if {"unknown-account", "possible-mixed-accounts"} & set(gate_codes):
+    if {"unknown-account", "possible-mixed-accounts", "incomplete-account-linkage"} & set(gate_codes):
         command.append("--confirm-one-account")
     if {"unresolved-year-evidence", "unknown-year-coverage"} & set(gate_codes):
         command.extend(["--confirm-statement-year", "2025"])
@@ -529,7 +529,30 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         for item in spanish_files
         if isinstance(item, dict)
     ] if isinstance(spanish_files, list) else []
+    spanish_coverage_hints = spanish_data.get("coverage_hints") if isinstance(spanish_data, dict) else None
+    spanish_aggregate_periods = (
+        spanish_coverage_hints.get("period_intervals") if isinstance(spanish_coverage_hints, dict) else []
+    )
+    spanish_preflight_artifacts = spanish_data.get("artifacts") if isinstance(spanish_data, dict) else None
+    spanish_preflight_csv = (
+        Path(str(spanish_preflight_artifacts.get("review_csv")))
+        if isinstance(spanish_preflight_artifacts, dict) and spanish_preflight_artifacts.get("review_csv")
+        else spanish_path.with_name(spanish_path.stem + "-review.csv")
+    )
+    try:
+        spanish_preflight_csv_rows = list(csv.DictReader(spanish_preflight_csv.read_text(encoding="utf-8").splitlines()))
+    except (OSError, csv.Error):
+        spanish_preflight_csv_rows = []
     spanish_account = spanish_account_data.get("account") if isinstance(spanish_account_data, dict) else None
+    spanish_account_preflight = spanish_account_data.get("preflight") if isinstance(spanish_account_data, dict) else None
+    spanish_account_coverage_hints = (
+        spanish_account_preflight.get("coverage_hints") if isinstance(spanish_account_preflight, dict) else None
+    )
+    spanish_account_aggregate_periods = (
+        spanish_account_coverage_hints.get("period_intervals")
+        if isinstance(spanish_account_coverage_hints, dict)
+        else []
+    )
     spanish_coverage = spanish_account_data.get("coverage") if isinstance(spanish_account_data, dict) else None
     spanish_rows = spanish_account_data.get("daily_ledger") if isinstance(spanish_account_data, dict) else []
     spanish_warnings = spanish_account_data.get("warnings") if isinstance(spanish_account_data, dict) else []
@@ -607,6 +630,26 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         and spanish_hints == ["76543210"]
         and len(spanish_periods) == 4
         and all(isinstance(periods, list) and len(periods) == 1 for periods in spanish_periods),
+        "period_endpoints": isinstance(spanish_aggregate_periods, list)
+        and len(spanish_aggregate_periods) == 4
+        and all(
+            isinstance(period, dict)
+            and isinstance(period.get("source_ref"), dict)
+            and isinstance(period.get("end_source_ref"), dict)
+            and period["source_ref"].get("file") == period["end_source_ref"].get("file")
+            and period["source_ref"].get("page") == 1
+            and period["end_source_ref"].get("page") == 1
+            and isinstance(period["source_ref"].get("line"), int)
+            and isinstance(period["end_source_ref"].get("line"), int)
+            for period in spanish_aggregate_periods
+        )
+        and spanish_preflight_csv_rows
+        and all(
+            "start=p1/l" in str(row.get("period_intervals") or "")
+            and "end=p1/l" in str(row.get("period_intervals") or "")
+            for row in spanish_preflight_csv_rows
+        )
+        and spanish_account_aggregate_periods == spanish_aggregate_periods,
         "reviewed_handoff": spanish_handoff_process.returncode == 0
         and isinstance(reviewed_institution, dict)
         and reviewed_institution.get("name") == "Marca66",
@@ -646,7 +689,7 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
     }
     flow_ok = all(flow_checks.values())
     check(
-        "FLOW-1 sanitized COP layout fixture preserves source-bound dates, whole-COP balances, coverage, maximum review output, and reviewed institution",
+        "FLOW-1 sanitized COP layout fixture preserves both period endpoints, whole-COP balances, coverage, maximum review output, and reviewed institution",
         flow_ok,
         "" if flow_ok else json.dumps(flow_checks, sort_keys=True),
     )
@@ -844,6 +887,63 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         review_process.returncode == 0 and isinstance(review_gates, list) and bool(review_gates)
         and raw_review_process.returncode == 2 and "review-required" in raw_review_process.stderr,
         raw_review_process.stderr.strip(),
+    )
+
+    # One statement identifying the account does not prove a second statement
+    # belongs to it. The preflight must require an explicit, identifier-free
+    # one-account confirmation and FBAR must retain that source linkage limit.
+    linked_account_pdf = work / "account-linkage-identified.pdf"
+    unlinked_account_pdf = work / "account-linkage-unidentified.pdf"
+    make_pdf(linked_account_pdf, [
+        "Example Bank Semiannual Statement",
+        "Account Number: 31313131",  # privacy-gate: allow (synthetic account fixture)
+        "Statement period January 1 2025 to June 30 2025",
+        "Currency USD",
+        "2025-01-01 Closing balance 9,900.00 USD",
+        "2025-06-30 Closing balance 9,950.00 USD",
+    ])
+    make_pdf(unlinked_account_pdf, [
+        "Example Bank Semiannual Statement",
+        "Statement period July 1 2025 to December 31 2025",
+        "Currency USD",
+        "2025-07-01 Closing balance 9,975.00 USD",
+        "2025-12-31 Closing balance 10,001.00 USD",
+    ])
+    linkage_process, linkage_path, linkage_data = preflight(
+        work, "account-linkage", [linked_account_pdf, unlinked_account_pdf]
+    )
+    linkage_gates = linkage_data.get("review_gates") if isinstance(linkage_data, dict) else []
+    linkage_summary = linkage_data.get("account_linkage") if isinstance(linkage_data, dict) else None
+    linkage_raw_extract, _linkage_raw_path, _linkage_raw_data = extract(
+        work, "account-linkage-raw", [linked_account_pdf, unlinked_account_pdf], linkage_path
+    )
+    linkage_handoff_process, linkage_handoff_path, linkage_handoff_data = create_reviewed_handoff(
+        work, "account-linkage", linkage_path, linkage_data or {}
+    )
+    linkage_extract_process, _linkage_account_path, linkage_account_data = extract(
+        work, "account-linkage", [linked_account_pdf, unlinked_account_pdf], linkage_handoff_path
+    )
+    linkage_profile = linkage_account_data.get("preflight") if isinstance(linkage_account_data, dict) else None
+    linkage_resolutions = linkage_profile.get("user_resolutions") if isinstance(linkage_profile, dict) else None
+    linkage_profile_summary = linkage_profile.get("account_linkage") if isinstance(linkage_profile, dict) else None
+    check(
+        "REVIEW-1A incomplete account linkage requires confirmation and is retained",
+        linkage_process.returncode == 0
+        and isinstance(linkage_gates, list)
+        and any(isinstance(gate, dict) and gate.get("code") == "incomplete-account-linkage" for gate in linkage_gates)
+        and isinstance(linkage_summary, dict)
+        and linkage_summary.get("status") == "incomplete"
+        and linkage_raw_extract.returncode == 2
+        and "review-required" in linkage_raw_extract.stderr
+        and linkage_handoff_process.returncode == 0
+        and isinstance(linkage_handoff_data, dict)
+        and linkage_extract_process.returncode == 0
+        and isinstance(linkage_resolutions, dict)
+        and isinstance(linkage_resolutions.get("one_account"), dict)
+        and linkage_resolutions["one_account"].get("resolved_gate_codes") == ["incomplete-account-linkage"]
+        and isinstance(linkage_profile_summary, dict)
+        and linkage_profile_summary.get("status") == "incomplete",
+        linkage_extract_process.stderr.strip(),
     )
 
     handoff_process, handoff_path, handoff_data = create_reviewed_handoff(work, "review", review_path, review_data or {})
