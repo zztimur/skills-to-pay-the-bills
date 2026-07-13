@@ -332,6 +332,18 @@ def create_reviewed_handoff(
         command.append("--confirm-one-account")
     if {"unresolved-year-evidence", "unknown-year-coverage"} & set(gate_codes):
         command.extend(["--confirm-statement-year", "2025"])
+    if "out-of-period-generated-date" in gate_codes:
+        coverage = data.get("coverage_hints") if isinstance(data.get("coverage_hints"), dict) else {}
+        metadata_dates = coverage.get("document_metadata_dates") if isinstance(coverage, dict) else []
+        confirmed_dates = sorted(
+            {
+                str(item.get("date"))
+                for item in metadata_dates
+                if isinstance(item, dict) and item.get("kind") == "generated-on" and item.get("date")
+            }
+        )
+        for confirmed_date in confirmed_dates:
+            command.extend(["--confirm-generated-on-date", confirmed_date])
     if {"unknown-institution", "possible-mixed-institutions"} & set(gate_codes) and institution:
         command.extend(["--confirm-institution", institution])
     process = run(command)
@@ -1000,6 +1012,98 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         "REVIEW-5 a reviewed currency must be a supported ISO code",
         invalid_currency_process.returncode == 2 and "supported ISO currency code" in invalid_currency_process.stderr,
         invalid_currency_process.stderr.strip(),
+    )
+
+    generated_metadata_pdf = work / "generated-metadata.pdf"
+    make_pdf(generated_metadata_pdf, [
+        "Example Bank Monthly Statement",
+        "Account Number: 42424242",  # privacy-gate: allow (synthetic account fixture)
+        "Statement period January 1 2025 to December 31 2025",
+        "Currency USD",
+        "2025-01-01 Closing balance 9,999.00 USD",
+        "2025-12-31 Closing balance 10,001.00 USD",
+        "Extracto de cuenta generado el 31 de Diciembre de 2026",
+    ])
+    generated_preflight_process, generated_preflight_path, generated_preflight_data = preflight(
+        work, "generated-metadata", [generated_metadata_pdf]
+    )
+    generated_raw_process, _generated_raw_path, _generated_raw_data = extract(
+        work, "generated-metadata-raw", [generated_metadata_pdf], generated_preflight_path
+    )
+    generated_handoff_process, generated_handoff_path, generated_handoff_data = create_reviewed_handoff(
+        work, "generated-metadata", generated_preflight_path, generated_preflight_data or {}
+    )
+    generated_extract_process, _generated_account_path, generated_account_data = extract(
+        work, "generated-metadata", [generated_metadata_pdf], generated_handoff_path
+    )
+    generated_coverage = (
+        generated_preflight_data.get("coverage_hints", {})
+        if isinstance(generated_preflight_data, dict) and isinstance(generated_preflight_data.get("coverage_hints"), dict)
+        else {}
+    )
+    generated_metadata_evidence = generated_coverage.get("document_metadata_dates", []) if isinstance(generated_coverage, dict) else []
+    generated_handoff_resolutions = (
+        generated_handoff_data.get("user_resolutions", {})
+        if isinstance(generated_handoff_data, dict) and isinstance(generated_handoff_data.get("user_resolutions"), dict)
+        else {}
+    )
+    generated_resolution = (
+        generated_handoff_resolutions.get("generated_on_dates")
+        if isinstance(generated_handoff_resolutions, dict)
+        else {}
+    )
+    generated_profile = (
+        generated_account_data.get("preflight", {})
+        if isinstance(generated_account_data, dict) and isinstance(generated_account_data.get("preflight"), dict)
+        else {}
+    )
+    generated_profile_resolutions = generated_profile.get("user_resolutions", {}) if isinstance(generated_profile, dict) else {}
+    check(
+        "REVIEW-5A FBAR accepts only the source-bound generated-on date resolution",
+        generated_preflight_process.returncode == 0
+        and isinstance(generated_preflight_data, dict)
+        and "out-of-period-generated-date" in [
+            str(gate.get("code")) for gate in generated_preflight_data.get("review_gates", []) if isinstance(gate, dict)
+        ]
+        and generated_raw_process.returncode == 2 and "review-required" in generated_raw_process.stderr
+        and generated_handoff_process.returncode == 0
+        and isinstance(generated_resolution, dict)
+        and generated_resolution.get("confirmed_dates") == ["2026-12-31"]
+        and generated_resolution.get("source_date_evidence") == generated_metadata_evidence
+        and generated_extract_process.returncode == 0
+        and isinstance(generated_profile_resolutions, dict)
+        and generated_profile_resolutions.get("generated_on_dates") == generated_resolution,
+        generated_extract_process.stderr.strip(),
+    )
+
+    generated_tampered_handoff = work / "generated-metadata-tampered-resolution.json"
+    generated_tampered_data = read_json(generated_handoff_path) or {}
+    generated_tampered_resolutions = (
+        generated_tampered_data.get("user_resolutions") if isinstance(generated_tampered_data, dict) else None
+    )
+    generated_tampered_resolution = (
+        generated_tampered_resolutions.get("generated_on_dates")
+        if isinstance(generated_tampered_resolutions, dict)
+        else None
+    )
+    generated_tampered_evidence = (
+        generated_tampered_resolution.get("source_date_evidence")
+        if isinstance(generated_tampered_resolution, dict)
+        else None
+    )
+    if isinstance(generated_tampered_evidence, list) and generated_tampered_evidence and isinstance(generated_tampered_evidence[0], dict):
+        source_ref = generated_tampered_evidence[0].get("source_ref")
+        if isinstance(source_ref, dict):
+            source_ref["line"] = 1
+    generated_tampered_handoff.write_text(json.dumps(generated_tampered_data, indent=2) + "\n", encoding="utf-8")
+    generated_tampered_process, _generated_tampered_path, _generated_tampered_data = extract(
+        work, "generated-metadata-tampered", [generated_metadata_pdf], generated_tampered_handoff
+    )
+    check(
+        "REVIEW-5B FBAR rejects a generated-on resolution whose source anchor was changed",
+        generated_tampered_process.returncode == 2
+        and "generated-on date evidence does not exactly match" in generated_tampered_process.stderr,
+        generated_tampered_process.stderr.strip(),
     )
 
     review_path.write_text(review_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")

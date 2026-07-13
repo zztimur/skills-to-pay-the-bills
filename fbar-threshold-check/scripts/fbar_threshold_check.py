@@ -39,6 +39,7 @@ PREFLIGHT_READY_STATUS = "ready-for-domain-extraction"
 PREFLIGHT_REVIEW_REQUIRED_STATUS = "review-required"
 PREFLIGHT_REVIEWED_HANDOFF_STATUS = "reviewed-for-domain-extraction"
 PREFLIGHT_REVIEWED_HANDOFF_TYPE = "reviewed-handoff"
+OUT_OF_PERIOD_GENERATED_DATE_GATE = "out-of-period-generated-date"
 
 CURRENCY_CODES = {
     "AED",
@@ -1791,25 +1792,80 @@ def preflight_requires_institution(source: dict[str, object]) -> bool:
     return isinstance(requirements, dict) and requirements.get("institution_required") is True
 
 
+def source_out_of_period_generated_date_evidence(source: dict[str, object], tax_year: int) -> list[dict[str, object]]:
+    """Normalize the exact metadata anchors that a reviewed handoff may confirm."""
+    coverage = source.get("coverage_hints")
+    if not isinstance(coverage, dict):
+        return []
+    raw_evidence = coverage.get("document_metadata_dates")
+    if not isinstance(raw_evidence, list):
+        return []
+
+    normalized: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str, int, int]] = set()
+    for raw_item in raw_evidence:
+        if not isinstance(raw_item, dict) or raw_item.get("kind") != "generated-on":
+            continue
+        try:
+            parsed_date = date.fromisoformat(str(raw_item.get("date") or ""))
+        except ValueError:
+            continue
+        if parsed_date.year == tax_year:
+            continue
+        source_ref = raw_item.get("source_ref")
+        if not isinstance(source_ref, dict):
+            continue
+        source_file = str(source_ref.get("file") or "").strip()
+        try:
+            page = int(source_ref.get("page"))
+            line = int(source_ref.get("line"))
+        except (TypeError, ValueError):
+            continue
+        confidence = str(raw_item.get("confidence") or "")
+        if not source_file or page <= 0 or line <= 0 or confidence not in {"high", "medium"}:
+            continue
+        item = {
+            "kind": "generated-on",
+            "date": parsed_date.isoformat(),
+            "confidence": confidence,
+            "source_ref": {"file": source_file, "page": page, "line": line},
+        }
+        key = (item["date"], confidence, source_file, page, line)
+        if key not in seen:
+            seen.add(key)
+            normalized.append(item)
+    return sorted(
+        normalized,
+        key=lambda item: (
+            str(item["date"]),
+            str(item["source_ref"]["file"]),  # type: ignore[index]
+            int(item["source_ref"]["page"]),  # type: ignore[index]
+            int(item["source_ref"]["line"]),  # type: ignore[index]
+        ),
+    )
+
+
 def validate_reviewed_user_resolutions(
     handoff: dict[str, object], source: dict[str, object], source_sha256: str, gates: list[dict[str, str]]
 ) -> dict[str, object]:
     """Accept only structured, source-bound reviewer resolutions.
 
     The reviewed handoff must never turn a bare currency symbol or an absent
-    account number into an implicit extraction decision.  These fields are
-    optional only for legacy reviewed handoffs with unrelated review gates.
+    account number or generated-on timestamp into an implicit extraction
+    decision. These fields are optional only for legacy reviewed handoffs with
+    unrelated review gates.
     """
     gate_codes = {gate["code"] for gate in gates}
     currency_gate_codes = {"ambiguous-dollar", "unknown-currency"} & gate_codes
     account_gate_codes = {"unknown-account", "possible-mixed-accounts", "incomplete-account-linkage"} & gate_codes
     year_gate_codes = {"mixed-years", "unresolved-year-evidence", "unknown-year-coverage"} & gate_codes
     institution_gate_codes = {"unknown-institution", "possible-mixed-institutions"} & gate_codes
+    generated_date_gate_codes = {OUT_OF_PERIOD_GENERATED_DATE_GATE} & gate_codes
     raw_resolutions = handoff.get("user_resolutions")
     if raw_resolutions is None:
-        if currency_gate_codes or account_gate_codes or year_gate_codes or institution_gate_codes:
+        if currency_gate_codes or account_gate_codes or year_gate_codes or institution_gate_codes or generated_date_gate_codes:
             raise FbarError(
-                "Reviewed handoff is missing structured user resolutions for its currency, account, year, or institution review gates.",
+                "Reviewed handoff is missing structured user resolutions for its currency, account, year, institution, or generated-date review gates.",
                 2,
             )
         return {}
@@ -1847,6 +1903,43 @@ def validate_reviewed_user_resolutions(
             )
     elif statement_years.get("status") != "not-required":
         raise FbarError("Reviewed handoff has an unexpected statement-year resolution.", 2)
+
+    expected_generated_date_evidence = source_out_of_period_generated_date_evidence(source, tax_year)
+    expected_generated_dates = sorted({str(item["date"]) for item in expected_generated_date_evidence})
+    if generated_date_gate_codes:
+        generated_on_dates = reviewed_resolution_object(resolutions, "generated_on_dates")
+        if not expected_generated_date_evidence:
+            raise FbarError(
+                "Reviewed handoff source preflight has no valid generated-on metadata evidence for out-of-period-generated-date.",
+                2,
+            )
+        if generated_on_dates.get("status") != "user-confirmed":
+            raise FbarError("Reviewed handoff does not contain a user-confirmed generated-on date resolution.", 2)
+        reviewed_resolution_gate_codes(generated_on_dates, generated_date_gate_codes, "generated_on_dates")
+        raw_dates = generated_on_dates.get("confirmed_dates")
+        if not isinstance(raw_dates, list):
+            raise FbarError("Reviewed handoff generated-on date resolution must list confirmed_dates.", 2)
+        confirmed_dates: list[str] = []
+        for raw_date in raw_dates:
+            try:
+                confirmed_dates.append(date.fromisoformat(str(raw_date)).isoformat())
+            except ValueError as exc:
+                raise FbarError("Reviewed handoff generated-on date resolution contains an invalid date.", 2) from exc
+        if len(set(confirmed_dates)) != len(confirmed_dates) or sorted(confirmed_dates) != expected_generated_dates:
+            raise FbarError(
+                "Reviewed handoff generated-on dates do not exactly match the source preflight evidence.",
+                2,
+            )
+        if generated_on_dates.get("source_date_evidence") != expected_generated_date_evidence:
+            raise FbarError(
+                "Reviewed handoff generated-on date evidence does not exactly match the source preflight anchors.",
+                2,
+            )
+    else:
+        generated_on_dates = resolutions.get("generated_on_dates")
+        if generated_on_dates is not None:
+            if not isinstance(generated_on_dates, dict) or generated_on_dates.get("status") != "not-required":
+                raise FbarError("Reviewed handoff has an unexpected generated-on date resolution.", 2)
 
     currency = reviewed_resolution_object(resolutions, "currency")
     source_currency = source.get("currency") if isinstance(source.get("currency"), dict) else {}
