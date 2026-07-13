@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP, getcontext
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 getcontext().prec = 28
 
@@ -2044,7 +2044,18 @@ def resolve_institution(
     return clean_text(primary) or None
 
 
-def command_extract_account(args: argparse.Namespace) -> int:
+def command_extract_account(
+    args: argparse.Namespace,
+    *,
+    before_final_fingerprint_check: Callable[[], None] | None = None,
+) -> int:
+    """Extract an account ledger after two source-identity checks.
+
+    ``before_final_fingerprint_check`` is an internal test seam. The CLI never
+    supplies it; integration tests use it to mutate a synthetic PDF only after
+    all parser paths have run, proving the second fingerprint check blocks
+    artifact writes.
+    """
     out_path = Path(args.out)
     warnings: list[str] = []
     preflight = load_preflight_json(args.preflight_json, "one-account", args.tax_year, args.pdf)
@@ -2108,6 +2119,8 @@ def command_extract_account(args: argparse.Namespace) -> int:
     candidates = [*compact_candidates, *fallback_candidates]
     warnings.extend(compact_warnings)
     warnings.extend(candidate_warnings)
+    if before_final_fingerprint_check is not None:
+        before_final_fingerprint_check()
     # The compact-coordinate path opens the PDFs after the first post-text
     # fingerprint check. Re-check now so every extraction pass is bound to the
     # exact preflighted bytes, not merely the initial text-layer pass.

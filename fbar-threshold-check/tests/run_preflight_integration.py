@@ -3,8 +3,11 @@
 
 This test drives both command-line tools, rather than calling internal helpers,
 so it catches disagreements about the handoff JSON, PDF fingerprints, or CLI
-arguments. It needs the required sibling `statement-intake-preflight` skill and
-the test-only `reportlab` and `pdfplumber` dependencies:
+arguments. One late-mutation case calls the same extraction command through an
+internal test seam because a subprocess cannot deterministically modify a PDF
+after parsing but before the final fingerprint check. It needs the required
+sibling `statement-intake-preflight` skill and the test-only `reportlab` and
+`pdfplumber` dependencies:
 
     python3 fbar-threshold-check/tests/run_preflight_integration.py
 
@@ -13,7 +16,9 @@ available); 1 when an integration assertion fails. Fixtures are synthetic.
 """
 from __future__ import annotations
 
+import argparse
 import csv
+import importlib.util
 import json
 import subprocess
 import sys
@@ -242,6 +247,17 @@ def read_json(path: Path) -> dict[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
+def load_fbar_module() -> object:
+    """Load the command module only for the deterministic late-mutation seam."""
+    spec = importlib.util.spec_from_file_location("fbar_threshold_check_integration_module", FBAR_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load FBAR script module: {FBAR_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def check(name: str, condition: bool, detail: str = "") -> None:
     results.append((name, bool(condition), detail))
 
@@ -325,6 +341,8 @@ def create_reviewed_handoff(
 if not PREFLIGHT_SCRIPT.is_file():
     print(f"FAIL: required sibling preflight script is missing: {PREFLIGHT_SCRIPT}")
     raise SystemExit(1)
+
+fbar_module = load_fbar_module()
 
 with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as temporary:
     work = Path(temporary)
@@ -713,6 +731,61 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         and not unbound_observed
         and not any("compact COP Fecha Descripción Saldo table by PDF columns" in note for note in unbound_notes),
         unbound_extract_process.stderr.strip(),
+    )
+
+    # Mutate one synthetic source only after every applicable parser path has
+    # completed. The final identity check must reject it before account JSON or
+    # CSV artifacts are created. This is deterministic rather than timing a
+    # second process between PDF parsing and the last fingerprint check.
+    post_parse_preflight_process, post_parse_preflight_path, post_parse_preflight_data = preflight(
+        work, "post-parse-mutation", compact_style, require_institution=True
+    )
+    post_parse_handoff_process, post_parse_handoff_path, _post_parse_handoff_data = create_reviewed_handoff(
+        work,
+        "post-parse-mutation",
+        post_parse_preflight_path,
+        post_parse_preflight_data or {},
+        institution="Marca66",
+    )
+    post_parse_output = work / "post-parse-mutation-account.json"
+    post_parse_csv = post_parse_output.with_name(post_parse_output.stem + "-review.csv")
+    post_parse_target = compact_style[-1]
+    mutation_events: list[str] = []
+
+    def mutate_after_parsing() -> None:
+        post_parse_target.write_bytes(post_parse_target.read_bytes() + b"\n% synthetic mutation after parsing\n")
+        mutation_events.append(post_parse_target.name)
+
+    post_parse_args = argparse.Namespace(
+        pdf=[str(path) for path in compact_style],
+        tax_year=2025,
+        out=str(post_parse_output),
+        csv=str(post_parse_csv),
+        account_id=None,
+        institution=None,
+        account_currency=None,
+        preflight_json=str(post_parse_handoff_path),
+    )
+    post_parse_error = ""
+    post_parse_code: int | None = None
+    try:
+        fbar_module.command_extract_account(
+            post_parse_args,
+            before_final_fingerprint_check=mutate_after_parsing,
+        )
+    except fbar_module.FbarError as exc:
+        post_parse_error = str(exc)
+        post_parse_code = exc.code
+    check(
+        "IDENTITY-3 a PDF changed after parsing is rejected before account artifacts are written",
+        post_parse_preflight_process.returncode == 0
+        and post_parse_handoff_process.returncode == 0
+        and mutation_events == [post_parse_target.name]
+        and post_parse_code == 2
+        and "changed after preflight" in post_parse_error
+        and not post_parse_output.exists()
+        and not post_parse_csv.exists(),
+        post_parse_error,
     )
 
     reordered_process, _reordered_path, _reordered_data = extract(work, "reordered", [february, january], ready_path)
