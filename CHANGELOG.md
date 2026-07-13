@@ -9,6 +9,59 @@ changelogs, or GitHub Releases.
 The current repository version lives in [`VERSION`](VERSION), is tagged
 `vX.Y.Z`, and has one matching GitHub Release.
 
+## [1.3.5] - 2026-07-13
+
+### Changed
+
+- `statement-intake-preflight`: feat(statement-intake-preflight): add reviewed handoffs
+- `fbar-threshold-check`: feat(fbar-threshold-check): enforce reviewed preflight handoffs
+- `statement-intake-preflight`: feat(statement-intake-preflight): bind statement files
+- `fbar-threshold-check`: feat(fbar-threshold-check): verify preflight file identity
+- `fbar-threshold-check`: test(fbar-threshold-check): add preflight integration coverage
+- `statement-intake-preflight`: docs(statement-intake-preflight): clarify handoffs
+- `fbar-threshold-check`: docs(fbar-threshold-check): clarify preflight handoffs
+- `statements-to-interest`: feat(statements-to-interest): verify preflight statement files
+- `statements-to-interest`: feat(statements-to-interest): add preflight identity integration tests
+- `statement-intake-preflight`: feat(statement-intake-preflight): add source-aware period coverage
+- `repository`: feat(statement-intake-preflight): record reviewed input resolutions
+- `fbar-threshold-check`: feat(fbar-threshold-check): consume reviewed resolutions
+- `repository`: docs(statement-workflows): clarify conditional review prompts
+- `fbar-threshold-check`: feat(fbar-threshold-check): improve review UX
+- `repository`: Merge pull request #16 from zztimur/codex/fbar-ux-polish
+- `statement-intake-preflight`: Fix statement preflight boundary and institution handoffs
+- `fbar-threshold-check`: Support preflight handoff schema 1.1
+- `statements-to-interest`: Accept verified reviewed interest handoffs
+- `statement-intake-preflight`: chore(statement-intake-preflight): bump to 1.3.6
+- `fbar-threshold-check`: chore(fbar-threshold-check): bump to 1.5.6
+- `statements-to-interest`: chore(statements-to-interest): bump to 1.3.1
+- `statements-to-interest`: fix(statements-to-interest): validate reviewed year handoffs
+- `statements-to-interest`: fix(statements-to-interest): harden FX confirmation checks
+- `statements-to-interest`: docs(statements-to-interest): clarify dependency lookup
+- `fbar-threshold-check`: Fix source-bound short statement dates
+- `statement-intake-preflight`: statement-intake-preflight: accept Spanish account header
+- `fbar-threshold-check`: fbar-threshold-check: trust validated account hints
+- `statement-intake-preflight`: statement-intake-preflight: require institution confirmation
+- `fbar-threshold-check`: fbar-threshold-check: use reviewed institution handoff
+- `fbar-threshold-check`: fbar-threshold-check: add source-bound statement fixture
+- `statement-intake-preflight`: statement-intake-preflight: require institution confirmation
+- `fbar-threshold-check`: Clarify FBAR source notes
+- `statement-intake-preflight`: Release statement-intake-preflight 1.3.8
+- `fbar-threshold-check`: fbar-threshold-check: add same-day review card
+- `statement-intake-preflight`: statement-intake-preflight: tighten issuer evidence rules
+- `statement-intake-preflight`: statement-intake-preflight: parse split Spanish periods
+- `fbar-threshold-check`: fbar-threshold-check: validate split period refs
+- `fbar-threshold-check`: fbar-threshold-check: add source-bound period-end summaries
+- `fbar-threshold-check`: fbar-threshold-check: harden COP table parsing
+- `repository`: chore: bump skill docs and metadata
+- `repository`: chore: scrub bank-name mentions
+- `statement-intake-preflight`: statement-intake-preflight: avoid boilerplate issuer detection
+- `fbar-threshold-check`: Add fractional balance tokenization regression
+- `fbar-threshold-check`: Handle unpadded decimal balance tokens
+- `fbar-threshold-check`: Harden FBAR compact COP extraction
+- `fbar-threshold-check`: Harden FBAR threshold review outputs
+- `fbar-threshold-check`: Add period-end-only FBAR regression
+- `fbar-threshold-check`: Release fbar-threshold-check 1.8.4
+
 ## [1.3.4] - 2026-07-12
 
 - Bumped `statements-to-interest` to 1.2.2 and made its README runtime setup
