@@ -3276,6 +3276,91 @@ def source_out_of_period_generated_date_evidence(source: dict[str, object], tax_
     )
 
 
+def source_account_opening_evidence(source: dict[str, object], tax_year: int) -> dict[str, object] | None:
+    """Return a single eligible leading gap without changing raw coverage.
+
+    An account-opening confirmation is intentionally narrower than accepting a
+    possible-missing-statement-period gate.  The source preflight must contain
+    at least two valid, source-referenced intervals, and recomputing its
+    coverage must reveal exactly one gap: the leading gap immediately before
+    the first source period.  Internal and trailing gaps are therefore never
+    excused by this resolution.
+    """
+    coverage = source.get("coverage_hints")
+    if not isinstance(coverage, dict):
+        return None
+    raw_intervals = coverage.get("period_intervals")
+    if not isinstance(raw_intervals, list):
+        return None
+
+    year_start = date(tax_year, 1, 1)
+    year_end = date(tax_year, 12, 31)
+    intervals: list[dict[str, object]] = []
+    for raw_interval in raw_intervals:
+        if not isinstance(raw_interval, dict):
+            continue
+        try:
+            start = date.fromisoformat(str(raw_interval.get("start") or ""))
+            end = date.fromisoformat(str(raw_interval.get("end") or ""))
+        except ValueError:
+            return None
+        if end < start:
+            return None
+        source_ref = raw_interval.get("source_ref")
+        if not isinstance(source_ref, dict):
+            return None
+        source_file = str(source_ref.get("file") or "").strip()
+        source_location = _copy_source_ref(source_ref)
+        if not source_file or not source_location:
+            return None
+        if end < year_start or start > year_end:
+            continue
+        intervals.append(
+            {
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "source_ref": {"file": source_file, **source_location},
+            }
+        )
+    intervals.sort(
+        key=lambda interval: (
+            str(interval["start"]),
+            str(interval["end"]),
+            str(interval["source_ref"]["file"]),  # type: ignore[index]
+            int(interval["source_ref"]["page"]),  # type: ignore[index]
+            int(interval["source_ref"]["line"]),  # type: ignore[index]
+        )
+    )
+    coverage_review = period_coverage_review(intervals, tax_year)
+    calendar_gaps = coverage_review.get("calendar_gaps")
+    if len(intervals) < 2 or not isinstance(calendar_gaps, list) or len(calendar_gaps) != 1:
+        return None
+    gap = calendar_gaps[0]
+    if not isinstance(gap, dict):
+        return None
+    try:
+        gap_start = date.fromisoformat(str(gap.get("start") or ""))
+        gap_end = date.fromisoformat(str(gap.get("end") or ""))
+        first_start = date.fromisoformat(str(intervals[0]["start"]))
+    except ValueError:
+        return None
+    if (
+        gap_start != year_start
+        or first_start <= year_start
+        or gap_end + timedelta(days=1) != first_start
+    ):
+        return None
+    first_interval = intervals[0]
+    return {
+        "leading_coverage_gap": {"start": gap_start.isoformat(), "end": gap_end.isoformat()},
+        "first_source_period": {
+            "start": first_start.isoformat(),
+            "end": str(first_interval["end"]),
+            "source_ref": first_interval["source_ref"],
+        },
+    }
+
+
 def source_unresolved_period_evidence(source: dict[str, object]) -> list[dict[str, object]]:
     """Return validated unresolved source period records from immutable preflight."""
     coverage = source.get("coverage_hints")
@@ -3491,6 +3576,30 @@ def build_user_resolutions(
             "--confirm-generated-on-date is only allowed when preflight reports out-of-period-generated-date."
         )
 
+    confirmed_account_opened_on: str | None = None
+    raw_account_opened_on = getattr(args, "confirm_account_opened_on", None)
+    if raw_account_opened_on not in (None, ""):
+        try:
+            confirmed_account_opened_on = date.fromisoformat(str(raw_account_opened_on)).isoformat()
+        except (TypeError, ValueError) as exc:
+            raise PreflightError("--confirm-account-opened-on must use an ISO calendar date (YYYY-MM-DD).") from exc
+    account_opening_evidence = source_account_opening_evidence(source, tax_year)
+    if confirmed_account_opened_on:
+        if "possible-missing-statement-period" not in gate_codes:
+            raise PreflightError(
+                "--confirm-account-opened-on is only allowed when preflight reports possible-missing-statement-period."
+            )
+        if account_opening_evidence is None:
+            raise PreflightError(
+                "--confirm-account-opened-on can resolve only one leading coverage gap with no internal or trailing gaps. Obtain the missing statements instead."
+            )
+        first_source_period = account_opening_evidence["first_source_period"]
+        if confirmed_account_opened_on != first_source_period["start"]:
+            raise PreflightError(
+                "--confirm-account-opened-on must exactly match the first source-supported period start "
+                f"({first_source_period['start']})."
+            )
+
     currency = source.get("currency") if isinstance(source.get("currency"), dict) else {}
     source_currency = str(currency.get("code") or "")
     currency_gate_codes = {"ambiguous-dollar", "unknown-currency"} & gate_codes
@@ -3573,6 +3682,16 @@ def build_user_resolutions(
             if generated_date_gate_codes
             else {"status": "not-required"}
         ),
+        "account_opened_on": (
+            {
+                "status": "user-confirmed",
+                "date": confirmed_account_opened_on,
+                **account_opening_evidence,
+                "resolved_gate_codes": ["possible-missing-statement-period"],
+            }
+            if confirmed_account_opened_on and account_opening_evidence is not None
+            else {"status": "not-required"}
+        ),
         "currency": (
             {
                 "status": "user-confirmed",
@@ -3642,6 +3761,9 @@ def command_review_handoff(args: argparse.Namespace) -> int:
             for period in confirmed_periods:
                 if isinstance(period, dict):
                     period["source_preflight_sha256"] = source_sha256
+    account_opened_on = user_resolutions.get("account_opened_on")
+    if isinstance(account_opened_on, dict) and account_opened_on.get("status") == "user-confirmed":
+        account_opened_on["source_preflight_sha256"] = source_sha256
     statement_files = source.get("statement_files")
     if not isinstance(statement_files, list):
         raise PreflightError("Preflight JSON has no statement_files list; rerun preflight.")
@@ -5148,6 +5270,75 @@ def command_self_test(_args: argparse.Namespace) -> int:
                     f"{label}: expected exact coverage gap {expected_gaps}, got {missing_review} gates={gate_messages}"
                 )
 
+        # A confirmed account opening can address only a single leading gap.
+        # The source coverage remains immutable, and a middle or year-end gap
+        # still needs the corresponding missing statement.
+        opened_months = [
+            ("may", "May 1 2025", "May 31 2025"),
+            ("june", "June 1 2025", "June 30 2025"),
+            ("july", "July 1 2025", "July 31 2025"),
+            ("august", "August 1 2025", "August 31 2025"),
+            ("september", "September 1 2025", "September 30 2025"),
+            ("october", "October 1 2025", "October 31 2025"),
+            ("november", "November 1 2025", "November 30 2025"),
+            ("december", "December 1 2025", "December 31 2025"),
+        ]
+
+        def monthly_statement(name: str, start: str, end: str) -> dict[str, object]:
+            return synthetic_file(
+                name,
+                "\n".join(
+                    [
+                        "Example Bank Statement",
+                        "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+                        f"Statement period {start} to {end}",
+                        "Currency USD",
+                    ]
+                ),
+            )
+
+        opened_files = [monthly_statement(f"opened-{label}.pdf", start, end) for label, start, end in opened_months]
+        opened_during_year = build_preflight(
+            opened_files, 2025, "one-account", root / "opened-during-year.json", root / "opened-during-year-review.csv"
+        )
+        opened_gates = opened_during_year.get("review_gates", [])
+        opening_coverage_before = json.dumps(opened_during_year.get("coverage_hints"), sort_keys=True)
+        try:
+            opening_resolution = build_user_resolutions(
+                opened_during_year,
+                opened_gates if isinstance(opened_gates, list) else [],
+                argparse.Namespace(confirm_account_opened_on="2025-05-01"),
+            ).get("account_opened_on")
+            if (
+                not isinstance(opening_resolution, dict)
+                or opening_resolution.get("date") != "2025-05-01"
+                or opening_resolution.get("leading_coverage_gap") != {"start": "2025-01-01", "end": "2025-04-30"}
+                or opening_resolution.get("first_source_period", {}).get("start") != "2025-05-01"
+                or json.dumps(opened_during_year.get("coverage_hints"), sort_keys=True) != opening_coverage_before
+            ):
+                failures.append(f"account-opening: expected separate immutable leading-gap resolution, got {opening_resolution}")
+        except PreflightError as exc:
+            failures.append(f"account-opening: expected leading gap confirmation to succeed ({exc})")
+
+        for label, files, confirmed_date in (
+            ("internal", [opened_files[0], *opened_files[2:]], "2025-05-01"),
+            ("trailing", [monthly_statement("opened-january.pdf", "January 1 2025", "January 31 2025"),
+                          monthly_statement("opened-february.pdf", "February 1 2025", "February 28 2025")], "2025-01-01"),
+        ):
+            candidate = build_preflight(
+                files, 2025, "one-account", root / f"opened-{label}.json", root / f"opened-{label}-review.csv"
+            )
+            candidate_gates = candidate.get("review_gates", [])
+            try:
+                build_user_resolutions(
+                    candidate,
+                    candidate_gates if isinstance(candidate_gates, list) else [],
+                    argparse.Namespace(confirm_account_opened_on=confirmed_date),
+                )
+                failures.append(f"account-opening: expected {label} gap confirmation to be rejected")
+            except PreflightError:
+                pass
+
         # CSV cells that begin with a formula lead are neutralized.
         if csv_safe("=HYPERLINK(\"http://x\")") != "'=HYPERLINK(\"http://x\")":
             failures.append("csv_safe: expected leading '=' to be quoted")
@@ -5468,6 +5659,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="YYYY-MM-DD",
         type=_iso_date_arg,
         help="Confirm one extracted out-of-period generated-on date; repeat only for dates shown in the source preflight.",
+    )
+    handoff.add_argument(
+        "--confirm-account-opened-on",
+        metavar="YYYY-MM-DD",
+        type=_iso_date_arg,
+        help="Confirm an account-opening date only for one continuous leading coverage gap that ends immediately before the first source period.",
     )
     handoff.add_argument(
         "--confirm-currency",

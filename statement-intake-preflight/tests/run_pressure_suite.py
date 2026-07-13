@@ -1609,6 +1609,88 @@ check("BAS-14 year-end omission retains the April-through-December gap",
       and has_calendar_gap(d, "2025-04-01", "2025-12-31"),
       f"gaps={calendar_gaps_of(d)} gates={gates_of(d)}")
 
+# An account-opening confirmation is intentionally much narrower than a normal
+# missing-period review: the raw coverage must have only a leading gap and the
+# confirmed ISO date must be the first source-supported period start.
+opened_during_year_coverage = [
+    month_range_fixture("baseline-opened-may.pdf", "May 1 2025", "May 31 2025"),
+    month_range_fixture("baseline-opened-june.pdf", "June 1 2025", "June 30 2025"),
+    month_range_fixture("baseline-opened-july.pdf", "July 1 2025", "July 31 2025"),
+    month_range_fixture("baseline-opened-august.pdf", "August 1 2025", "August 31 2025"),
+    month_range_fixture("baseline-opened-september.pdf", "September 1 2025", "September 30 2025"),
+    month_range_fixture("baseline-opened-october.pdf", "October 1 2025", "October 31 2025"),
+    month_range_fixture("baseline-opened-november.pdf", "November 1 2025", "November 30 2025"),
+    month_range_fixture("baseline-opened-december.pdf", "December 1 2025", "December 31 2025"),
+]
+may, june, july, august, september, october, november, december = opened_during_year_coverage
+proc, opened_preflight = run("baseline-opened-during-year", [str(item) for item in opened_during_year_coverage])
+opened_source = WORK / "baseline-opened-during-year.json"
+opened_gates = gates_of(opened_preflight)
+opened_before = opened_source.read_bytes() if opened_source.exists() else b""
+proc, opened_handoff = run_handoff(
+    "baseline-opened-during-year-reviewed",
+    opened_source,
+    opened_gates,
+    ["--confirm-account-opened-on", "2025-05-01"],
+)
+opening_resolution = opened_handoff.get("user_resolutions", {}).get("account_opened_on", {}) if opened_handoff else {}
+check("BAS-14A account opened during year records a separate source-bound leading-gap resolution",
+      proc.returncode == 0 and opened_preflight and opened_handoff
+      and opened_gates == ["possible-missing-statement-period"]
+      and calendar_gaps_of(opened_preflight) == [{"start": "2025-01-01", "end": "2025-04-30"}]
+      and opened_handoff.get("coverage_hints") == opened_preflight.get("coverage_hints")
+      and opened_source.read_bytes() == opened_before
+      and isinstance(opening_resolution, dict)
+      and opening_resolution.get("status") == "user-confirmed"
+      and opening_resolution.get("date") == "2025-05-01"
+      and opening_resolution.get("leading_coverage_gap") == {"start": "2025-01-01", "end": "2025-04-30"}
+      and opening_resolution.get("first_source_period") == {
+          "start": "2025-05-01",
+          "end": "2025-05-31",
+          "source_ref": {"file": str(may), "page": 1, "line": 3},
+      }
+      and opening_resolution.get("resolved_gate_codes") == ["possible-missing-statement-period"]
+      and opening_resolution.get("source_preflight_sha256")
+      == opened_handoff.get("user_resolutions", {}).get("source_preflight_sha256"),
+      f"exit={proc.returncode} stderr={proc.stderr.strip()} resolution={opening_resolution}")
+
+proc, rejected_handoff = run_handoff(
+    "baseline-opened-during-year-wrong-date",
+    opened_source,
+    opened_gates,
+    ["--confirm-account-opened-on", "2025-05-02"],
+)
+check("BAS-14B account opening confirmation must equal the first source-supported period start",
+      proc.returncode != 0 and rejected_handoff is None and "must exactly match" in proc.stderr,
+      f"exit={proc.returncode} stderr={proc.stderr.strip()}")
+
+proc, internal_gap_preflight = run(
+    "baseline-opened-internal-gap",
+    [str(may), str(july), str(august), str(september), str(october), str(november), str(december)],
+)
+internal_gap_source = WORK / "baseline-opened-internal-gap.json"
+proc, rejected_handoff = run_handoff(
+    "baseline-opened-internal-gap-reviewed",
+    internal_gap_source,
+    gates_of(internal_gap_preflight),
+    ["--confirm-account-opened-on", "2025-05-01"],
+)
+check("BAS-14C account opening confirmation never excuses a missing middle statement",
+      internal_gap_preflight and proc.returncode != 0 and rejected_handoff is None
+      and "only one leading coverage gap" in proc.stderr,
+      f"gaps={calendar_gaps_of(internal_gap_preflight)} exit={proc.returncode} stderr={proc.stderr.strip()}")
+
+trailing_source = WORK / "baseline-year-end-omission.json"
+proc, rejected_handoff = run_handoff(
+    "baseline-opened-trailing-gap-reviewed",
+    trailing_source,
+    ["possible-missing-statement-period"],
+    ["--confirm-account-opened-on", "2025-01-01"],
+)
+check("BAS-14D account opening confirmation never excuses a missing year-end statement",
+      proc.returncode != 0 and rejected_handoff is None and "only one leading coverage gap" in proc.stderr,
+      f"exit={proc.returncode} stderr={proc.stderr.strip()}")
+
 # The text layer splits these visually adjacent fragments. The coordinate
 # fallback may recover only a plausible value next to the explicit label.
 columnar = make_columnar_account_pdf("baseline-columnar-account.pdf", account="42424242")
