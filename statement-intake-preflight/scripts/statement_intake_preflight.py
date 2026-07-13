@@ -511,11 +511,11 @@ YEAR_CONTEXT_WINDOW = 8
 # connector, so a statement that prints its period numerically ("01.01.2025 -
 # 31.01.2025", "01/01/2025 al 31/01/2025") is recognized as a period even with
 # no month name or period word. The dash connector allows no surrounding space;
-# the alphabetic connectors ("to", "al", "bis", "hasta", "through") require it,
+# the alphabetic connectors ("to", "a", "al", "bis", "hasta", "through") require it,
 # so a lone hyphen elsewhere cannot bridge two unrelated numbers.
 NUMERIC_PERIOD_RE = re.compile(
     r"\d{1,4}[./-]\d{1,2}[./-]\d{1,4}"
-    r"(?:\s*[-–—]\s*|\s+(?:to|al?|bis|hasta|through)\s+)"
+    r"(?:\s*[-–—]\s*|\s+(?:to|a(?:l)?|bis|hasta|through)\s+)"
     r"\d{1,4}[./-]\d{1,2}[./-]\d{1,4}",
     re.I,
 )
@@ -537,7 +537,11 @@ TEXT_DATE_DAY_FIRST_RE = re.compile(
     rf"\b(?P<day>\d{{1,2}})(?:st|nd|rd|th)?(?:\s+de\s+|[-\s]+)(?P<month>{_MONTH_TOKEN})\.?(?:\s+de\s+|[-,\s]+)(?P<year>19\d{{2}}|20\d{{2}})\b",
     re.I,
 )
-PERIOD_CONNECTOR_RE = re.compile(r"(?:[-–—]|\b(?:to|through|al|hasta|bis|desde)\b)", re.I)
+# This is evaluated only between two complete parsed dates. Include the Spanish
+# range connector ``a`` as well as ``al`` so a labelled ``YYYY/MM/DD a
+# YYYY/MM/DD`` period becomes source-bound coverage evidence instead of a
+# display-only hint.
+PERIOD_CONNECTOR_RE = re.compile(r"(?:[-–—]|\b(?:to|through|a(?:l)?|hasta|bis|desde)\b)", re.I)
 SPLIT_PERIOD_START_RE = re.compile(r"\b(?:desde|from)\b", re.I)
 SPLIT_PERIOD_END_RE = re.compile(r"\b(?:hasta|through)\b", re.I)
 SPLIT_PERIOD_MAX_LINE_DISTANCE = 2
@@ -3417,6 +3421,8 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("numeric-period: a dd.mm.yyyy range must be detected as a period")
         if not detect_periods(["01/01/2025 al 31/01/2025"]):
             failures.append("numeric-period: a dd/mm/yyyy 'al' range must be detected as a period")
+        if not detect_periods(["2025/05/01 a 2025/05/31"]):
+            failures.append("numeric-period: a yyyy/mm/dd Spanish 'a' range must be detected as a period")
         if detect_periods(["Ref 12/34 amount 56.00"]):
             failures.append("numeric-period: a lone fraction-like token must not read as a period range")
 
@@ -3486,6 +3492,39 @@ def command_self_test(_args: argparse.Namespace) -> int:
                 failures.append("spanish-abbrev-period: omitted Q2 must produce a coverage gap")
             if not spanish_missing_q4.get("calendar_gaps"):
                 failures.append("spanish-abbrev-period: omitted Q4 must produce a coverage gap")
+
+        # A common Spanish monthly label uses two year-first slash dates joined
+        # by ``a``. It must retain a one-line source reference and make a
+        # May-through-December set visibly incomplete for the requested year.
+        spanish_slash_period_lines = [
+            "Estado de cuenta para el período de: 2025/05/01 a 2025/05/31",
+            "Estado de cuenta para el período de: 2025/06/01 a 2025/06/30",
+            "Estado de cuenta para el período de: 2025/07/01 a 2025/07/31",
+            "Estado de cuenta para el período de: 2025/08/01 a 2025/08/31",
+            "Estado de cuenta para el período de: 2025/09/01 a 2025/09/30",
+            "Estado de cuenta para el período de: 2025/10/01 a 2025/10/31",
+            "Estado de cuenta para el período de: 2025/11/01 a 2025/11/30",
+            "Estado de cuenta para el período de: 2025/12/01 a 2025/12/31",
+        ]
+        spanish_slash_intervals = detect_period_intervals([{"page": 1, "lines": spanish_slash_period_lines}])
+        if len(spanish_slash_intervals) != len(spanish_slash_period_lines):
+            failures.append(
+                "spanish-slash-period: every labelled monthly 'a' range must become a source-bound interval"
+            )
+        elif not all(
+            item.get("source_ref") == {"page": 1, "line": index}
+            and item.get("end_source_ref") == {"page": 1, "line": index}
+            for index, item in enumerate(spanish_slash_intervals, start=1)
+        ):
+            failures.append("spanish-slash-period: one-line ranges must retain both exact source endpoints")
+        else:
+            spanish_slash_coverage = period_coverage_review(spanish_slash_intervals, 2025)
+            if spanish_slash_coverage.get("calendar_gaps") != [
+                {"start": "2025-01-01", "end": "2025-04-30"}
+            ]:
+                failures.append(
+                    "spanish-slash-period: May-through-December ranges must flag the leading January-April gap"
+                )
 
         # Source-aware period evidence keeps an opening balance's prior-year
         # date visible, but does not mistake it for a second statement period.
