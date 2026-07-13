@@ -2451,6 +2451,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         test_decimal_parsing()
         test_separator_guardrails()
         test_money_tokenization()
+        test_unpadded_fractional_balance_tokenization(root)
         test_sign_formats()
         test_line_extraction()
         test_source_bound_short_dates(root)
@@ -2662,6 +2663,67 @@ def test_money_tokenization() -> None:
     masked = mask_date_spans("1,234.56 balance as of Dec 31, 2023")
     amounts = [amt for amt, _t, _p, _n in parse_money_values(masked)]
     assert amounts == [Decimal("1234.56")], amounts
+
+
+def test_unpadded_fractional_balance_tokenization(root: Path) -> None:
+    """Keep an unpadded fractional column separate from a grouped balance."""
+    values = parse_money_values(".42 210,345.67")
+    assert [(amount, token) for amount, token, _pos, _notes in values] == [
+        (Decimal("0.42"), ".42"),
+        (Decimal("210345.67"), "210,345.67"),
+    ], values
+
+    # Preserve the existing guarded separator behavior while fixing the
+    # adjacent-column boundary: ambiguous bare grouping remains reviewable,
+    # explicit decimals are unambiguous, and a legitimate space grouping stays
+    # one amount.
+    for raw, expected in (("12,000", Decimal("12000")), ("12.000", Decimal("12000"))):
+        amount, notes = parse_amount(raw)
+        assert amount == expected and notes, (raw, amount, notes)
+    for raw, expected in (("10,000.01", Decimal("10000.01")), ("10.000,01", Decimal("10000.01"))):
+        amount, notes = parse_amount(raw)
+        assert amount == expected and not notes, (raw, amount, notes)
+    amount, notes = parse_amount("1 234,56")
+    assert amount == Decimal("1234.56") and not notes, (amount, notes)
+
+    # Exercise the generic, source-bound table path as well. The first value
+    # is an adjacent transaction amount; the last is the selected balance.
+    pdf = root / "example-statement.pdf"
+    pdf.write_bytes(b"synthetic example statement")
+    preflight_path = write_preflight_fixture(root, "example-preflight", 2025, "one-account", [pdf])
+    preflight = load_json(preflight_path)
+    statement_files = preflight.get("statement_files")
+    assert isinstance(statement_files, list) and isinstance(statement_files[0], dict)
+    statement_files[0]["period_intervals"] = [
+        {
+            "start": "2025-01-01",
+            "end": "2025-03-31",
+            "confidence": "high",
+            "source_ref": {"page": 1, "line": 1},
+        }
+    ]
+    period_line = "Statement period 2025/01/01 through 2025/03/31"
+    row_line = "1/04 Example entry .42 210,345.67"
+    lines = [
+        (SourceRef(str(pdf), 1, 1, period_line), period_line),
+        (SourceRef(str(pdf), 1, 2, "DATE DETAILS BALANCE"), "DATE DETAILS BALANCE"),
+        (SourceRef(str(pdf), 1, 3, row_line), row_line),
+    ]
+    contexts = preflight_page_period_contexts(preflight, lines)
+    candidates, warnings = extract_balance_candidates(lines, 2025, "USD", page_period_contexts=contexts)
+    assert not warnings, warnings
+    assert len(candidates) == 1, candidates
+    candidate = candidates[0]
+    assert candidate.balance_date == date(2025, 1, 4), candidate.balance_date
+    assert candidate.amount == Decimal("210345.67"), candidate.amount
+    assert candidate.source == SourceRef(str(pdf), 1, 3, row_line), candidate.source
+
+    rows, coverage, _warnings = build_daily_rows(2025, "USD", candidates)
+    january_fourth = next(row for row in rows if row["date"] == "2025-01-04")
+    assert january_fourth["native_balance"] == "210345.67", january_fourth
+    assert january_fourth["review_flags"] == [], january_fourth
+    assert coverage["observed_days"] == 1, coverage
+    assert coverage["material_same_day_variance_days"] == 0, coverage
 
 
 def test_mask_time_and_two_digit_year() -> None:
