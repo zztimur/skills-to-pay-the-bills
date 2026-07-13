@@ -492,6 +492,26 @@ check("YR-4 temporal 'since 01.01.2025' keeps the year (not heritage-suppressed)
       d and 2025 in d["coverage_hints"]["detected_years"] and "unknown-year-coverage" not in gates_of(d),
       f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
 
+# Characterization fixture for the next policy chunk. A generated-on date is
+# currently unclassified year evidence, so a statement with no source-bound
+# period interval falls back to that year for coverage and blocks as mixed.
+# Chunk 2 will intentionally replace this expected behavior with a dedicated,
+# source-bound metadata-date review artifact; keep this fixture generic.
+p = make_pdf("yr-generated-date-characterization.pdf", [
+    "Example Bank Account Extract",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Currency USD",
+    "Transaction date 31/12",
+    "Extracto de cuenta generado el 31 de Diciembre de 2026",
+])
+proc, d = run("yr-generated-date-characterization", [str(p)])
+check("YR-5 generated-on date currently falls back to mixed-year coverage",
+      d and {"mixed-years", "unresolved-year-evidence"}.issubset(gates_of(d))
+      and d["coverage_hints"]["detected_years"] == [2026]
+      and d["coverage_hints"]["statement_period_years"] == []
+      and d["coverage_hints"]["period_intervals"] == [],
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
+
 # --------------------------------------------------------------------------- #
 # Period detection -- numeric ranges with no month name
 # --------------------------------------------------------------------------- #

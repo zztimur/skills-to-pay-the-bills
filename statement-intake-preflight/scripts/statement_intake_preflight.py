@@ -3346,6 +3346,45 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("boilerplate-year: a date-form year after 'since' must be kept, not suppressed")
         if detect_years(["Serving customers since 1904"]) != []:
             failures.append("boilerplate-year: a bare heritage 'since 1904' must still be suppressed")
+        # Characterization fixture for the next policy chunk. A source-labelled
+        # generated-on date is currently treated as ordinary year evidence: it
+        # is neither a copyright/heritage marker nor a source-bound statement
+        # period. Keep this generic baseline passing until the metadata-date
+        # policy intentionally replaces it with a dedicated review artifact.
+        generated_date_line = "Extracto de cuenta generado el 31 de Diciembre de 2026"
+        if detect_years([generated_date_line]) != [2026]:
+            failures.append("generated-date-characterization: generated-on year must document current detector behavior")
+        if detect_periods([generated_date_line]):
+            failures.append("generated-date-characterization: generated-on date must not be a statement-period label")
+        generated_date_characterization = build_preflight(
+            [
+                synthetic_file(
+                    "generated-date-characterization.pdf",
+                    "Example Bank Account Extract\nAccount 12345678\nCurrency USD\n"
+                    "Transaction date 31/12\n"
+                    + generated_date_line,
+                )
+            ],
+            2025,
+            "one-account",
+            root / "generated-date-characterization.json",
+            root / "generated-date-characterization-review.csv",
+        )
+        generated_date_gates = {
+            str(gate.get("code"))
+            for gate in generated_date_characterization["review_gates"]
+            if isinstance(gate, dict)
+        }
+        generated_date_coverage = generated_date_characterization.get("coverage_hints", {})
+        if not (
+            {"mixed-years", "unresolved-year-evidence"} <= generated_date_gates
+            and isinstance(generated_date_coverage, dict)
+            and generated_date_coverage.get("detected_years") == [2026]
+            and generated_date_coverage.get("period_intervals") == []
+        ):
+            failures.append(
+                "generated-date-characterization: expected current fallback coverage path for generated-on year"
+            )
         # Suppression is per-token: a real out-of-year period must still gate
         # even when the same year also appears in a footer.
         if 2024 not in detect_years(["Statement period March 1 2024 to March 31 2024", "(c) 2024 Example Bancorp."]):
