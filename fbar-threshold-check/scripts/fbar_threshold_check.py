@@ -213,6 +213,14 @@ PERIOD_END_SUMMARY_RE = re.compile(
     re.I,
 )
 
+# confirmed COP transaction table has this exact header.
+# It is a narrow, source-bound parsing context - never infer it from a filename,
+# institution name, a partial header, or an unconfirmed currency.
+GLOBAL66_COP_TABLE_HEADER_RE = re.compile(
+    r"^fecha\s+descripci[oó]n\s+movimiento\s+tarjeta\s+d[eé]bito\s+abono\s+saldo$", re.I
+)
+ISO_TIMESTAMP_RE = re.compile(r"\b20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\b")
+
 # One monetary token. Whitespace bridges digit groups only in the explicit
 # space-grouped form (French/NBSP thousands like "500 000" or "1 234,56"). A
 # decimal point breaks the run of 3-digit groups, so decimal-bearing columns
@@ -565,6 +573,17 @@ def parse_money_values(line: str) -> list[tuple[Decimal, str, int, tuple[str, ..
     return values
 
 
+def is_cop_cop_table_header(line: str) -> bool:
+    """Recognize only the exact text-layer header used by COP rows."""
+    return bool(GLOBAL66_COP_TABLE_HEADER_RE.fullmatch(clean_text(line)))
+
+
+def is_whole_cop_comma_grouped_token(token: str) -> bool:
+    """Return true for an integer with one or more comma thousands groups."""
+    normalized = re.sub(r"[A-Za-z$€£¥()\s'’+−-]", "", clean_text(token))
+    return bool(re.fullmatch(r"\d{1,3}(?:,\d{3})+", normalized))
+
+
 def infer_currency(text: str, override: str | None, warnings: list[str]) -> str:
     if override:
         code = normalize_currency(override)
@@ -699,15 +718,20 @@ def extract_balance_candidates(
     tax_year: int,
     currency: str,
     page_period_contexts: dict[tuple[str, int], tuple[PagePeriodContext, ...]] | None = None,
+    currency_confirmed: bool = False,
 ) -> tuple[list[BalanceCandidate], list[str]]:
     warnings: list[str] = []
     candidates: list[BalanceCandidate] = []
     page_text: dict[tuple[str, int], str] = defaultdict(str)
+    cop_cop_table_pages: set[tuple[str, int]] = set()
     for ref, line in lines:
         page_text[(ref.file, ref.page)] += " " + line.lower()
+        if is_cop_cop_table_header(line):
+            cop_cop_table_pages.add((normalize_preflight_path(ref.file), ref.page))
 
     outside_year = 0
-    low_confidence = 0
+    ambiguous_numeric_date_candidates = 0
+    bare_small_amount_candidates = 0
     ambiguous_amount_lines = 0
     period_contexts = page_period_contexts or {}
     for ref, line in lines:
@@ -729,6 +753,13 @@ def extract_balance_candidates(
         if not money_values:
             continue
 
+        cop_cop_table_row = (
+            currency == "COP"
+            and currency_confirmed
+            and page_key in cop_cop_table_pages
+            and len(period_contexts.get(page_key, ())) == 1
+            and ISO_TIMESTAMP_RE.search(line) is not None
+        )
         has_balance_term = any(term in lower for term in BALANCE_TERMS)
         header_has_balance = any(term in page_lower for term in BALANCE_TERMS)
         table_minimum_amounts = 2 if inferred_short_date is not None else 3
@@ -745,22 +776,40 @@ def extract_balance_candidates(
         selected_values = [item for item in money_values if item[2] >= term_pos] if term_pos >= 0 else money_values
         if not selected_values:
             selected_values = money_values
-        amount, token, _pos, parse_notes = selected_values[-1]
-        bare_small_int = re.fullmatch(r"[-−]?\d{1,2}[-−]?", token) is not None
+        if cop_cop_table_row:
+            # This exact table has currency-marked Abono and Saldo columns;
+            # selecting the last marked token protects against numeric movement
+            # identifiers before those columns.
+            currency_marked_values = [item for item in selected_values if "$" in item[1]]
+            if len(currency_marked_values) >= 2:
+                selected_values = currency_marked_values
+        amount, token, _pos, raw_parse_notes = selected_values[-1]
+        contextual_cop_grouping = cop_cop_table_row and is_whole_cop_comma_grouped_token(token)
+        parse_notes = () if contextual_cop_grouping else raw_parse_notes
+        bare_small_int = re.fullmatch(r"[-−]?\d{1,2}[-−]?", token) is not None and not cop_cop_table_row
         if parse_notes:
             ambiguous_amount_lines += 1
         for parsed_date, date_confidence, date_note in date_hits:
             if parsed_date.year != tax_year:
                 outside_year += 1
                 continue
-            confidence = "high" if has_balance_term and date_confidence == "high" else "medium"
+            confidence = "high" if (has_balance_term or cop_cop_table_row) and date_confidence == "high" else "medium"
             notes = [f"Selected last monetary value on line: {token}", date_note]
             if date_confidence == "low":
                 confidence = "low"
-                low_confidence += 1
-            if not has_balance_term:
+                ambiguous_numeric_date_candidates += 1
+            if not has_balance_term and not cop_cop_table_row:
                 confidence = "medium" if confidence == "high" else confidence
                 notes.append("Line inferred from a page/table containing balance language.")
+            if cop_cop_table_row:
+                notes.append(
+                    "Recognized source-bound COP Fecha Descripción Movimiento Tarjeta Débito Abono Saldo table; "
+                    "selected the final currency-marked Saldo value."
+                )
+            if contextual_cop_grouping:
+                notes.append(
+                    "Whole-COP comma grouping accepted only in the confirmed, source-bound COP Saldo table context."
+                )
             if parse_notes:
                 confidence = "medium" if confidence == "high" else confidence
                 notes.extend(parse_notes)
@@ -768,7 +817,7 @@ def extract_balance_candidates(
                 # A 1-2 digit integer with no separators is more likely a row
                 # number or stray fragment than a balance; force review.
                 confidence = "low"
-                low_confidence += 1
+                bare_small_amount_candidates += 1
                 notes.append(f"Selected value '{token}' is a bare 1-2 digit integer; verify it is really the balance.")
             candidates.append(
                 BalanceCandidate(
@@ -829,8 +878,14 @@ def extract_balance_candidates(
 
     if outside_year:
         warnings.append(f"Ignored {outside_year} balance candidate date(s) outside the requested tax year.")
-    if low_confidence:
-        warnings.append(f"{low_confidence} balance candidate date(s) used ambiguous numeric date interpretation.")
+    if ambiguous_numeric_date_candidates:
+        warnings.append(
+            f"{ambiguous_numeric_date_candidates} balance candidate date(s) used ambiguous numeric date interpretation."
+        )
+    if bare_small_amount_candidates:
+        warnings.append(
+            f"{bare_small_amount_candidates} balance candidate(s) selected a bare 1-2 digit amount and need review."
+        )
     if ambiguous_amount_lines:
         warnings.append(
             f"{ambiguous_amount_lines} balance line(s) had ambiguous thousands/decimal separators; verify native balance magnitudes in the review CSV."
@@ -1746,7 +1801,11 @@ def command_extract_account(args: argparse.Namespace) -> int:
     institution = resolve_institution(preflight, user_resolutions, args.institution)
 
     candidates, candidate_warnings = extract_balance_candidates(
-        lines, args.tax_year, currency, page_period_contexts=page_period_contexts
+        lines,
+        args.tax_year,
+        currency,
+        page_period_contexts=page_period_contexts,
+        currency_confirmed=bool(confirmed_currency and confirmed_currency == currency),
     )
     warnings.extend(candidate_warnings)
     daily_rows, coverage, coverage_warnings = build_daily_rows(args.tax_year, currency, candidates)
@@ -2390,11 +2449,13 @@ def command_self_test(_args: argparse.Namespace) -> int:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         test_decimal_parsing()
+        test_separator_guardrails()
         test_money_tokenization()
         test_sign_formats()
         test_line_extraction()
         test_source_bound_short_dates(root)
         test_source_bound_period_end_summaries(root)
+        test_cop_cop_table_context(root)
         test_account_hint_selection()
         test_build_daily_rows()
         test_native_balance_precision()
@@ -2830,6 +2891,55 @@ def test_source_bound_period_end_summaries(root: Path) -> None:
     assert not other_page_candidates, other_page_candidates
 
 
+def test_cop_cop_table_context(root: Path) -> None:
+    """Permit a COP grouping rule only in the exact verified COP table."""
+    pdf = root / "cop-cop-table.pdf"
+    pdf.write_bytes(b"synthetic COP table")
+    preflight_path = write_preflight_fixture(root, "cop-cop-preflight", 2025, "one-account", [pdf])
+    preflight = load_json(preflight_path)
+    statement_files = preflight.get("statement_files")
+    assert isinstance(statement_files, list) and isinstance(statement_files[0], dict)
+    statement_files[0]["period_intervals"] = [
+        {
+            "start": "2025-01-01",
+            "end": "2025-03-31",
+            "confidence": "high",
+            "source_ref": {"page": 1, "line": 1},
+        }
+    ]
+    period_line = "DESDE: 2025/01/01 HASTA: 2025/03/31"
+    table_header = "Fecha Descripción Movimiento Tarjeta Débito Abono Saldo"
+    grouped_row = "2025-01-02 11:13:11 COMPRA 1234567 $1 $12,000"
+    zero_row = "2025-01-03 11:13:11 COMPRA 1234567 $12,000 $-0"
+    lines = [
+        (SourceRef(str(pdf), 1, 1, period_line), period_line),
+        (SourceRef(str(pdf), 1, 2, table_header), table_header),
+        (SourceRef(str(pdf), 1, 3, grouped_row), grouped_row),
+        (SourceRef(str(pdf), 1, 4, zero_row), zero_row),
+    ]
+    contexts = preflight_page_period_contexts(preflight, lines)
+    trusted, warnings = extract_balance_candidates(
+        lines, 2025, "COP", page_period_contexts=contexts, currency_confirmed=True
+    )
+    assert not warnings, warnings
+    assert [candidate.amount for candidate in trusted] == [Decimal("12000"), Decimal("0")], trusted
+    assert all(candidate.confidence == "high" for candidate in trusted), trusted
+    assert any("Whole-COP comma grouping accepted only" in note for note in trusted[0].notes), trusted[0]
+    assert any("COP Fecha Descripción Movimiento Tarjeta Débito Abono Saldo" in note for note in trusted[1].notes), trusted[1]
+
+    unconfirmed, warnings = extract_balance_candidates(lines, 2025, "COP", page_period_contexts=contexts)
+    assert len(unconfirmed) == 2 and all(candidate.confidence != "high" for candidate in unconfirmed), unconfirmed
+    assert any("ambiguous thousands/decimal separators" in warning for warning in warnings), warnings
+    assert any("bare 1-2 digit amount" in warning for warning in warnings), warnings
+
+    unbound, warnings = extract_balance_candidates(lines, 2025, "COP", currency_confirmed=True)
+    assert len(unbound) == 2 and all(candidate.confidence != "high" for candidate in unbound), unbound
+    assert any("ambiguous thousands/decimal separators" in warning for warning in warnings), warnings
+
+    amount, parse_notes = parse_amount("12,000")
+    assert amount == Decimal("12000") and parse_notes, (amount, parse_notes)
+
+
 def test_account_hint_selection() -> None:
     assert extract_account_hints("Cuenta 76543210") == ["76543210"]
     assert extract_account_hints("Cuenta DE AHORROS") == []
@@ -3052,6 +3162,16 @@ def test_decimal_parsing() -> None:
     plain, plain_notes = parse_amount("1,234.56")
     assert plain == Decimal("1234.56")
     assert not plain_notes
+
+
+def test_separator_guardrails() -> None:
+    """Keep generic separator handling reviewable outside a verified table."""
+    for raw, expected in (("12,000", Decimal("12000")), ("12.000", Decimal("12000"))):
+        amount, notes = parse_amount(raw)
+        assert amount == expected and notes, (raw, amount, notes)
+    for raw, expected in (("10,000.01", Decimal("10000.01")), ("10.000,01", Decimal("10000.01"))):
+        amount, notes = parse_amount(raw)
+        assert amount == expected and not notes, (raw, amount, notes)
 
 
 def test_build_daily_rows() -> None:

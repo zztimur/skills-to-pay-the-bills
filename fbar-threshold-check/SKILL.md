@@ -54,6 +54,8 @@ Review the account JSON and CSV before confirming. The CSV is a row-review artif
 
 When a labelled closing amount appears on a page with exactly one re-verified statement period, the extractor may record it as a `period-end-summary` observation. Its JSON/CSV flag retains both the summary and exact period-end source references. It never fills intervening days, and it does not remove carry-gap review or confirmation gates.
 
+For a user-confirmed COP account, the exact COP text header `Fecha Descripción Movimiento Tarjeta Débito Abono Saldo` plus one re-verified page period permits whole-COP comma grouping in its final `Saldo` column. This does not relax generic separator handling: a standalone `12,000` remains review-required.
+
 Confirm only after the user has reviewed the account ledger:
 
 ```bash

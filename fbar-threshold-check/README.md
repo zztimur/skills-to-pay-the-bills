@@ -35,7 +35,7 @@ The result reports two views separately:
 
 Those are related but not identical. The skill keeps them separate so the support packet does not blur a daily reconstruction into a maximum-value filing concept.
 
-The extraction JSON also carries `review_summary.same_day_balance_candidates`. When a labelled closing summary is source-bound to a verified statement period, it records that separately in `review_summary.period_end_summaries`, including the summary and exact period-end references. The review CSV mirrors both types in a compact `review_flags` column. A period-end summary is an exact-date observation only: it never fills intervening days or removes carry-forward review. The console only reports how many dates need review; inspect the retained artifacts for the actual candidate values and source references.
+The extraction JSON also carries `review_summary.same_day_balance_candidates`. When a labelled closing summary is source-bound to a verified statement period, it records that separately in `review_summary.period_end_summaries`, including the summary and exact period-end references. The review CSV mirrors both types in a compact `review_flags` column. A period-end summary is an exact-date observation only: it never fills intervening days or removes carry-forward review. For a user-confirmed COP account, the exact COP transaction-table header and a re-verified page period can also establish that comma groups are whole COP in the final `Saldo` column; bare grouped amounts elsewhere stay flagged for review. The console only reports how many dates need review; inspect the retained artifacts for the actual candidate values and source references.
 
 ## Use It In Codex
 
