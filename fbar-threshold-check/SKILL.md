@@ -54,7 +54,7 @@ Review the account JSON and CSV before confirming. The CSV is a row-review artif
 
 When a labelled closing amount appears on a page with exactly one re-verified statement period, the extractor may record it as a `period-end-summary` observation. Its JSON/CSV flag retains both the summary and exact period-end source references. It never fills intervening days, and it does not remove carry-gap review or confirmation gates.
 
-For a user-confirmed COP account with one re-verified page period, either the exact text header `Fecha Descripción Movimiento Tarjeta Débito Abono Saldo` or the compact PDF-column header `Fecha | Descripción | Saldo` permits whole-COP comma grouping only in the final `Saldo` column. The compact form also requires one left-column `DD/MM` date and exactly one monetary `Saldo` cell on the same visual row. This does not relax generic separator handling: a standalone `12,000` remains review-required.
+For a source-corroborated or user-confirmed COP account with one re-verified page period, either the exact text header `Fecha Descripción Movimiento Tarjeta Débito Abono Saldo` or the compact PDF-column header `Fecha | Descripción | Saldo` permits whole-COP comma grouping only in the final `Saldo` column. The compact form also requires one left-column `DD/MM` date and exactly one monetary `Saldo` cell on the same visual row. This does not relax generic separator handling: a standalone `12,000` remains review-required.
 
 Confirm only after the user has reviewed the account ledger:
 

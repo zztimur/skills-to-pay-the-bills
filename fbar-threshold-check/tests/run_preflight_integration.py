@@ -55,13 +55,14 @@ def make_pdf(path: Path, lines: list[str]) -> None:
     document.save()
 
 
-def make_sanitized_cop_style_fixture(work: Path) -> list[Path]:
-    """Generate redacted quarter statements for the Spanish-table FBAR path.
+def make_sanitized_cop_layout_fixture(work: Path) -> list[Path]:
+    """Generate synthetic quarter statements for the COP layout path.
 
-    Keep this fixture generated and synthetic: it models only the structural
-    properties that previously failed on a real statement (page-bound
-    ``DESDE/HASTA`` dates, a standalone ``NÚMERO`` account header, and short
-    DD/MM table dates). It contains no statement-derived data.
+    This fixture contains only invented account identifiers, transactions, and
+    balances. It preserves the structural regression surface: the Spanish
+    ``Movimientos de cuenta en COP`` currency header, page-bound ``DESDE/HASTA``
+    dates, the exact text table header, ISO transaction timestamps, and
+    whole-COP comma-grouped Saldo values.
     """
     quarters = (
         (
@@ -69,11 +70,11 @@ def make_sanitized_cop_style_fixture(work: Path) -> list[Path]:
             "2025/01/01",
             "2025/03/31",
             [
-                "1/01 SALDO INICIAL 9,800,000.00",
-                "4/01 COMPRA 100,000.00 9,876,543.21",
-                "31/01 CIERRE 25,000.00 9,850,000.00",
-                "28/02 CIERRE 25,000.00 9,875,000.00",
-                "31/03 CIERRE 50,000.00 9,900,000.00",
+                "2025-01-01 09:00:00 SALDO INICIAL 2649001 $0 $9,800,000 $9,800,000",
+                "2025-01-04 09:00:00 COMPRA 2649002 $100,000 $0 $9,876,543",
+                "2025-01-31 09:00:00 CIERRE 2649003 $25,000 $0 $9,850,000",
+                "2025-02-28 09:00:00 CIERRE 2649004 $25,000 $0 $9,875,000",
+                "2025-03-31 09:00:00 CIERRE 2649005 $50,000 $0 $9,900,000",
             ],
         ),
         (
@@ -81,11 +82,11 @@ def make_sanitized_cop_style_fixture(work: Path) -> list[Path]:
             "2025/04/01",
             "2025/06/30",
             [
-                "1/04 SALDO INICIAL 9,950,000.00",
-                "30/04 CIERRE 20,000.00 9,930,000.00",
-                "31/05 CIERRE 10,000.00 9,940,000.00",
-                "15/06 ABONO 25,000.00 9,925,000.00",
-                "30/06 CIERRE 35,000.00 9,960,000.00",
+                "2025-04-01 09:00:00 SALDO INICIAL 2649011 $0 $9,950,000 $9,950,000",
+                "2025-04-30 09:00:00 CIERRE 2649012 $20,000 $0 $9,930,000",
+                "2025-05-31 09:00:00 CIERRE 2649013 $10,000 $0 $9,940,000",
+                "2025-06-15 09:00:00 ABONO 2649014 $0 $25,000 $9,925,000",
+                "2025-06-30 09:00:00 CIERRE 2649015 $35,000 $0 $9,960,000",
             ],
         ),
         (
@@ -93,11 +94,11 @@ def make_sanitized_cop_style_fixture(work: Path) -> list[Path]:
             "2025/07/01",
             "2025/09/30",
             [
-                "1/07 SALDO INICIAL 9,975,000.00",
-                "31/07 CIERRE 25,000.00 10,000,000.00",
-                "31/08 CIERRE 100,000.00 10,100,000.00",
-                "15/09 ABONO 275,000.00 10,250,000.00",
-                "30/09 CIERRE 50,000.00 10,200,000.00",
+                "2025-07-01 09:00:00 SALDO INICIAL 2649021 $0 $9,975,000 $9,975,000",
+                "2025-07-31 09:00:00 CIERRE 2649022 $25,000 $0 $10,000,000",
+                "2025-08-31 09:00:00 CIERRE 2649023 $100,000 $0 $10,100,000",
+                "2025-09-15 09:00:00 ABONO 2649024 $0 $275,000 $10,250,000",
+                "2025-09-30 09:00:00 CIERRE 2649025 $50,000 $0 $10,200,000",
             ],
         ),
         (
@@ -105,24 +106,23 @@ def make_sanitized_cop_style_fixture(work: Path) -> list[Path]:
             "2025/10/01",
             "2025/12/31",
             [
-                "1/10 SALDO INICIAL 10,300,000.00",
-                "10/10 AJUSTE -50,000.00 10,500,000.00",
-                "31/10 CIERRE 100,000.00 10,400,000.00",
-                "30/11 CIERRE 50,000.00 10,350,000.00",
-                "31/12 CIERRE 250,000.00 10,250,000.00",
+                "2025-10-01 09:00:00 SALDO INICIAL 2649031 $0 $10,300,000 $10,300,000",
+                "2025-10-10 09:00:00 AJUSTE 2649032 $50,000 $0 $10,500,000",
+                "2025-10-31 09:00:00 CIERRE 2649033 $100,000 $0 $10,400,000",
+                "2025-11-30 09:00:00 CIERRE 2649034 $50,000 $0 $10,350,000",
+                "2025-12-31 09:00:00 CIERRE 2649035 $250,000 $0 $10,250,000",
             ],
         ),
     )
     paths: list[Path] = []
     for quarter, start, end, rows in quarters:
-        path = work / f"cop-style-{quarter}.pdf"
+        path = work / f"cop-layout-{quarter}.pdf"
         make_pdf(path, [
-            "ESTADO DE CUENTA",
+            "Movimientos de cuenta en COP",
             "CUENTA DE AHORROS",
             "NÚMERO 76543210",  # privacy-gate: allow (synthetic account fixture)
             f"DESDE {start} HASTA {end}",
-            "MONEDA COP",
-            "FECHA DETALLE MOVIMIENTO SALDO",
+            "Fecha Descripción Movimiento Tarjeta Débito Abono Saldo",
             *rows,
         ])
         paths.append(path)
@@ -506,19 +506,19 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
     # balance table needs. The generated fixtures intentionally omit an issuer
     # name so the opt-in FBAR institution confirmation is part of the same
     # reviewed handoff, without using a real statement or account number.
-    cop_style = make_sanitized_cop_style_fixture(work)
+    cop_style = make_sanitized_cop_layout_fixture(work)
     spanish_process, spanish_path, spanish_data = preflight(
-        work, "cop-style", cop_style, require_institution=True
+        work, "cop-layout", cop_style, require_institution=True
     )
     spanish_handoff_process, spanish_handoff_path, spanish_handoff_data = create_reviewed_handoff(
         work,
-        "cop-style",
+        "cop-layout",
         spanish_path,
         spanish_data or {},
         institution="Marca66",
     )
     spanish_extract_process, spanish_account_path, spanish_account_data = extract(
-        work, "cop-style", cop_style, spanish_handoff_path
+        work, "cop-layout", cop_style, spanish_handoff_path
     )
     spanish_gates = spanish_data.get("review_gates") if isinstance(spanish_data, dict) else []
     spanish_currency = spanish_data.get("currency") if isinstance(spanish_data, dict) else None
@@ -532,32 +532,38 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
     spanish_account = spanish_account_data.get("account") if isinstance(spanish_account_data, dict) else None
     spanish_coverage = spanish_account_data.get("coverage") if isinstance(spanish_account_data, dict) else None
     spanish_rows = spanish_account_data.get("daily_ledger") if isinstance(spanish_account_data, dict) else []
+    spanish_warnings = spanish_account_data.get("warnings") if isinstance(spanish_account_data, dict) else []
+    spanish_review_summary = spanish_account_data.get("review_summary") if isinstance(spanish_account_data, dict) else None
     observed_rows = {
         str(row.get("date")): row
         for row in spanish_rows
         if isinstance(row, dict) and row.get("balance_source") == "observed"
     } if isinstance(spanish_rows, list) else {}
     expected_observed = {
-        "2025-01-01": Decimal("9800000.00"),
+        "2025-01-01": Decimal("9800000"),
+        "2025-01-04": Decimal("9876543"),
+        "2025-01-31": Decimal("9850000"),
+        "2025-02-28": Decimal("9875000"),
+        "2025-03-31": Decimal("9900000"),
+        "2025-04-01": Decimal("9950000"),
+        "2025-04-30": Decimal("9930000"),
+        "2025-05-31": Decimal("9940000"),
+        "2025-06-15": Decimal("9925000"),
+        "2025-06-30": Decimal("9960000"),
+        "2025-07-01": Decimal("9975000"),
+        "2025-07-31": Decimal("10000000"),
+        "2025-08-31": Decimal("10100000"),
+        "2025-09-15": Decimal("10250000"),
+        "2025-09-30": Decimal("10200000"),
+        "2025-10-01": Decimal("10300000"),
+        "2025-10-10": Decimal("10500000"),
+        "2025-10-31": Decimal("10400000"),
+        "2025-11-30": Decimal("10350000"),
+        "2025-12-31": Decimal("10250000"),
+    }
+    expected_compact_observed = {
+        **expected_observed,
         "2025-01-04": Decimal("9876543.21"),
-        "2025-01-31": Decimal("9850000.00"),
-        "2025-02-28": Decimal("9875000.00"),
-        "2025-03-31": Decimal("9900000.00"),
-        "2025-04-01": Decimal("9950000.00"),
-        "2025-04-30": Decimal("9930000.00"),
-        "2025-05-31": Decimal("9940000.00"),
-        "2025-06-15": Decimal("9925000.00"),
-        "2025-06-30": Decimal("9960000.00"),
-        "2025-07-01": Decimal("9975000.00"),
-        "2025-07-31": Decimal("10000000.00"),
-        "2025-08-31": Decimal("10100000.00"),
-        "2025-09-15": Decimal("10250000.00"),
-        "2025-09-30": Decimal("10200000.00"),
-        "2025-10-01": Decimal("10300000.00"),
-        "2025-10-10": Decimal("10500000.00"),
-        "2025-10-31": Decimal("10400000.00"),
-        "2025-11-30": Decimal("10350000.00"),
-        "2025-12-31": Decimal("10250000.00"),
     }
     observed_values_match = {
         day: Decimal(str(row.get("native_balance"))) for day, row in observed_rows.items()
@@ -596,6 +602,8 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         and isinstance(spanish_gates, list)
         and [gate.get("code") for gate in spanish_gates if isinstance(gate, dict)] == ["unknown-institution"],
         "intake_evidence": isinstance(spanish_currency, dict) and spanish_currency.get("code") == "COP"
+        and spanish_currency.get("candidates") == ["COP"]
+        and spanish_currency.get("ambiguous_dollar") is False
         and spanish_hints == ["76543210"]
         and len(spanish_periods) == 4
         and all(isinstance(periods, list) and len(periods) == 1 for periods in spanish_periods),
@@ -615,13 +623,21 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         "observed_balances": observed_values_match,
         "maximum_candidate": isinstance(maximum_row, dict)
         and maximum_row.get("date") == "2025-10-10"
-        and Decimal(str(maximum_row.get("native_balance"))) == Decimal("10500000.00"),
-        "source_notes": october_tenth.get("confidence") == "medium"
+        and Decimal(str(maximum_row.get("native_balance"))) == Decimal("10500000")
+        and isinstance(maximum_row.get("source_refs"), list)
+        and any(cop_style[-1].name in str(source) for source in maximum_row.get("source_refs", [])),
+        "source_notes": october_tenth.get("confidence") == "high"
         and isinstance(october_notes, list)
-        and any("source-bound page statement period" in str(note) for note in october_notes)
+        and any("COP Fecha Descripción Movimiento Tarjeta Débito Abono Saldo table" in str(note) for note in october_notes)
+        and any("Whole-COP comma grouping accepted only" in str(note) for note in october_notes)
         and isinstance(october_sources, list)
         and any(cop_style[-1].name in str(source) for source in october_sources),
-        "review_csv": "source-bound page statement period" in spanish_csv_text
+        "separator_warnings": isinstance(spanish_warnings, list)
+        and not any("ambiguous thousands/decimal separators" in str(warning) for warning in spanish_warnings),
+        "maximum_review_output": isinstance(spanish_review_summary, dict)
+        and isinstance(spanish_review_summary.get("same_day_balance_candidates"), dict)
+        and spanish_review_summary.get("same_day_balance_candidates", {}).get("count") == 0,
+        "review_csv": "COP Fecha Descripción Movimiento Tarjeta Débito Abono Saldo table" in spanish_csv_text
         and cop_style[-1].name in spanish_csv_text
         and spanish_csv_rows
         and "evidence_class" in (spanish_csv_rows[0] or {})
@@ -630,7 +646,7 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
     }
     flow_ok = all(flow_checks.values())
     check(
-        "FLOW-1 sanitized Spanish table fixture preserves source-bound dates, balances, coverage, and reviewed institution",
+        "FLOW-1 sanitized COP layout fixture preserves source-bound dates, whole-COP balances, coverage, maximum review output, and reviewed institution",
         flow_ok,
         "" if flow_ok else json.dumps(flow_checks, sort_keys=True),
     )
@@ -657,7 +673,7 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
     } if isinstance(compact_rows, list) else {}
     compact_values_match = {
         day: Decimal(str(row.get("native_balance"))) for day, row in compact_observed.items()
-    } == expected_observed
+    } == expected_compact_observed
     compact_notes = [note for row in compact_observed.values() for note in row.get("notes", []) if isinstance(note, str)]
     compact_confidence = {row.get("confidence") for row in compact_observed.values()}
     compact_warnings = compact_account_data.get("warnings") if isinstance(compact_account_data, dict) else []
@@ -670,8 +686,8 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
     }
     compact_detail = {
         **compact_checks,
-        "missing_dates": sorted(set(expected_observed) - set(compact_observed)),
-        "unexpected_dates": sorted(set(compact_observed) - set(expected_observed)),
+        "missing_dates": sorted(set(expected_compact_observed) - set(compact_observed)),
+        "unexpected_dates": sorted(set(compact_observed) - set(expected_compact_observed)),
     }
     check(
         "FLOW-2 compact COP columns select only the final Saldo cell after a reviewed COP handoff",

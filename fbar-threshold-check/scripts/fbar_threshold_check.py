@@ -669,8 +669,8 @@ def extract_compact_cop_table_candidates(
 ) -> tuple[list[BalanceCandidate], set[tuple[str, int]], list[str]]:
     """Extract only final Saldo cells from a reviewed, source-bound compact COP table.
 
-    A compact page is handled only when the user confirmed COP, exactly one
-    preflight period was re-verified on that page, the visual header has all
+    A compact page is handled only when COP is source-corroborated or
+    user-confirmed, exactly one preflight period was re-verified on that page, the visual header has all
     three expected columns, each row has one left-column DD/MM date, and one
     monetary word aligns with the final Saldo header.  Any malformed row is
     omitted rather than falling back to an unanchored numeric token.
@@ -2099,20 +2099,42 @@ def command_extract_account(
         warnings.append("Account currency is not confirmed; do not confirm this ledger until resolved.")
     institution = resolve_institution(preflight, user_resolutions, args.institution)
 
+    # A user-confirmed or source-corroborated COP context lets the parsers
+    # retain comma-grouped whole balances. Source corroboration is limited to
+    # this fingerprint-verified preflight and one unambiguous ISO candidate.
+    preflight_currency = preflight.get("currency")
+    if not isinstance(preflight_currency, dict):
+        preflight_currency = {}
+    preflight_currency_code = str(preflight_currency.get("code") or "").strip().upper()
+    preflight_currency_candidates = {
+        str(candidate).strip().upper()
+        for candidate in preflight_currency.get("candidates", [])
+        if isinstance(candidate, str) and str(candidate).strip()
+    }
+    preflight_corroborates_currency = (
+        currency not in {"UNKNOWN", "MIXED"}
+        and preflight_currency_code == currency
+        and preflight_currency_candidates == {currency}
+    )
+    currency_corroborated_or_confirmed = bool(
+        (confirmed_currency and confirmed_currency == currency)
+        or preflight_corroborates_currency
+    )
+
     compact_candidates, compact_page_keys, compact_warnings = extract_compact_cop_table_candidates(
         args.pdf,
         lines,
         args.tax_year,
         currency,
         page_period_contexts,
-        currency_confirmed=bool(confirmed_currency and confirmed_currency == currency),
+        currency_confirmed=currency_corroborated_or_confirmed,
     )
     fallback_candidates, candidate_warnings = extract_balance_candidates(
         lines,
         args.tax_year,
         currency,
         page_period_contexts=page_period_contexts,
-        currency_confirmed=bool(confirmed_currency and confirmed_currency == currency),
+        currency_confirmed=currency_corroborated_or_confirmed,
         excluded_page_keys=compact_page_keys,
         external_candidate_count=len(compact_candidates),
     )
