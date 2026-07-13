@@ -784,6 +784,9 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
     for item in unbound_data.get("statement_files", []):
         if isinstance(item, dict):
             item["period_intervals"] = []
+    coverage_hints = unbound_data.get("coverage_hints")
+    if isinstance(coverage_hints, dict):
+        coverage_hints["period_intervals"] = []
     compact_preflight_path.write_text(json.dumps(unbound_data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     unbound_handoff_process, unbound_handoff_path, _unbound_handoff_data = create_reviewed_handoff(
         work, "compact-cop-unbound", compact_preflight_path, unbound_data, institution="Marca66"

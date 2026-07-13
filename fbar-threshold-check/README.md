@@ -8,7 +8,7 @@ Did my foreign accounts cross the FBAR threshold, and can we show the work?
 
 The point is not to file FinCEN Form 114 or give legal advice. The point is to turn statement PDFs and confirmed account ledgers into a support packet that separates what the records show from what still needs review.
 
-Current package version: 1.8.6.
+Current package version: 1.8.7.
 
 ## The Rule
 
