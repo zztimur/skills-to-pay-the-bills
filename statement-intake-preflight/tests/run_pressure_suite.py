@@ -62,6 +62,24 @@ def make_pdf(name: str, lines: list[str], *, draw_logo: bool = False) -> Path:
     return path
 
 
+def make_columnar_account_pdf(name: str, *, account: str) -> Path:
+    """Make a synthetic PDF whose account label and ID extract as separate lines.
+
+    The visual placement deliberately keeps the label and identifier adjacent.
+    Their small vertical offset makes a normal text-layer extraction split them,
+    preserving the fixture needed for the coordinate fallback in a later chunk.
+    """
+    path = WORK / name
+    doc = canvas.Canvas(str(path))
+    doc.drawString(40, 800, "Synthetic Statement")
+    doc.drawString(40, 778, "Account No.")
+    doc.drawString(260, 764, account)  # privacy-gate: allow (synthetic account fixture)
+    doc.drawString(40, 742, "Statement period June 1 2025 to June 30 2025")
+    doc.drawString(40, 728, "Currency USD")
+    doc.save()
+    return path
+
+
 def run(tag: str, pdfs: list[str], year: str = "2025", scope: str = "one-account", extra=None):
     out = WORK / f"{tag}.json"
     cmd = [sys.executable, str(SCRIPT), "preflight", "--pdf", *pdfs,
@@ -1130,6 +1148,227 @@ proc, d = run("copyright-list", [str(p)])
 check("R9-1 a '© 2019, 2020, 2021' copyright list does not trip mixed-years",
       d and "mixed-years" not in gates_of(d) and d["coverage_hints"]["detected_years"] == [2025],
       f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
+
+# --------------------------------------------------------------------------- #
+# Chunk 1 period-resolution corpus -- generic synthetic fixture baselines
+#
+# These assertions intentionally characterize the pre-Chunks-2-to-7 behavior.
+# They preserve source-only, month/day period headers and test that today's
+# parser neither fabricates calendar coverage nor loses existing safeguards.
+# Later chunks should replace only the relevant baseline expectations when they
+# add structured period provenance, direct anchors, inferred intervals, and
+# reviewed period-year confirmations.
+# --------------------------------------------------------------------------- #
+
+
+def month_range_fixture(
+    name: str,
+    start: str,
+    end: str,
+    *,
+    account: str = "42424242",
+    dated_rows: list[str] | None = None,
+    generated_on: str = "",
+) -> Path:
+    """Return a generic, synthetic source-header fixture without real values."""
+    lines = [
+        "Synthetic Statement",
+        f"Account {account}",  # privacy-gate: allow (synthetic account fixture)
+        f"Statement period {start} to {end}",
+        "Currency USD",
+    ]
+    if dated_rows:
+        lines += ["Date | Description", *dated_rows]
+    if generated_on:
+        lines.append(generated_on)
+    return make_pdf(name, lines)
+
+
+def has_calendar_gap(data: dict | None, start: str, end: str) -> bool:
+    return {"start": start, "end": end} in calendar_gaps_of(data)
+
+
+# A labelled month/day range becomes usable only when a future period resolver
+# pairs it with a source-bound table date. Today it records the year globally,
+# but does not manufacture a source interval from the two distinct clues.
+p = month_range_fixture(
+    "baseline-labelled-range-dated-row.pdf",
+    "March 1",
+    "March 31",
+    dated_rows=["03/15/2025 Synthetic movement"],
+)
+proc, d = run("baseline-labelled-range-dated-row", [str(p)])
+check("BAS-1 labelled month range plus dated row has no current interval provenance",
+      d and d["coverage_hints"]["detected_years"] == [2025]
+      and d["coverage_hints"]["period_intervals"] == [],
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} intervals={d['coverage_hints']['period_intervals'] if d else '?'}")
+
+# A quiet statement is deliberately not treated as malformed source evidence.
+# It remains unresolved rather than borrowing a year from the requested scope.
+p = month_range_fixture("baseline-labelled-range-quiet.pdf", "April 1", "April 30")
+proc, d = run("baseline-labelled-range-quiet", [str(p)])
+check("BAS-2 quiet labelled month range remains without calendar coverage",
+      d and "unknown-year-coverage" in gates_of(d)
+      and d["coverage_hints"]["period_intervals"] == [],
+      f"gates={gates_of(d)} intervals={d['coverage_hints']['period_intervals'] if d else '?'}")
+
+# Only January carries a dated row. February and March are the adjacent quiet
+# headers that later chain resolution must evaluate independently of input order.
+sequence = [
+    month_range_fixture(
+        "baseline-sequence-january.pdf",
+        "January 1",
+        "January 31",
+        dated_rows=["01/12/2025 Synthetic movement"],
+    ),
+    month_range_fixture("baseline-sequence-february.pdf", "February 1", "February 28"),
+    month_range_fixture("baseline-sequence-march.pdf", "March 1", "March 31"),
+]
+proc, d = run("baseline-partially-anchored-sequence", [str(item) for item in sequence])
+check("BAS-3 partially anchored monthly sequence has no derived intervals yet",
+      d and d["coverage_hints"]["detected_years"] == [2025]
+      and d["coverage_hints"]["period_intervals"] == [],
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} intervals={d['coverage_hints']['period_intervals'] if d else '?'}")
+
+november = month_range_fixture(
+    "baseline-anchored-november.pdf",
+    "November 1",
+    "November 30",
+    dated_rows=["11/18/2025 Synthetic movement"],
+)
+december = month_range_fixture("baseline-quiet-december.pdf", "December 1", "December 31")
+proc, d = run("baseline-quiet-december", [str(november), str(december)])
+check("BAS-4 quiet December after an anchored November has no inferred year yet",
+      d and d["coverage_hints"]["detected_years"] == [2025]
+      and d["coverage_hints"]["period_intervals"] == []
+      and d["account_linkage"].get("status") == "linked-by-source-hint",
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} linkage={d['account_linkage'] if d else '?'}")
+
+# Generated-on stays document metadata even when the body has a valid period.
+p = month_range_fixture(
+    "baseline-future-generated-on.pdf",
+    "May 1 2025",
+    "May 31 2025",
+    generated_on="Account statement generated on June 1 2026",  # privacy-gate: allow (synthetic metadata fixture)
+)
+proc, d = run("baseline-future-generated-on", [str(p)])
+check("BAS-5 future generated-on remains a review gate beside a valid body interval",
+      d and "out-of-period-generated-date" in gates_of(d)
+      and d["coverage_hints"]["statement_period_years"] == [2025]
+      and d["coverage_hints"]["document_metadata_dates"]
+      and d["coverage_hints"]["document_metadata_dates"][0].get("date") == "2026-06-01",
+      f"gates={gates_of(d)} coverage={d['coverage_hints'] if d else '?'}")
+
+# A table date outside a labelled range cannot currently create an interval from
+# that header; retaining this fixture prevents a later resolver from accepting
+# it as an in-range direct anchor.
+p = month_range_fixture(
+    "baseline-outside-labelled-range.pdf",
+    "March 1",
+    "March 31",
+    dated_rows=["04/02/2025 Synthetic movement"],
+)
+proc, d = run("baseline-outside-labelled-range", [str(p)])
+check("BAS-6 out-of-bound movement date does not create an interval from a month range",
+      d and d["coverage_hints"]["detected_years"] == [2025]
+      and d["coverage_hints"]["period_intervals"] == [],
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} intervals={d['coverage_hints']['period_intervals'] if d else '?'}")
+
+# Complete movement dates alone may establish a year today, but never statement
+# coverage without a source-labelled period header.
+p = make_pdf("baseline-dated-rows-no-header.pdf", [
+    "Synthetic Statement",
+    "Account 42424242",  # privacy-gate: allow (synthetic account fixture)
+    "Currency USD",
+    "Date | Description",
+    "05/20/2025 Synthetic movement",
+])
+proc, d = run("baseline-dated-rows-no-header", [str(p)])
+check("BAS-7 dated rows without a statement header do not manufacture a period",
+      d and d["coverage_hints"]["detected_years"] == [2025]
+      and d["coverage_hints"]["detected_periods"] == []
+      and d["coverage_hints"]["period_intervals"] == [],
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} periods={d['coverage_hints']['detected_periods'] if d else '?'}")
+
+# Identical-looking adjacent PDFs with distinct source-linked accounts remain a
+# hard conflict, regardless of their contiguous statement periods.
+account_a = month_range_fixture("baseline-account-a.pdf", "June 1 2025", "June 30 2025", account="10101010")
+account_b = month_range_fixture("baseline-account-b.pdf", "July 1 2025", "July 31 2025", account="20202020")
+proc, d = run("baseline-adjacent-different-accounts", [str(account_a), str(account_b)])
+check("BAS-8 adjacent periods with different accounts retain the mixed-account gate",
+      d and "possible-mixed-accounts" in gates_of(d),
+      f"accounts={d['account_hints'] if d else '?'} gates={gates_of(d)}")
+
+# This crossing sequence is intentionally evaluated under 2025. The current
+# generic year gate rejects the January source date rather than forcing it into
+# 2025; later chain logic must retain that next-calendar-year placement.
+cross_december = month_range_fixture(
+    "baseline-cross-year-december.pdf",
+    "December 1",
+    "December 31",
+    dated_rows=["12/20/2025 Synthetic movement"],
+)
+cross_january = month_range_fixture(
+    "baseline-cross-year-january.pdf",
+    "January 1",
+    "January 31",
+    dated_rows=["01/10/2026 Synthetic movement"],
+)
+proc, d = run("baseline-cross-year-continuity", [str(cross_december), str(cross_january)])
+check("BAS-9 December-to-January source dates are not forced into the requested year",
+      d and d["coverage_hints"]["detected_years"] == [2025, 2026]
+      and "mixed-years" in gates_of(d),
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
+
+# Ordered source periods provide the coverage baseline for reordered, duplicate,
+# and omitted-input checks. They use complete dates only to characterize the
+# existing coverage safeguards; the month/day corpus above drives the new work.
+monthly_coverage = [
+    month_range_fixture("baseline-coverage-january.pdf", "January 1 2025", "January 31 2025"),
+    month_range_fixture("baseline-coverage-february.pdf", "February 1 2025", "February 28 2025"),
+    month_range_fixture("baseline-coverage-march.pdf", "March 1 2025", "March 31 2025"),
+    month_range_fixture("baseline-coverage-april.pdf", "April 1 2025", "April 30 2025"),
+]
+jan, feb, mar, apr = monthly_coverage
+proc, d = run("baseline-reordered", [str(apr), str(mar), str(feb), str(jan)])
+check("BAS-10 reordered contiguous inputs retain sorted coverage without a false internal gap",
+      d and coverage_review_of(d).get("intervals_detected") == 4
+      and calendar_gaps_of(d) == [{"start": "2025-05-01", "end": "2025-12-31"}],
+      f"gates={gates_of(d)} coverage={coverage_review_of(d)}")
+
+proc, d = run("baseline-duplicate", [str(jan), str(feb), str(feb), str(mar), str(apr)])
+check("BAS-11 duplicate monthly input retains a duplicate-input gate",
+      d and "duplicate-input" in gates_of(d), f"gates={gates_of(d)}")
+
+proc, d = run("baseline-internal-omission", [str(jan), str(mar), str(apr)])
+check("BAS-12 internal omitted month retains the exact February gap",
+      d and "possible-missing-statement-period" in gates_of(d)
+      and has_calendar_gap(d, "2025-02-01", "2025-02-28"),
+      f"gaps={calendar_gaps_of(d)} gates={gates_of(d)}")
+
+proc, d = run("baseline-leading-omission", [str(feb), str(mar), str(apr)])
+check("BAS-13 leading omitted month retains the exact January gap",
+      d and "possible-missing-statement-period" in gates_of(d)
+      and has_calendar_gap(d, "2025-01-01", "2025-01-31"),
+      f"gaps={calendar_gaps_of(d)} gates={gates_of(d)}")
+
+proc, d = run("baseline-year-end-omission", [str(jan), str(feb), str(mar)])
+check("BAS-14 year-end omission retains the April-through-December gap",
+      d and "possible-missing-statement-period" in gates_of(d)
+      and has_calendar_gap(d, "2025-04-01", "2025-12-31"),
+      f"gaps={calendar_gaps_of(d)} gates={gates_of(d)}")
+
+# The text layer splits these visually adjacent fragments. Chunk 2 will use
+# coordinates to associate them; the baseline proves current line-only parsing
+# does not accidentally harvest the standalone identifier.
+columnar = make_columnar_account_pdf("baseline-columnar-account.pdf", account="42424242")
+with pdfplumber.open(columnar) as fixture_pdf:
+    extracted_lines = (fixture_pdf.pages[0].extract_text() or "").splitlines()
+proc, d = run("baseline-columnar-account", [str(columnar)])
+check("BAS-15 columnar account label and ID remain separate in extracted text",
+      "Account No." in extracted_lines and "42424242" in extracted_lines  # privacy-gate: allow (synthetic account fixture)
+      and d and d["account_hints"] == [],
+      f"lines={extracted_lines} accounts={d['account_hints'] if d else '?'}")
 
 # --------------------------------------------------------------------------- #
 # Report
