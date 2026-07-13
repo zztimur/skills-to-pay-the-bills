@@ -40,6 +40,7 @@ READY_STATUS = "ready-for-domain-extraction"
 REVIEW_REQUIRED_STATUS = "review-required"
 REVIEWED_HANDOFF_STATUS = "reviewed-for-domain-extraction"
 REVIEWED_HANDOFF_TYPE = "reviewed-handoff"
+OUT_OF_PERIOD_GENERATED_DATE_GATE = "out-of-period-generated-date"
 MIN_TEXT_CHARS = 40
 MIN_TAX_YEAR = 1970
 MAX_TAX_YEAR = 2100
@@ -1876,7 +1877,7 @@ def build_preflight(
             f"{', '.join(generated_dates)}. They do not establish statement-period coverage."
         )
         warnings.append(message)
-        add_gate(gates, "out-of-period-generated-date", message)
+        add_gate(gates, OUT_OF_PERIOD_GENERATED_DATE_GATE, message)
     outside_years = [year for year in coverage_years if year != tax_year]
     if outside_years:
         message = f"Detected statement-period year(s) outside requested tax year {tax_year}: {', '.join(str(year) for year in outside_years)}."
@@ -2291,6 +2292,20 @@ def _unique_year_arguments(args: argparse.Namespace, attribute: str) -> list[int
     return sorted(values)
 
 
+def _unique_iso_date_arguments(args: argparse.Namespace, attribute: str) -> list[str]:
+    values: list[str] = []
+    for raw_value in (getattr(args, attribute, None) or []):
+        try:
+            values.append(date.fromisoformat(str(raw_value)).isoformat())
+        except (TypeError, ValueError) as exc:
+            raise PreflightError(
+                f"{attribute.replace('_', '-')} values must be ISO calendar dates (YYYY-MM-DD)."
+            ) from exc
+    if len(set(values)) != len(values):
+        raise PreflightError(f"Pass each {attribute.replace('_', '-')} value only once.")
+    return sorted(values)
+
+
 def _coverage_years(coverage: dict[str, object], key: str) -> set[int]:
     raw_values = coverage.get(key, [])
     if not isinstance(raw_values, list):
@@ -2308,6 +2323,64 @@ def preflight_requires_institution(source: dict[str, object]) -> bool:
     """Whether this one-account preflight explicitly requested issuer review."""
     requirements = source.get("requirements")
     return isinstance(requirements, dict) and requirements.get("institution_required") is True
+
+
+def source_out_of_period_generated_date_evidence(source: dict[str, object], tax_year: int) -> list[dict[str, object]]:
+    """Return the exact generated-on evidence that the new review gate exposes.
+
+    The reviewer confirms only these pre-extracted dates. File/page/line anchors
+    and parse confidence are copied from the immutable preflight rather than
+    accepted from a command-line argument.
+    """
+    coverage = source.get("coverage_hints")
+    if not isinstance(coverage, dict):
+        return []
+    raw_evidence = coverage.get("document_metadata_dates")
+    if not isinstance(raw_evidence, list):
+        return []
+
+    normalized: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str, int, int]] = set()
+    for raw_item in raw_evidence:
+        if not isinstance(raw_item, dict) or raw_item.get("kind") != "generated-on":
+            continue
+        try:
+            parsed_date = date.fromisoformat(str(raw_item.get("date") or ""))
+        except ValueError:
+            continue
+        if parsed_date.year == tax_year:
+            continue
+        source_ref = raw_item.get("source_ref")
+        if not isinstance(source_ref, dict):
+            continue
+        source_file = str(source_ref.get("file") or "").strip()
+        try:
+            page = int(source_ref.get("page"))
+            line = int(source_ref.get("line"))
+        except (TypeError, ValueError):
+            continue
+        confidence = str(raw_item.get("confidence") or "")
+        if not source_file or page <= 0 or line <= 0 or confidence not in {"high", "medium"}:
+            continue
+        item = {
+            "kind": "generated-on",
+            "date": parsed_date.isoformat(),
+            "confidence": confidence,
+            "source_ref": {"file": source_file, "page": page, "line": line},
+        }
+        key = (item["date"], confidence, source_file, page, line)
+        if key not in seen:
+            seen.add(key)
+            normalized.append(item)
+    return sorted(
+        normalized,
+        key=lambda item: (
+            str(item["date"]),
+            str(item["source_ref"]["file"]),  # type: ignore[index]
+            int(item["source_ref"]["page"]),  # type: ignore[index]
+            int(item["source_ref"]["line"]),  # type: ignore[index]
+        ),
+    )
 
 
 def build_user_resolutions(
@@ -2364,6 +2437,26 @@ def build_user_resolutions(
         # altered: a period outside the requested year is never reviewer-overridable.
         raise PreflightError(
             "Source evidence contains statement-period year(s) outside the requested tax year; rerun preflight with corrected scope."
+        )
+
+    generated_date_gate_codes = {OUT_OF_PERIOD_GENERATED_DATE_GATE} & gate_codes
+    confirmed_generated_dates = _unique_iso_date_arguments(args, "confirm_generated_on_date")
+    generated_date_evidence = source_out_of_period_generated_date_evidence(source, tax_year)
+    expected_generated_dates = sorted({str(item["date"]) for item in generated_date_evidence})
+    if generated_date_gate_codes:
+        if not generated_date_evidence:
+            raise PreflightError(
+                "out-of-period-generated-date requires source-bound generated-on date evidence; rerun preflight."
+            )
+        if confirmed_generated_dates != expected_generated_dates:
+            raise PreflightError(
+                "Pass --confirm-generated-on-date once for every extracted out-of-period generated-on date: "
+                + ", ".join(expected_generated_dates)
+                + "."
+            )
+    elif confirmed_generated_dates:
+        raise PreflightError(
+            "--confirm-generated-on-date is only allowed when preflight reports out-of-period-generated-date."
         )
 
     currency = source.get("currency") if isinstance(source.get("currency"), dict) else {}
@@ -2429,6 +2522,16 @@ def build_user_resolutions(
             if confirmed_years or classified_contextual_years
             else {"status": "not-required"}
         ),
+        "generated_on_dates": (
+            {
+                "status": "user-confirmed",
+                "confirmed_dates": confirmed_generated_dates,
+                "source_date_evidence": generated_date_evidence,
+                "resolved_gate_codes": sorted(generated_date_gate_codes),
+            }
+            if generated_date_gate_codes
+            else {"status": "not-required"}
+        ),
         "currency": (
             {
                 "status": "user-confirmed",
@@ -2471,11 +2574,6 @@ def command_review_handoff(args: argparse.Namespace) -> int:
 
     source = load_json_artifact(input_path, "preflight JSON")
     gates = review_gates_for_handoff(source)
-    if any(gate["code"] == "out-of-period-generated-date" for gate in gates):
-        raise PreflightError(
-            "out-of-period-generated-date cannot create a reviewed handoff yet; "
-            "review the document metadata and rerun after dedicated resolution support is available."
-        )
     expected_codes = {gate["code"] for gate in gates}
     accepted_codes = [str(code).strip() for code in (args.accept_gate or []) if str(code).strip()]
     accepted_set = set(accepted_codes)
@@ -3509,23 +3607,63 @@ def command_self_test(_args: argparse.Namespace) -> int:
         write_json(generated_date_source, generated_date_metadata)
         generated_date_csv = root / "generated-date-metadata-review.csv"
         write_review_csv(generated_date_csv, generated_date_metadata)
+        generated_date_handoff = root / "generated-date-metadata-handoff.json"
         try:
             command_review_handoff(
                 argparse.Namespace(
                     input=str(generated_date_source),
-                    out=str(root / "generated-date-metadata-handoff.json"),
+                    out=str(generated_date_handoff),
                     accept_gate=sorted(generated_date_gates),
                     user_review_confirmed=True,
-                    confirm_statement_year=[],
+                    confirm_statement_year=[2025],
                     classify_contextual_year=[],
+                    confirm_generated_on_date=["2026-12-31"],
                     confirm_currency=None,
                     confirm_one_account=False,
                     confirm_institution=None,
                 )
             )
-            failures.append("generated-date-metadata: reviewed handoff must remain unavailable until a dedicated resolution exists")
         except PreflightError:
-            pass
+            failures.append("generated-date-metadata: expected exact source-bound reviewed resolution to be accepted")
+        else:
+            generated_date_handoff_data = load_json_artifact(generated_date_handoff, "generated date handoff")
+            generated_date_resolutions = generated_date_handoff_data.get("user_resolutions")
+            generated_date_resolution = (
+                generated_date_resolutions.get("generated_on_dates")
+                if isinstance(generated_date_resolutions, dict)
+                else None
+            )
+            if not isinstance(generated_date_resolution, dict) or generated_date_resolution != {
+                "status": "user-confirmed",
+                "confirmed_dates": ["2026-12-31"],
+                "source_date_evidence": generated_date_records,
+                "resolved_gate_codes": [OUT_OF_PERIOD_GENERATED_DATE_GATE],
+            }:
+                failures.append(
+                    f"generated-date-metadata: expected immutable generated-on resolution, got {generated_date_resolution}"
+                )
+        for label, confirmed_dates in (
+            ("missing generated date", []),
+            ("unexpected generated date", ["2026-12-30"]),
+        ):
+            try:
+                command_review_handoff(
+                    argparse.Namespace(
+                        input=str(generated_date_source),
+                        out=str(root / f"generated-date-metadata-{label}.json"),
+                        accept_gate=sorted(generated_date_gates),
+                        user_review_confirmed=True,
+                        confirm_statement_year=[2025],
+                        classify_contextual_year=[],
+                        confirm_generated_on_date=confirmed_dates,
+                        confirm_currency=None,
+                        confirm_one_account=False,
+                        confirm_institution=None,
+                    )
+                )
+                failures.append(f"generated-date-metadata: expected {label} to be rejected")
+            except PreflightError:
+                pass
         with generated_date_csv.open(newline="", encoding="utf-8") as handle:
             generated_date_rows = list(csv.DictReader(handle))
         if (
@@ -4143,6 +4281,13 @@ def _year_arg(raw: str) -> int:
     return year
 
 
+def _iso_date_arg(raw: str) -> str:
+    try:
+        return date.fromisoformat(raw).isoformat()
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"date {raw!r} must use YYYY-MM-DD.") from None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -4193,6 +4338,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         type=_year_arg,
         help="Classify one extracted prior year as contextual after confirming the requested statement year.",
+    )
+    handoff.add_argument(
+        "--confirm-generated-on-date",
+        action="append",
+        metavar="YYYY-MM-DD",
+        type=_iso_date_arg,
+        help="Confirm one extracted out-of-period generated-on date; repeat only for dates shown in the source preflight.",
     )
     handoff.add_argument(
         "--confirm-currency",

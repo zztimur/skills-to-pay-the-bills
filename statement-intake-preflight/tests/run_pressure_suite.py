@@ -525,9 +525,28 @@ check("YR-5 generated-on date is source-bound metadata, not fallback coverage",
       and metadata_ref.get("page") == 1 and metadata_ref.get("line") == 5
       and csv_metadata == "2026-12-31 generated-on high p1/l5",
       f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)} metadata={metadata_dates} csv={csv_metadata!r}")
-proc, handoff = run_handoff("yr-generated-date-no-handoff", WORK / "yr-generated-date-metadata.json", gates_of(d))
-check("YR-5A generated-on gate cannot enter reviewed handoff before dedicated support",
-      proc.returncode != 0 and handoff is None and "out-of-period-generated-date" in proc.stderr,
+proc, handoff = run_handoff(
+    "yr-generated-date-reviewed",
+    WORK / "yr-generated-date-metadata.json",
+    gates_of(d),
+    ["--confirm-statement-year", "2025", "--confirm-generated-on-date", "2026-12-31"],
+)
+handoff_resolutions = handoff.get("user_resolutions", {}) if isinstance(handoff, dict) else {}
+generated_resolution = handoff_resolutions.get("generated_on_dates") if isinstance(handoff_resolutions, dict) else {}
+check("YR-5A generated-on date needs an exact source-bound reviewed resolution",
+      proc.returncode == 0 and isinstance(generated_resolution, dict)
+      and generated_resolution.get("confirmed_dates") == ["2026-12-31"]
+      and generated_resolution.get("source_date_evidence") == metadata_dates
+      and generated_resolution.get("resolved_gate_codes") == ["out-of-period-generated-date"],
+      f"exit={proc.returncode} stderr={proc.stderr.strip()} resolution={generated_resolution}")
+proc, rejected_handoff = run_handoff(
+    "yr-generated-date-reviewed-missing-date",
+    WORK / "yr-generated-date-metadata.json",
+    gates_of(d),
+    ["--confirm-statement-year", "2025"],
+)
+check("YR-5B generated-on date cannot be accepted without its extracted date",
+      proc.returncode != 0 and rejected_handoff is None and "confirm-generated-on-date" in proc.stderr,
       f"exit={proc.returncode} stderr={proc.stderr.strip()}")
 
 p = make_pdf("yr-generated-date-with-period.pdf", [
