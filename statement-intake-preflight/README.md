@@ -8,7 +8,7 @@ Are these statement PDFs clean enough, scoped enough, and boring enough to hand 
 
 The point is not to extract interest, rebuild daily balances, choose FX rates, or answer an FBAR question. The point is to stop at the front door and ask whether the statement set looks like one coherent thing: one year, one account or institution, readable text, plausible currency, and no obvious trap hiding behind a tidy filename.
 
-Current package version: 1.4.4.
+Current package version: 1.4.5.
 
 It leaves behind a JSON/CSV handoff so the next skill does not have to rediscover the same intake facts from scratch.
 
@@ -32,6 +32,7 @@ human answer is needed, it uses these prompts:
 
 - Weak currency evidence: “We could not corroborate the account currency from the statement text. Please confirm the ISO currency code (for example, `COP`).”
 - Contextual prior-year date with unclear period coverage: “We found `2024-12-31` in the Q1 statement. It appears to be a prior-year opening balance, while the statement period appears to be 2025. Please confirm that all supplied statements cover 2025 and that this date is contextual.”
+- Out-of-period generated-on metadata: “We found `2026-12-31` as the date the document was generated, not as a statement period. Please confirm that exact displayed date. We will retain it as document metadata and will not use it for statement-year coverage.”
 - Missing or incompletely linked account identity for an FBAR account set: “We could not extract a reliable account identifier from every supplied PDF. Please confirm that the supplied PDFs represent one account. You do not need to provide the account number.”
 - No extractable issuer for an interest set, or an FBAR `one-account --require-institution` run: “We could not extract a reliable institution name from these statements. Please confirm the institution name shown on the statements.”
 
@@ -54,10 +55,10 @@ The JSON includes:
 
 - statement files, resolved paths, byte sizes, SHA-256 fingerprints, page counts, and text counts;
 - detected statement titles and period labels (excluding transaction narratives), with source references for both period endpoints;
-- detected years and out-of-year hints;
+- detected years and out-of-year hints, plus source-labelled generated-on metadata kept separate from coverage;
 - currency candidates it could back up with a nearby amount or name, the weaker ones it could not, and ambiguous `$` warnings;
 - account hints, source-linkage coverage across the supplied PDFs, and institution hints;
-- review gates such as low text, duplicate inputs, mixed years, mixed currencies, possible mixed accounts, and possible mixed institutions.
+- review gates such as low text, duplicate inputs, mixed years, out-of-period generated-on metadata, mixed currencies, possible mixed accounts, and possible mixed institutions.
 
 The JSON is for machines. The CSV is for review. The chat answer should not treat either one as a finished tax or FBAR artifact.
 
@@ -118,7 +119,7 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-
 
 Repeat `--accept-gate` for each gate. Structural `stop` gates cannot be accepted: correct the inputs and rerun preflight. For a reviewed handoff, use the new JSON path below:
 
-Add only the resolution flags required by the source gates: `--confirm-currency COP` for weak or unknown currency evidence, `--confirm-one-account` when no account identifier can be extracted or the identifier is not source-linked across every supplied PDF, `--confirm-institution "Example Bank"` for an unknown one-institution issuer or an opt-in FBAR `one-account --require-institution` issuer gate, and `--confirm-statement-year 2025` (plus `--classify-contextual-year 2024` when applicable) for unresolved year coverage. Do not provide a full account number by default. A genuine mixed statement year cannot be accepted. Conflicting issuer evidence can be resolved only for opt-in FBAR `one-account --require-institution` intake after explicit user review; the handoff preserves the original evidence and accepted gate. <!-- privacy-gate: allow -->
+Add only the resolution flags required by the source gates: `--confirm-currency COP` for weak or unknown currency evidence, `--confirm-one-account` when no account identifier can be extracted or the identifier is not source-linked across every supplied PDF, `--confirm-institution "Example Bank"` for an unknown one-institution issuer or an opt-in FBAR `one-account --require-institution` issuer gate, `--confirm-statement-year 2025` (plus `--classify-contextual-year 2024` when applicable) for unresolved year coverage, and `--confirm-generated-on-date 2026-12-31` once for each extracted out-of-period generated-on date. A generated-on confirmation binds the exact date and source reference but does not treat it as statement-year coverage. Do not provide a full account number by default. A genuine mixed statement year cannot be accepted. Conflicting issuer evidence can be resolved only for opt-in FBAR `one-account --require-institution` intake after explicit user review; the handoff preserves the original evidence and accepted gate. <!-- privacy-gate: allow -->
 
 ```bash
 python3 fbar-threshold-check/scripts/fbar_threshold_check.py extract-account \
@@ -146,6 +147,7 @@ The skill should stop or ask for review when:
 - the PDF has little or no machine-readable text;
 - the same statement PDF is handed in more than once, even under a different name;
 - statement years do not line up with the requested year;
+- an out-of-period generated-on date is present and needs source-bound review;
 - `$` appears without enough context to know the currency;
 - multiple currencies appear in one supposed currency bucket;
 - multiple account hints appear, or one account hint cannot be source-linked across every supplied PDF, before an FBAR account run;
