@@ -563,6 +563,36 @@ PERIOD_HEADING_PREFIX_RE = re.compile(
     r"^\s*(?:statement\s+(?:period|date)|period(?:o)?|desde|from|hasta|through)\b",
     re.I,
 )
+# Source-labelled month/day ranges are retained independently from complete
+# calendar intervals.  Unlike ``line_dates``, these patterns deliberately allow
+# a missing year: later chunks may resolve that year from a table anchor, a
+# source-linked chain, or a precise reviewed confirmation.  They never infer a
+# year themselves.
+PERIOD_HEADER_MONTH_FIRST_RE = re.compile(
+    rf"\b(?P<start_month>{_MONTH_TOKEN})\.?(?:\s+)(?P<start_day>\d{{1,2}})(?:st|nd|rd|th)?"
+    rf"(?:\s*(?:,|de)?\s*(?P<start_year>19\d{{2}}|20\d{{2}}))?"
+    rf"\s*(?:[-–—]|to|through|a(?:l)?|hasta|bis)\s*"
+    rf"(?P<end_month>{_MONTH_TOKEN})\.?(?:\s+)(?P<end_day>\d{{1,2}})(?:st|nd|rd|th)?"
+    rf"(?:\s*(?:,|de)?\s*(?P<end_year>19\d{{2}}|20\d{{2}}))?\b",
+    re.I,
+)
+PERIOD_HEADER_DAY_FIRST_RE = re.compile(
+    rf"\b(?P<start_day>\d{{1,2}})(?:st|nd|rd|th)?\s+de\s+(?P<start_month>{_MONTH_TOKEN})\.?"
+    rf"(?:\s+de\s+(?P<start_year>19\d{{2}}|20\d{{2}}))?"
+    rf"\s*(?:[-–—]|a(?:l)?|hasta|bis|to|through)\s*"
+    rf"(?P<end_day>\d{{1,2}})(?:st|nd|rd|th)?\s+de\s+(?P<end_month>{_MONTH_TOKEN})\.?"
+    rf"(?:\s+de\s+(?P<end_year>19\d{{2}}|20\d{{2}}))?\b",
+    re.I,
+)
+# A year-anchor is useful only inside a labelled movement or balance-date table.
+# The header requires a date column plus a second movement/balance column; this
+# prevents a lone narrative date from becoming a source anchor.
+DATE_TABLE_HEADER_RE = re.compile(
+    r"\b(?:date|fecha)\b.*\b(?:description|descripcion|movement|movimiento|"
+    r"transaction|details|amount|balance|saldo|debit|credito|credit|abono)\b",
+    re.I,
+)
+DATE_TABLE_ANCHOR_MAX_OFFSET = 24
 MONTH_YEAR_HEADING_WORDS = {
     "account",
     "bancario",
@@ -759,7 +789,24 @@ def load_pdf_files(paths: list[str]) -> list[dict[str, object]]:
             with pdfplumber.open(str(path)) as pdf:
                 for index, page in enumerate(pdf.pages, start=1):
                     text = page.extract_text() or ""
-                    pages.append({"page": index, "text": text})
+                    try:
+                        raw_words = page.extract_words() or []
+                    except Exception:  # pragma: no cover - a text layer can expose text but not word coordinates.
+                        raw_words = []
+                    words: list[dict[str, object]] = []
+                    for raw_word in raw_words:
+                        if not isinstance(raw_word, dict):
+                            continue
+                        word_text = clean_line(str(raw_word.get("text", "")))
+                        try:
+                            x0 = float(raw_word.get("x0"))
+                            x1 = float(raw_word.get("x1"))
+                            top = float(raw_word.get("top"))
+                        except (TypeError, ValueError):
+                            continue
+                        if word_text and x1 >= x0:
+                            words.append({"text": word_text, "x0": x0, "x1": x1, "top": top})
+                    pages.append({"page": index, "text": text, "words": words})
         except Exception as exc:  # pragma: no cover - depends on malformed PDF internals.
             warnings.append(f"{path.name} could not be read as a PDF: {exc}")
             read_failed = True
@@ -815,6 +862,13 @@ def file_profile(
         }
         for index, page in enumerate(pages, start=1)
     ]
+    page_words = [
+        {
+            "page": int(page.get("page", index)),
+            "words": list(page.get("words", [])) if isinstance(page.get("words"), list) else [],
+        }
+        for index, page in enumerate(pages, start=1)
+    ]
     char_count = len(text.strip())
     if is_pdf and text_layer_expected and char_count < MIN_TEXT_CHARS:
         warnings.append(f"{path.name} has little machine-readable text; scanned/image-only PDFs are out of scope for v1.")
@@ -830,6 +884,9 @@ def file_profile(
         # Internal parsing aid. build_preflight converts this to compact source
         # references and never serializes the extracted page text itself.
         "page_lines": page_lines,
+        # Internal coordinate aid for the conservative columnar account fallback.
+        # Raw words and coordinates never enter the output artifact.
+        "page_words": page_words,
         "warnings": stable_unique(warnings),
     }
 
@@ -1050,6 +1107,137 @@ def line_dates(line: str) -> list[tuple[date, tuple[int, int], str]]:
             seen.add(key)
             deduped.append(item)
     return deduped
+
+
+def _period_header_endpoint(month_token: str, day_token: str, year_token: str | None) -> dict[str, int] | None:
+    """Return a compact displayed endpoint only when its month/day is valid."""
+    month = MONTH_NUMBERS.get(month_token.casefold().rstrip("."))
+    if month is None:
+        return None
+    try:
+        day = int(day_token)
+    except ValueError:
+        return None
+    # A leap year makes February 29 a valid display value without making any
+    # year-placement claim. Chunk 3 owns calendar placement and leap-year rules.
+    if _calendar_date(2000, month, day) is None:
+        return None
+    endpoint: dict[str, int] = {"month": month, "day": day}
+    if year_token:
+        endpoint["year"] = int(year_token)
+    return endpoint
+
+
+def detect_period_headers(page_lines: Iterable[object]) -> list[dict[str, object]]:
+    """Capture labelled statement-period ranges without resolving a missing year.
+
+    The compact records retain numeric displayed endpoints and a page/line source
+    reference, never the source text. A complete range remains an existing
+    ``period_intervals`` input; a month/day-only header is evidence for a later
+    resolver, not calendar coverage on its own.
+    """
+    headers: list[dict[str, object]] = []
+    seen: set[tuple[int, int, tuple[tuple[str, int], ...], tuple[tuple[str, int], ...]]] = set()
+
+    def add_header(page: int, line: int, start: dict[str, int], end: dict[str, int]) -> None:
+        start_key = tuple(sorted(start.items()))
+        end_key = tuple(sorted(end.items()))
+        key = (page, line, start_key, end_key)
+        if key in seen:
+            return
+        seen.add(key)
+        headers.append(
+            {
+                "kind": "period-header",
+                "displayed_start": start,
+                "displayed_end": end,
+                "source_ref": {"page": page, "line": line},
+            }
+        )
+
+    for raw_page in page_lines:
+        if not isinstance(raw_page, dict):
+            continue
+        page = int(raw_page.get("page", 0) or 0)
+        raw_lines = raw_page.get("lines")
+        if page <= 0 or not isinstance(raw_lines, list):
+            continue
+        for line_number, raw_line in enumerate(raw_lines, start=1):
+            line = str(raw_line)
+            if not PERIOD_HEADING_PREFIX_RE.search(line):
+                continue
+            dates = line_dates(line)
+            if len(dates) >= 2:
+                start, start_span, _start_confidence = dates[0]
+                end, end_span, _end_confidence = dates[-1]
+                if PERIOD_CONNECTOR_RE.search(line[start_span[1]:end_span[0]]):
+                    add_header(
+                        page,
+                        line_number,
+                        {"month": start.month, "day": start.day, "year": start.year},
+                        {"month": end.month, "day": end.day, "year": end.year},
+                    )
+                    continue
+            for pattern in (PERIOD_HEADER_MONTH_FIRST_RE, PERIOD_HEADER_DAY_FIRST_RE):
+                match = pattern.search(line)
+                if not match:
+                    continue
+                start = _period_header_endpoint(
+                    match.group("start_month"), match.group("start_day"), match.group("start_year")
+                )
+                end = _period_header_endpoint(
+                    match.group("end_month"), match.group("end_day"), match.group("end_year")
+                )
+                if start and end:
+                    add_header(page, line_number, start, end)
+                break
+    return headers
+
+
+def detect_year_anchors(page_lines: Iterable[object]) -> list[dict[str, object]]:
+    """Capture complete dates only from labelled movement or balance-date tables.
+
+    A table anchor supplies a source year for an already-captured period header
+    in a later chunk. It deliberately cannot create a period: a dated movement
+    table with no labelled statement period yields anchors and nothing else.
+    """
+    anchors: list[dict[str, object]] = []
+    seen: set[tuple[int, int, str]] = set()
+    for raw_page in page_lines:
+        if not isinstance(raw_page, dict):
+            continue
+        page = int(raw_page.get("page", 0) or 0)
+        raw_lines = raw_page.get("lines")
+        if page <= 0 or not isinstance(raw_lines, list):
+            continue
+        in_date_table = False
+        for line_number, raw_line in enumerate(raw_lines, start=1):
+            line = str(raw_line)
+            if DATE_TABLE_HEADER_RE.search(line):
+                in_date_table = True
+                continue
+            if not in_date_table or DOCUMENT_GENERATED_ON_RE.search(line):
+                continue
+            for parsed, span, confidence in line_dates(line):
+                # The date must occupy the first table column or follow a clear
+                # balance-date label. This keeps footer prose and embedded
+                # reference dates out even after a genuine table header.
+                is_row_date = span[0] <= DATE_TABLE_ANCHOR_MAX_OFFSET
+                if not is_row_date:
+                    continue
+                key = (page, line_number, parsed.isoformat())
+                if key in seen:
+                    continue
+                seen.add(key)
+                anchors.append(
+                    {
+                        "kind": "year-anchor",
+                        "date": parsed.isoformat(),
+                        "confidence": confidence,
+                        "source_ref": {"page": page, "line": line_number},
+                    }
+                )
+    return anchors
 
 
 def detect_document_metadata_dates(page_lines: Iterable[object]) -> list[dict[str, object]]:
@@ -1499,6 +1687,103 @@ def detect_account_hints(lines: Iterable[str]) -> list[str]:
     return [display for display, _compact, _partial in _collect_account_hint_records(lines)]
 
 
+COLUMNAR_ACCOUNT_LABEL_RE = re.compile(r"^(?:account|acct|cuenta)$", re.I)
+COLUMNAR_ACCOUNT_DESIGNATOR_RE = re.compile(r"^(?:no|number|nro|num|numero|número|id)\.?$", re.I)
+COLUMNAR_REFERENCE_RE = re.compile(
+    r"^(?:ref(?:erence)?|txn|transaction|mov(?:ement)?|page|pagina|página|phone|tel)\b", re.I
+)
+COLUMNAR_MONEY_RE = re.compile(
+    r"[$€£¥]|\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+[.,]\d{2}"
+)
+COLUMNAR_PHONE_RE = re.compile(
+    r"(?:\+?\d{1,3}[ .-]?)?(?:\(?\d{3}\)?[ .-]){2}\d{4}$"
+)
+COLUMNAR_LABEL_ROW_TOLERANCE = 5.0
+COLUMNAR_IDENTIFIER_ROW_TOLERANCE = 20.0
+COLUMNAR_IDENTIFIER_MAX_GAP = 280.0
+
+
+def _columnar_account_candidate(raw: str) -> tuple[str, str, bool] | None:
+    """Return one conservative identifier record, rejecting common column noise."""
+    candidate = clean_line(raw)
+    if not candidate or COLUMNAR_REFERENCE_RE.search(candidate):
+        return None
+    if COLUMNAR_MONEY_RE.search(candidate) or COLUMNAR_PHONE_RE.fullmatch(candidate):
+        return None
+    token = account_token(candidate)
+    if not token:
+        return None
+    compact = _account_compact(token)
+    return (token, compact, "*" in compact or "X" in compact)
+
+
+def detect_columnar_account_hint_records(page_words: Iterable[object]) -> list[tuple[str, str, bool]]:
+    """Recover a labelled account ID when PDF text extraction split its columns.
+
+    Require an explicit two-word account designation (for example ``Account
+    No.``) and a plausible identifier immediately to its right on the same
+    visual row.  Coordinate data is an internal parsing aid only; no words or
+    coordinates are serialized into preflight artifacts.
+    """
+    raw_records: list[tuple[str, str, bool]] = []
+    for raw_page in page_words:
+        if not isinstance(raw_page, dict):
+            continue
+        raw_words = raw_page.get("words")
+        if not isinstance(raw_words, list):
+            continue
+        words: list[dict[str, object]] = []
+        for raw_word in raw_words:
+            if not isinstance(raw_word, dict):
+                continue
+            text = clean_line(str(raw_word.get("text", "")))
+            try:
+                x0 = float(raw_word.get("x0"))
+                x1 = float(raw_word.get("x1"))
+                top = float(raw_word.get("top"))
+            except (TypeError, ValueError):
+                continue
+            if text and x1 >= x0:
+                words.append({"text": text, "x0": x0, "x1": x1, "top": top})
+        words.sort(key=lambda word: (float(word["top"]), float(word["x0"])))
+        for label_index, label in enumerate(words):
+            label_text = str(label["text"])
+            if not COLUMNAR_ACCOUNT_LABEL_RE.fullmatch(label_text):
+                continue
+            label_x1 = float(label["x1"])
+            label_top = float(label["top"])
+            designators = [
+                word
+                for word in words[label_index + 1:]
+                if float(word["x0"]) >= label_x1 - 2
+                and float(word["x0"]) - label_x1 <= 48
+                and abs(float(word["top"]) - label_top) <= COLUMNAR_LABEL_ROW_TOLERANCE
+                and COLUMNAR_ACCOUNT_DESIGNATOR_RE.fullmatch(str(word["text"]))
+            ]
+            if not designators:
+                continue
+            label_end = min(designators, key=lambda word: float(word["x0"]))
+            label_x1 = float(label_end["x1"])
+            candidates = sorted(
+                (
+                    word
+                    for word in words
+                    if float(word["x0"]) >= label_x1 - 2
+                    and float(word["x0"]) - label_x1 <= COLUMNAR_IDENTIFIER_MAX_GAP
+                    and abs(float(word["top"]) - label_top) <= COLUMNAR_IDENTIFIER_ROW_TOLERANCE
+                ),
+                key=lambda word: float(word["x0"]),
+            )
+            # Treat only the first value-bearing column as the account value.
+            # If it is a page marker, transaction reference, amount, or phone
+            # number, do not skip ahead to an unrelated number later in the row.
+            if candidates:
+                record = _columnar_account_candidate(str(candidates[0]["text"]))
+                if record:
+                    raw_records.append(record)
+    return _dedupe_account_records(raw_records)
+
+
 def account_linkage_review(
     statement_files: Iterable[dict[str, object]], canonical_records: list[tuple[str, str, bool]]
 ) -> dict[str, object]:
@@ -1736,6 +2021,7 @@ def build_preflight(
             structural_stop = True
         lines = [str(line) for line in item.get("lines", [])]
         page_lines = item.get("page_lines", [])
+        page_words = item.get("page_words", [])
         if not structural_stop:
             all_lines.extend(lines)
         parsed_page_lines = page_lines if isinstance(page_lines, list) else []
@@ -1754,6 +2040,8 @@ def build_preflight(
             if (int(raw_page.get("page", 0) or 0), line_number) not in metadata_refs
         ]
         years = detect_years(year_evidence_lines if parsed_page_lines else lines)
+        period_headers = detect_period_headers(parsed_page_lines)
+        year_anchors = detect_year_anchors(parsed_page_lines)
         period_intervals = detect_period_intervals(parsed_page_lines)
         contextual_date_evidence = detect_contextual_date_evidence(
             parsed_page_lines, period_intervals
@@ -1773,6 +2061,8 @@ def build_preflight(
         # safe fallback rather than inventing an interval.
         coverage_years = statement_period_years or sorted(set(years) - set(contextual_years))
         account_hint_records = _collect_account_hint_records(lines)
+        if not account_hint_records and isinstance(page_words, list):
+            account_hint_records = detect_columnar_account_hint_records(page_words)
         statement_files.append(
             {
                 "file": item.get("file"),
@@ -1785,6 +2075,8 @@ def build_preflight(
                 "detected_years": years,
                 "detected_periods": detect_periods(lines),
                 "statement_period_years": statement_period_years,
+                "period_headers": period_headers,
+                "year_anchors": year_anchors,
                 "period_intervals": period_intervals,
                 "document_metadata_dates": document_metadata_dates,
                 "contextual_date_evidence": contextual_date_evidence,
@@ -1836,10 +2128,26 @@ def build_preflight(
     unresolved_years = sorted({year for item in statement_files for year in item.get("unresolved_years", [])})
     coverage_years = sorted({year for item in statement_files for year in item.get("coverage_years", [])})
     period_intervals: list[dict[str, object]] = []
+    period_headers: list[dict[str, object]] = []
+    year_anchors: list[dict[str, object]] = []
     document_metadata_dates: list[dict[str, object]] = []
     contextual_date_evidence: list[dict[str, object]] = []
     for item in statement_files:
         source_file = str(item.get("file") or "")
+        for header in item.get("period_headers", []):
+            if not isinstance(header, dict):
+                continue
+            copied = dict(header)
+            source_ref = header.get("source_ref") if isinstance(header.get("source_ref"), dict) else {}
+            copied["source_ref"] = {"file": source_file, **source_ref}
+            period_headers.append(copied)
+        for anchor in item.get("year_anchors", []):
+            if not isinstance(anchor, dict):
+                continue
+            copied = dict(anchor)
+            source_ref = anchor.get("source_ref") if isinstance(anchor.get("source_ref"), dict) else {}
+            copied["source_ref"] = {"file": source_file, **source_ref}
+            year_anchors.append(copied)
         for interval in item.get("period_intervals", []):
             if not isinstance(interval, dict):
                 continue
@@ -1924,7 +2232,18 @@ def build_preflight(
         warnings.append(message)
         add_gate(gates, "mixed-currencies", message)
 
-    account_records = _collect_account_hint_records(all_lines)
+    # Preserve per-file coordinate fallback records as well as ordinary text
+    # matches. Re-scanning ``all_lines`` alone would discard a valid columnar
+    # account identifier that was intentionally absent from the text-line view.
+    account_record_values: list[tuple[str, str, bool]] = []
+    for item in statement_files:
+        raw_records = item.get("_account_hint_records")
+        if not isinstance(raw_records, list):
+            continue
+        for record in raw_records:
+            if isinstance(record, tuple) and len(record) == 3:
+                account_record_values.append((str(record[0]), str(record[1]), bool(record[2])))
+    account_records = _dedupe_account_records(account_record_values)
     account_hints = [display for display, _compact, _partial in account_records]
     if scope == "one-account" and len(account_hints) > 1:
         message = f"Multiple account hints found; verify this is one account: {', '.join(account_hints[:8])}."
@@ -2025,6 +2344,8 @@ def build_preflight(
             "unresolved_years": unresolved_years,
             "outside_requested_years": outside_years,
             "detected_periods": period_values,
+            "period_headers": period_headers,
+            "year_anchors": year_anchors,
             "period_intervals": period_intervals,
             "document_metadata_dates": document_metadata_dates,
             "contextual_date_evidence": contextual_date_evidence,
@@ -2097,6 +2418,8 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
         "detected_years",
         "detected_periods",
         "statement_period_years",
+        "period_headers",
+        "year_anchors",
         "period_intervals",
         "document_metadata_dates",
         "contextual_years",
@@ -2123,6 +2446,8 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
                 continue
             currency = item.get("currency") if isinstance(item.get("currency"), dict) else {}
             intervals = item.get("period_intervals") if isinstance(item.get("period_intervals"), list) else []
+            headers = item.get("period_headers") if isinstance(item.get("period_headers"), list) else []
+            anchors = item.get("year_anchors") if isinstance(item.get("year_anchors"), list) else []
             metadata_dates = item.get("document_metadata_dates") if isinstance(item.get("document_metadata_dates"), list) else []
             contextual = item.get("contextual_date_evidence") if isinstance(item.get("contextual_date_evidence"), list) else []
 
@@ -2144,6 +2469,18 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
                     parts.append(f"end={end_ref}")
                 return "; ".join(parts)
 
+            def compact_displayed_endpoint(value: object, key: str) -> str:
+                endpoint = value.get(key) if isinstance(value, dict) else None
+                if not isinstance(endpoint, dict):
+                    return ""
+                try:
+                    month = int(endpoint.get("month"))
+                    day = int(endpoint.get("day"))
+                except (TypeError, ValueError):
+                    return ""
+                year = endpoint.get("year")
+                return f"{year}-{month:02d}-{day:02d}" if isinstance(year, int) else f"{month:02d}-{day:02d}"
+
             row = {
                 "file": item.get("file"),
                 "is_pdf": item.get("is_pdf"),
@@ -2154,6 +2491,32 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
                 "detected_years": "; ".join(str(year) for year in item.get("detected_years", [])),
                 "detected_periods": "; ".join(str(period) for period in item.get("detected_periods", [])),
                 "statement_period_years": "; ".join(str(year) for year in item.get("statement_period_years", [])),
+                "period_headers": "; ".join(
+                    " ".join(
+                        part
+                        for part in (
+                            f"{compact_displayed_endpoint(header, 'displayed_start')}..{compact_displayed_endpoint(header, 'displayed_end')}"
+                            if isinstance(header, dict) else "",
+                            compact_source_ref(header),
+                        )
+                        if part
+                    )
+                    for header in headers
+                    if isinstance(header, dict) and header.get("kind") == "period-header"
+                ),
+                "year_anchors": "; ".join(
+                    " ".join(
+                        part
+                        for part in (
+                            str(anchor.get("date") or "") if isinstance(anchor, dict) else "",
+                            str(anchor.get("confidence") or "") if isinstance(anchor, dict) else "",
+                            compact_source_ref(anchor),
+                        )
+                        if part
+                    )
+                    for anchor in anchors
+                    if isinstance(anchor, dict) and anchor.get("kind") == "year-anchor"
+                ),
                 "period_intervals": "; ".join(
                     " ".join(
                         part
