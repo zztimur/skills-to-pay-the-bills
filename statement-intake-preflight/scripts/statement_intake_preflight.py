@@ -163,6 +163,15 @@ COUNTERPARTY_RE = re.compile(
     r"destinatario|empf[aä]nger)\b",
     re.I,
 )
+# A transaction description such as "Administración de Cuenta 12345678" is an
+# account-administration fee plus a movement/reference identifier, not a holder
+# account label. Keep this deliberately narrow and apply it only to the bare
+# account-label matcher below: an explicit "Account ID" or "Cuenta Número"
+# label on the same line remains usable evidence.
+ACCOUNT_ADMINISTRATION_TRANSACTION_RE = re.compile(
+    r"\b(?:administraci[oó]n|mantenimiento|manejo|cargo|comisi[oó]n)\s+de\s+cuenta\b",
+    re.I,
+)
 # Conjunctions/separators that join several account numbers under one plural
 # label ("Account Nos. 11112222 and 33334444", "Accounts 111, 222 & 333"). The
 # space lookahead keeps a bare thousands comma from splitting a single number.
@@ -1390,7 +1399,10 @@ def _collect_account_hint_records(lines: Iterable[str]) -> list[tuple[str, str, 
             # A transfer/counterparty line names the other party's account or
             # IBAN, not the statement holder's; skip it entirely.
             continue
-        for pattern in (ACCOUNT_LABEL_RE, ACCOUNT_BARE_RE):
+        patterns = (ACCOUNT_LABEL_RE,)
+        if not ACCOUNT_ADMINISTRATION_TRANSACTION_RE.search(line):
+            patterns += (ACCOUNT_BARE_RE,)
+        for pattern in patterns:
             for match in pattern.finditer(line):
                 # Split on conjunctions so a plural label ("Account Nos. X and Y")
                 # surfaces every account, not just the first.
@@ -3225,6 +3237,10 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("account-label: a label followed by a word must not yield a hint")
         if detect_account_hints(["Account No. 12 of 34 pages"]):
             failures.append("account-label: a short number embedded in text after a label must not be captured as an account")
+        if detect_account_hints(["2025-02-03 14:17 Administración de Cuenta 12345678 12,00"]):
+            failures.append("account-label: an account-administration transaction reference must not become an account hint")
+        if detect_account_hints(["Administración de Cuenta Account ID 12345678"]) != ["12345678"]:
+            failures.append("account-label: an explicit account ID must remain usable beside an account-administration description")
 
         standalone_spanish_header = [
             "ESTADO DE CUENTA",

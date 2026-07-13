@@ -8,7 +8,7 @@ Are these statement PDFs clean enough, scoped enough, and boring enough to hand 
 
 The point is not to extract interest, rebuild daily balances, choose FX rates, or answer an FBAR question. The point is to stop at the front door and ask whether the statement set looks like one coherent thing: one year, one account or institution, readable text, plausible currency, and no obvious trap hiding behind a tidy filename.
 
-Current package version: 1.4.2.
+Current package version: 1.4.3.
 
 It leaves behind a JSON/CSV handoff so the next skill does not have to rediscover the same intake facts from scratch.
 
