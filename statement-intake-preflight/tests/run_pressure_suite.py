@@ -123,6 +123,21 @@ def coverage_review_of(data) -> dict:
     return coverage.get("period_coverage_review", {}) if isinstance(coverage, dict) else {}
 
 
+def interval_summary(data) -> list[tuple[str, str, str, str]]:
+    coverage = data.get("coverage_hints", {}) if isinstance(data, dict) else {}
+    intervals = coverage.get("period_intervals", []) if isinstance(coverage, dict) else []
+    return [
+        (
+            str(interval.get("start", "")),
+            str(interval.get("end", "")),
+            str(interval.get("confidence", "")),
+            str(interval.get("provenance", "")),
+        )
+        for interval in intervals
+        if isinstance(interval, dict)
+    ]
+
+
 def calendar_gaps_of(data) -> list:
     gaps = coverage_review_of(data).get("calendar_gaps", [])
     return gaps if isinstance(gaps, list) else []
@@ -1188,9 +1203,8 @@ def has_calendar_gap(data: dict | None, start: str, end: str) -> bool:
     return {"start": start, "end": end} in calendar_gaps_of(data)
 
 
-# A labelled month/day range becomes usable only when a future period resolver
-# pairs it with a source-bound table date. Today it records the year globally,
-# but does not manufacture a source interval from the two distinct clues.
+# A labelled month/day range resolves only when a recognized table date fits one
+# calendar placement. The output must retain both source references.
 p = month_range_fixture(
     "baseline-labelled-range-dated-row.pdf",
     "March 1",
@@ -1198,9 +1212,9 @@ p = month_range_fixture(
     dated_rows=["03/15/2025 Synthetic movement"],
 )
 proc, d = run("baseline-labelled-range-dated-row", [str(p)])
-check("BAS-1 labelled month range plus dated row has no current interval provenance",
+check("BAS-1 labelled month range plus dated row resolves with both source references",
       d and d["coverage_hints"]["detected_years"] == [2025]
-      and d["coverage_hints"]["period_intervals"] == []
+      and interval_summary(d) == [("2025-03-01", "2025-03-31", "high", "direct-anchor")]
       and d["coverage_hints"]["period_headers"] == [{
           "kind": "period-header",
           "displayed_start": {"month": 3, "day": 1},
@@ -1213,6 +1227,12 @@ check("BAS-1 labelled month range plus dated row has no current interval provena
           "confidence": "high",
           "source_ref": {"file": str(p), "page": 1, "line": 6},
       }]
+      and d["coverage_hints"]["period_intervals"][0].get("period_header_source_ref") == {
+          "file": str(p), "page": 1, "line": 3,
+      }
+      and d["coverage_hints"]["period_intervals"][0].get("year_anchor_source_ref") == {
+          "file": str(p), "page": 1, "line": 6,
+      }
       and "Synthetic movement" not in json.dumps(d),
       f"coverage={d['coverage_hints'] if d else '?'}")
 csv_rows = []
@@ -1221,10 +1241,11 @@ if d and isinstance(d.get("artifacts"), dict):
     if csv_path.exists():
         with csv_path.open(newline="", encoding="utf-8") as handle:
             csv_rows = list(csv.DictReader(handle))
-check("BAS-1A compact CSV keeps period-header and year-anchor evidence separate",
+check("BAS-1A compact CSV carries direct interval provenance without source text",
       len(csv_rows) == 1
       and csv_rows[0].get("period_headers") == "03-01..03-31 p1/l3"
-      and csv_rows[0].get("year_anchors") == "2025-03-15 high p1/l6",
+      and csv_rows[0].get("year_anchors") == "2025-03-15 high p1/l6"
+      and csv_rows[0].get("period_intervals") == "2025-03-01..2025-03-31 high direct-anchor start=p1/l3; end=p1/l3",
       f"rows={csv_rows}")
 
 p = make_pdf("baseline-spanish-period-header.pdf", [
@@ -1236,7 +1257,7 @@ p = make_pdf("baseline-spanish-period-header.pdf", [
     "15/03/2025 Synthetic movement",
 ])
 proc, d = run("baseline-spanish-period-header", [str(p)])
-check("BAS-1B Spanish Periodo header and table row retain compact body evidence",
+check("BAS-1B Spanish Periodo header resolves from its in-range table anchor",
       d and d["coverage_hints"]["period_headers"] == [{
           "kind": "period-header",
           "displayed_start": {"month": 3, "day": 1},
@@ -1248,7 +1269,8 @@ check("BAS-1B Spanish Periodo header and table row retain compact body evidence"
           "date": "2025-03-15",
           "confidence": "high",
           "source_ref": {"file": str(p), "page": 1, "line": 6},
-      }],
+      }]
+      and interval_summary(d) == [("2025-03-01", "2025-03-31", "high", "direct-anchor")],
       f"coverage={d['coverage_hints'] if d else '?'}")
 
 # A quiet statement is deliberately not treated as malformed source evidence.
@@ -1267,25 +1289,35 @@ check("BAS-2 quiet labelled month range remains without calendar coverage",
       and d["coverage_hints"]["year_anchors"] == [],
       f"gates={gates_of(d)} coverage={d['coverage_hints'] if d else '?'}")
 
-# Only January carries a dated row. February and March are the adjacent quiet
-# headers that later chain resolution must evaluate independently of input order.
+# Only January carries a dated row. February and March are quiet adjacent
+# headers that must resolve through a gap-free, input-order-independent chain.
 sequence = [
     month_range_fixture(
         "baseline-sequence-january.pdf",
         "January 1",
         "January 31",
-        dated_rows=["01/12/2025 Synthetic movement"],
+        dated_rows=["01/15/2025 Synthetic movement"],
     ),
     month_range_fixture("baseline-sequence-february.pdf", "February 1", "February 28"),
     month_range_fixture("baseline-sequence-march.pdf", "March 1", "March 31"),
 ]
 proc, d = run("baseline-partially-anchored-sequence", [str(item) for item in sequence])
-check("BAS-3 partially anchored monthly sequence has no derived intervals yet",
+expected_sequence = [
+    ("2025-01-01", "2025-01-31", "high", "direct-anchor"),
+    ("2025-02-01", "2025-02-28", "medium", "inferred-chain"),
+    ("2025-03-01", "2025-03-31", "medium", "inferred-chain"),
+]
+check("BAS-3 partially anchored monthly sequence derives only adjacent quiet periods",
       d and d["coverage_hints"]["detected_years"] == [2025]
-      and d["coverage_hints"]["period_intervals"] == []
+      and interval_summary(d) == expected_sequence
       and len(d["coverage_hints"]["period_headers"]) == 3
-      and len(d["coverage_hints"]["year_anchors"]) == 1,
+      and len(d["coverage_hints"]["year_anchors"]) == 1
+      and "inferred-period-year" in gates_of(d),
       f"coverage={d['coverage_hints'] if d else '?'}")
+proc, reordered = run("baseline-partially-anchored-sequence-reordered", [str(item) for item in reversed(sequence)])
+check("BAS-3A chained period results are independent of PDF input order",
+      reordered and interval_summary(reordered) == expected_sequence,
+      f"coverage={reordered['coverage_hints'] if reordered else '?'}")
 
 november = month_range_fixture(
     "baseline-anchored-november.pdf",
@@ -1295,13 +1327,48 @@ november = month_range_fixture(
 )
 december = month_range_fixture("baseline-quiet-december.pdf", "December 1", "December 31")
 proc, d = run("baseline-quiet-december", [str(november), str(december)])
-check("BAS-4 quiet December after an anchored November has no inferred year yet",
+check("BAS-4 quiet December after an anchored November is inferred at medium confidence",
       d and d["coverage_hints"]["detected_years"] == [2025]
-      and d["coverage_hints"]["period_intervals"] == []
+      and interval_summary(d) == [
+          ("2025-11-01", "2025-11-30", "high", "direct-anchor"),
+          ("2025-12-01", "2025-12-31", "medium", "inferred-chain"),
+      ]
       and len(d["coverage_hints"]["period_headers"]) == 2
       and len(d["coverage_hints"]["year_anchors"]) == 1
+      and "inferred-period-year" in gates_of(d)
       and d["account_linkage"].get("status") == "linked-by-source-hint",
       f"years={d['coverage_hints']['detected_years'] if d else '?'} linkage={d['account_linkage'] if d else '?'}")
+inferred_preflight = d
+proc, inferred_handoff = run_handoff(
+    "baseline-inferred-chain-handoff",
+    WORK / "baseline-quiet-december.json",
+    gates_of(inferred_preflight),
+)
+check("BAS-4B reviewed handoff accepts but cannot alter inferred source intervals",
+      inferred_handoff and inferred_handoff.get("status") == "reviewed-for-domain-extraction"
+      and inferred_handoff.get("coverage_hints", {}).get("period_intervals")
+      == inferred_preflight.get("coverage_hints", {}).get("period_intervals")
+      and inferred_handoff.get("review", {}).get("accepted_gate_codes") == sorted(gates_of(inferred_preflight)),
+      f"handoff={inferred_handoff}")
+
+# Two quiet sources competing for the same adjacent December placement are
+# ambiguous rather than a valid no-overlap chain.
+duplicate_december_a = month_range_fixture("baseline-duplicate-quiet-december-a.pdf", "December 1", "December 31")
+duplicate_december_b = month_range_fixture("baseline-duplicate-quiet-december-b.pdf", "December 1", "December 31")
+proc, d = run("baseline-duplicate-quiet-chain", [str(november), str(duplicate_december_a), str(duplicate_december_b)])
+check("BAS-4C overlapping quiet chain candidates remain unresolved",
+      d and interval_summary(d) == [("2025-11-01", "2025-11-30", "high", "direct-anchor")]
+      and "inferred-period-year" not in gates_of(d),
+      f"coverage={d['coverage_hints'] if d else '?'} gates={gates_of(d)}")
+
+# A masked identifier remains useful for the account review, but it is not
+# source-strong enough to infer a quiet period in a cross-PDF chain.
+masked_december = month_range_fixture("baseline-masked-december.pdf", "December 1", "December 31", account="****4242")
+proc, d = run("baseline-masked-chain", [str(november), str(masked_december)])
+check("BAS-4A masked account identifiers never authorize a chained interval",
+      d and interval_summary(d) == [("2025-11-01", "2025-11-30", "high", "direct-anchor")]
+      and "inferred-period-year" not in gates_of(d),
+      f"coverage={d['coverage_hints'] if d else '?'} gates={gates_of(d)}")
 
 # Generated-on stays document metadata even when the body has a valid period.
 p = month_range_fixture(
@@ -1336,6 +1403,26 @@ check("BAS-6 out-of-bound movement date does not create an interval from a month
       and d["coverage_hints"]["year_anchors"][0].get("date") == "2025-04-20",
       f"coverage={d['coverage_hints'] if d else '?'}")
 
+# A conflicting anchor blocks chaining even when another same-account source is
+# directly adjacent. The resolver must not treat a bad direct candidate as quiet.
+february = month_range_fixture(
+    "baseline-conflict-february.pdf",
+    "February 1",
+    "February 28",
+    dated_rows=["02/15/2025 Synthetic movement"],
+)
+conflicting_march = month_range_fixture(
+    "baseline-conflict-march.pdf",
+    "March 1",
+    "March 31",
+    dated_rows=["04/20/2025 Synthetic movement"],
+)
+proc, d = run("baseline-conflicting-anchor-chain", [str(february), str(conflicting_march)])
+check("BAS-6A conflicting date-table evidence blocks adjacent chaining",
+      d and interval_summary(d) == [("2025-02-01", "2025-02-28", "high", "direct-anchor")]
+      and "inferred-period-year" not in gates_of(d),
+      f"coverage={d['coverage_hints'] if d else '?'} gates={gates_of(d)}")
+
 # Complete movement dates alone may establish a year today, but never statement
 # coverage without a source-labelled period header.
 p = make_pdf("baseline-dated-rows-no-header.pdf", [
@@ -1363,9 +1450,8 @@ check("BAS-8 adjacent periods with different accounts retain the mixed-account g
       d and "possible-mixed-accounts" in gates_of(d),
       f"accounts={d['account_hints'] if d else '?'} gates={gates_of(d)}")
 
-# This crossing sequence is intentionally evaluated under 2025. The current
-# generic year gate rejects the January source date rather than forcing it into
-# 2025; later chain logic must retain that next-calendar-year placement.
+# This crossing sequence is intentionally evaluated under 2025. A direct
+# January anchor retains its real 2026 placement rather than being forced back.
 cross_december = month_range_fixture(
     "baseline-cross-year-december.pdf",
     "December 1",
@@ -1376,13 +1462,30 @@ cross_january = month_range_fixture(
     "baseline-cross-year-january.pdf",
     "January 1",
     "January 31",
-    dated_rows=["01/10/2026 Synthetic movement"],
+    dated_rows=["01/15/2026 Synthetic movement"],
 )
 proc, d = run("baseline-cross-year-continuity", [str(cross_december), str(cross_january)])
 check("BAS-9 December-to-January source dates are not forced into the requested year",
       d and d["coverage_hints"]["detected_years"] == [2025, 2026]
+      and interval_summary(d) == [
+          ("2025-12-01", "2025-12-31", "high", "direct-anchor"),
+          ("2026-01-01", "2026-01-31", "high", "direct-anchor"),
+      ]
       and "mixed-years" in gates_of(d),
       f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
+
+# The chain version must cross the year boundary in the same direction without
+# relying on a January dated row or the requested tax year as a default.
+quiet_cross_january = month_range_fixture("baseline-cross-year-quiet-january.pdf", "January 1", "January 31")
+proc, d = run("baseline-cross-year-chain", [str(quiet_cross_january), str(cross_december)])
+check("BAS-9A quiet January chains into the following calendar year",
+      d and interval_summary(d) == [
+          ("2025-12-01", "2025-12-31", "high", "direct-anchor"),
+          ("2026-01-01", "2026-01-31", "medium", "inferred-chain"),
+      ]
+      and "inferred-period-year" in gates_of(d)
+      and "mixed-years" in gates_of(d),
+      f"coverage={d['coverage_hints'] if d else '?'} gates={gates_of(d)}")
 
 # Ordered source periods provide the coverage baseline for reordered, duplicate,
 # and omitted-input checks. They use complete dates only to characterize the

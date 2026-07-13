@@ -1349,6 +1349,316 @@ def detect_period_intervals(page_lines: Iterable[object]) -> list[dict[str, obje
     return intervals
 
 
+def _copy_source_ref(value: object) -> dict[str, int]:
+    """Copy a compact page/line reference without carrying source text."""
+    if not isinstance(value, dict):
+        return {}
+    try:
+        page = int(value.get("page", 0))
+        line = int(value.get("line", 0))
+    except (TypeError, ValueError):
+        return {}
+    return {"page": page, "line": line} if page > 0 and line > 0 else {}
+
+
+def _header_needs_period_year_resolution(header: object) -> bool:
+    """Whether a captured header lacks at least one displayed calendar year."""
+    if not isinstance(header, dict):
+        return False
+    start = header.get("displayed_start")
+    end = header.get("displayed_end")
+    return not (isinstance(start, dict) and isinstance(start.get("year"), int)
+                and isinstance(end, dict) and isinstance(end.get("year"), int))
+
+
+def _header_calendar_placements(header: object, start_years: Iterable[int]) -> list[tuple[date, date]]:
+    """Enumerate valid date placements for one source-labelled header.
+
+    An end month/day before the start month/day crosses into the following
+    calendar year.  Explicit endpoint years constrain the placement rather than
+    being rewritten to fit the requested tax year.
+    """
+    if not isinstance(header, dict):
+        return []
+    start_endpoint = header.get("displayed_start")
+    end_endpoint = header.get("displayed_end")
+    if not isinstance(start_endpoint, dict) or not isinstance(end_endpoint, dict):
+        return []
+    try:
+        start_month, start_day = int(start_endpoint["month"]), int(start_endpoint["day"])
+        end_month, end_day = int(end_endpoint["month"]), int(end_endpoint["day"])
+    except (KeyError, TypeError, ValueError):
+        return []
+    explicit_start_year = start_endpoint.get("year")
+    explicit_end_year = end_endpoint.get("year")
+    if not isinstance(explicit_start_year, int):
+        explicit_start_year = None
+    if not isinstance(explicit_end_year, int):
+        explicit_end_year = None
+    crosses_new_year = (end_month, end_day) < (start_month, start_day)
+    placements: list[tuple[date, date]] = []
+    for start_year in sorted({int(value) for value in start_years}):
+        if explicit_start_year is not None and start_year != explicit_start_year:
+            continue
+        end_year = explicit_end_year if explicit_end_year is not None else start_year + int(crosses_new_year)
+        if explicit_end_year is not None and explicit_start_year is None:
+            # A displayed end year determines the only possible start year.
+            expected_start_year = end_year - int(crosses_new_year)
+            if start_year != expected_start_year:
+                continue
+        try:
+            start = date(start_year, start_month, start_day)
+            end = date(end_year, end_month, end_day)
+        except ValueError:
+            continue
+        if end >= start and (start, end) not in placements:
+            placements.append((start, end))
+    return placements
+
+
+def _period_resolution_years(
+    header: object,
+    anchors: Iterable[object],
+    resolved_intervals: Iterable[object],
+    tax_year: int,
+) -> set[int]:
+    """Return the bounded year placements justified by source and adjacency."""
+    years = {tax_year - 1, tax_year, tax_year + 1}
+    if isinstance(header, dict):
+        for endpoint_key in ("displayed_start", "displayed_end"):
+            endpoint = header.get(endpoint_key)
+            if isinstance(endpoint, dict) and isinstance(endpoint.get("year"), int):
+                endpoint_year = int(endpoint["year"])
+                years.update({endpoint_year - 1, endpoint_year, endpoint_year + 1})
+    for anchor in anchors:
+        if not isinstance(anchor, dict):
+            continue
+        try:
+            anchor_year = date.fromisoformat(str(anchor.get("date"))).year
+        except ValueError:
+            continue
+        years.update({anchor_year - 1, anchor_year, anchor_year + 1})
+    for interval in resolved_intervals:
+        if not isinstance(interval, dict):
+            continue
+        for key in ("start", "end"):
+            try:
+                interval_year = date.fromisoformat(str(interval.get(key))).year
+            except ValueError:
+                continue
+            years.update({interval_year - 1, interval_year, interval_year + 1})
+    return years
+
+
+def _direct_header_interval(
+    header: dict[str, object], anchors: list[dict[str, object]], tax_year: int
+) -> dict[str, object] | None:
+    """Resolve a header only when all table anchors fit one calendar placement."""
+    parsed_anchors: list[tuple[date, dict[str, object]]] = []
+    for anchor in anchors:
+        try:
+            parsed = date.fromisoformat(str(anchor.get("date")))
+        except ValueError:
+            continue
+        parsed_anchors.append((parsed, anchor))
+    if not parsed_anchors:
+        return None
+    placements = _header_calendar_placements(
+        header, _period_resolution_years(header, anchors, [], tax_year)
+    )
+    valid = [
+        (start, end)
+        for start, end in placements
+        if all(start <= anchor_date <= end for anchor_date, _anchor in parsed_anchors)
+    ]
+    if len(valid) != 1:
+        return None
+    start, end = valid[0]
+    header_ref = _copy_source_ref(header.get("source_ref"))
+    anchor_refs = [_copy_source_ref(anchor.get("source_ref")) for _anchor_date, anchor in parsed_anchors]
+    anchor_refs = [ref for ref in anchor_refs if ref]
+    interval: dict[str, object] = {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "confidence": "high",
+        "provenance": "direct-anchor",
+        "source_ref": header_ref,
+        "end_source_ref": header_ref,
+        "period_header_source_ref": header_ref,
+    }
+    if anchor_refs:
+        interval["year_anchor_source_ref"] = anchor_refs[0]
+        interval["year_anchor_source_refs"] = anchor_refs
+    return interval
+
+
+def _source_ref_sort_key(value: object) -> tuple[int, int]:
+    copied = _copy_source_ref(value)
+    return (int(copied.get("page", 0)), int(copied.get("line", 0)))
+
+
+def _interval_sort_key(interval: object) -> tuple[str, str, int, int]:
+    if not isinstance(interval, dict):
+        return ("", "", 0, 0)
+    page, line = _source_ref_sort_key(interval.get("source_ref"))
+    return (str(interval.get("start", "")), str(interval.get("end", "")), page, line)
+
+
+def _shared_exact_account_identifier(statement_files: Iterable[dict[str, object]]) -> str | None:
+    """Return one exact account identifier only when every source carries it."""
+    common: set[str] | None = None
+    found_file = False
+    for item in statement_files:
+        records = item.get("_account_hint_records")
+        source_records = records if isinstance(records, list) else []
+        exact = {
+            str(record[1])
+            for record in source_records
+            if isinstance(record, tuple) and len(record) == 3 and not bool(record[2])
+        }
+        if len(exact) != 1:
+            return None
+        found_file = True
+        common = exact if common is None else common & exact
+        if not common:
+            return None
+    if not found_file or common is None or len(common) != 1:
+        return None
+    return next(iter(common))
+
+
+def resolve_header_period_years(statement_files: list[dict[str, object]], tax_year: int) -> None:
+    """Add direct and conservative chained intervals to source statement records.
+
+    Direct evidence must be a labelled header plus in-range dated table rows.
+    Quiet headers are considered only after exact source-linked account evidence
+    establishes one account across the supplied PDFs, and then only in
+    deterministic, gap-free adjacency passes.
+    """
+    resolved: list[dict[str, object]] = []
+    candidates: list[tuple[int, dict[str, object], bool]] = []
+    for file_index, item in enumerate(statement_files):
+        intervals = item.get("period_intervals")
+        if not isinstance(intervals, list):
+            intervals = []
+            item["period_intervals"] = intervals
+        resolved.extend(interval for interval in intervals if isinstance(interval, dict))
+        anchors = [anchor for anchor in item.get("year_anchors", []) if isinstance(anchor, dict)]
+        headers = [header for header in item.get("period_headers", []) if isinstance(header, dict)]
+        for header in headers:
+            if not _header_needs_period_year_resolution(header):
+                continue
+            direct = _direct_header_interval(header, anchors, tax_year)
+            if direct is not None:
+                intervals.append(direct)
+                resolved.append(direct)
+                continue
+            # A source has table-date evidence but it cannot support a unique
+            # placement (out of range or conflicting years). It must never be
+            # promoted through the quieter account-linked chain.
+            candidates.append((file_index, header, bool(anchors)))
+
+    # Chaining is deliberately stricter than the ordinary account linkage
+    # review: partial/masked identifiers are useful review hints, never a basis
+    # for calendar inference. One source alone also cannot form a chain.
+    if len(statement_files) < 2 or _shared_exact_account_identifier(statement_files) is None:
+        for item in statement_files:
+            intervals = item.get("period_intervals")
+            if isinstance(intervals, list):
+                intervals.sort(key=_interval_sort_key)
+        return
+
+    quiet_candidates = [candidate for candidate in candidates if not candidate[2]]
+    quiet_candidates.sort(
+        key=lambda candidate: (
+            _source_ref_sort_key(candidate[1].get("source_ref")),
+            str(statement_files[candidate[0]].get("resolved_file") or statement_files[candidate[0]].get("file") or ""),
+        )
+    )
+    unresolved = list(quiet_candidates)
+    while unresolved:
+        snapshot = list(resolved)
+        proposals: list[tuple[int, dict[str, object], dict[str, object]]] = []
+        for file_index, header, _has_anchors in unresolved:
+            placements = _header_calendar_placements(
+                header,
+                _period_resolution_years(header, [], snapshot, tax_year),
+            )
+            viable: dict[tuple[str, str], tuple[date, date]] = {}
+            for start, end in placements:
+                overlaps = False
+                adjacent = False
+                for interval in snapshot:
+                    try:
+                        other_start = date.fromisoformat(str(interval.get("start")))
+                        other_end = date.fromisoformat(str(interval.get("end")))
+                    except (AttributeError, ValueError):
+                        continue
+                    if not (end < other_start or start > other_end):
+                        overlaps = True
+                        break
+                    if end + timedelta(days=1) == other_start or start == other_end + timedelta(days=1):
+                        adjacent = True
+                if not overlaps and adjacent:
+                    viable[(start.isoformat(), end.isoformat())] = (start, end)
+            if len(viable) != 1:
+                continue
+            start, end = next(iter(viable.values()))
+            header_ref = _copy_source_ref(header.get("source_ref"))
+            proposals.append(
+                (
+                    file_index,
+                    header,
+                    {
+                        "start": start.isoformat(),
+                        "end": end.isoformat(),
+                        "confidence": "medium",
+                        "provenance": "inferred-chain",
+                        "source_ref": header_ref,
+                        "end_source_ref": header_ref,
+                        "period_header_source_ref": header_ref,
+                    },
+                )
+            )
+        if not proposals:
+            break
+        # Proposals are evaluated from one immutable snapshot to make the
+        # result input-order independent. If two quiet headers compete for an
+        # overlapping placement, neither is a uniquely gap-free inference.
+        ambiguous_headers: set[int] = set()
+        for index, (_file_index, header, interval) in enumerate(proposals):
+            try:
+                start = date.fromisoformat(str(interval.get("start")))
+                end = date.fromisoformat(str(interval.get("end")))
+            except ValueError:
+                ambiguous_headers.add(id(header))
+                continue
+            for _other_file_index, other_header, other_interval in proposals[index + 1 :]:
+                try:
+                    other_start = date.fromisoformat(str(other_interval.get("start")))
+                    other_end = date.fromisoformat(str(other_interval.get("end")))
+                except ValueError:
+                    ambiguous_headers.add(id(other_header))
+                    continue
+                if not (end < other_start or start > other_end):
+                    ambiguous_headers.update({id(header), id(other_header)})
+        proposals = [proposal for proposal in proposals if id(proposal[1]) not in ambiguous_headers]
+        if not proposals:
+            break
+        resolved_headers = {id(header) for _file_index, header, _interval in proposals}
+        for file_index, _header, interval in proposals:
+            intervals = statement_files[file_index].get("period_intervals")
+            if isinstance(intervals, list):
+                intervals.append(interval)
+            resolved.append(interval)
+        unresolved = [candidate for candidate in unresolved if id(candidate[1]) not in resolved_headers]
+
+    for item in statement_files:
+        intervals = item.get("period_intervals")
+        if isinstance(intervals, list):
+            intervals.sort(key=_interval_sort_key)
+
+
 def detect_contextual_date_evidence(
     page_lines: Iterable[object], period_intervals: Iterable[dict[str, object]]
 ) -> list[dict[str, object]]:
@@ -2043,23 +2353,6 @@ def build_preflight(
         period_headers = detect_period_headers(parsed_page_lines)
         year_anchors = detect_year_anchors(parsed_page_lines)
         period_intervals = detect_period_intervals(parsed_page_lines)
-        contextual_date_evidence = detect_contextual_date_evidence(
-            parsed_page_lines, period_intervals
-        )
-        contextual_date_evidence.extend(detect_tax_year_boundary_openings(period_intervals, tax_year))
-        statement_period_years = statement_period_years_for_tax_year(period_intervals, tax_year)
-        contextual_years = sorted(
-            {
-                int(evidence["year"])
-                for evidence in contextual_date_evidence
-                if isinstance(evidence.get("year"), int)
-            }
-        )
-        unresolved_years = sorted(set(years) - set(statement_period_years) - set(contextual_years))
-        # Prefer explicit statement-period ranges. When a source only supplies a
-        # month/year label, retain the legacy non-contextual year detector as the
-        # safe fallback rather than inventing an interval.
-        coverage_years = statement_period_years or sorted(set(years) - set(contextual_years))
         account_hint_records = _collect_account_hint_records(lines)
         if not account_hint_records and isinstance(page_words, list):
             account_hint_records = detect_columnar_account_hint_records(page_words)
@@ -2074,25 +2367,49 @@ def build_preflight(
                 "content_bytes": item.get("content_bytes"),
                 "detected_years": years,
                 "detected_periods": detect_periods(lines),
-                "statement_period_years": statement_period_years,
                 "period_headers": period_headers,
                 "year_anchors": year_anchors,
                 "period_intervals": period_intervals,
                 "document_metadata_dates": document_metadata_dates,
-                "contextual_date_evidence": contextual_date_evidence,
-                "contextual_years": contextual_years,
-                "unresolved_years": unresolved_years,
-                "coverage_years": coverage_years,
                 "statement_titles": detect_statement_titles(lines),
                 "currency": detect_currency(lines),
                 "account_hints": [display for display, _compact, _partial in account_hint_records],
                 "_account_hint_records": account_hint_records,
+                "_page_lines": parsed_page_lines,
                 "institution_hints": detect_institution_hints(
                     page_lines if isinstance(page_lines, list) else lines
                 ),
                 "warnings": file_warnings,
             }
         )
+
+    resolve_header_period_years(statement_files, tax_year)
+    for item in statement_files:
+        parsed_page_lines = item.pop("_page_lines", [])
+        intervals = item.get("period_intervals")
+        period_intervals_for_file = intervals if isinstance(intervals, list) else []
+        contextual_date_evidence = detect_contextual_date_evidence(
+            parsed_page_lines if isinstance(parsed_page_lines, list) else [], period_intervals_for_file
+        )
+        contextual_date_evidence.extend(
+            detect_tax_year_boundary_openings(period_intervals_for_file, tax_year)
+        )
+        statement_period_years = statement_period_years_for_tax_year(period_intervals_for_file, tax_year)
+        contextual_years = sorted(
+            {
+                int(evidence["year"])
+                for evidence in contextual_date_evidence
+                if isinstance(evidence.get("year"), int)
+            }
+        )
+        years = [int(year) for year in item.get("detected_years", []) if isinstance(year, int)]
+        item["statement_period_years"] = statement_period_years
+        item["contextual_date_evidence"] = contextual_date_evidence
+        item["contextual_years"] = contextual_years
+        item["unresolved_years"] = sorted(set(years) - set(statement_period_years) - set(contextual_years))
+        # Prefer source-bound statement-period ranges. A plain detected year is
+        # only the conservative fallback when no interval is available.
+        item["coverage_years"] = statement_period_years or sorted(set(years) - set(contextual_years))
 
     resolved_counts: Counter[str] = Counter(
         str(item.get("resolved_file") or item.get("file") or "") for item in statement_files
@@ -2153,9 +2470,20 @@ def build_preflight(
                 continue
             copied = dict(interval)
             source_ref = interval.get("source_ref") if isinstance(interval.get("source_ref"), dict) else {}
-            copied["source_ref"] = {"file": source_file, **source_ref}
             end_source_ref = interval.get("end_source_ref") if isinstance(interval.get("end_source_ref"), dict) else source_ref
+            copied["source_ref"] = {"file": source_file, **source_ref}
             copied["end_source_ref"] = {"file": source_file, **end_source_ref}
+            for ref_key in ("period_header_source_ref", "year_anchor_source_ref"):
+                ref_value = interval.get(ref_key)
+                if isinstance(ref_value, dict):
+                    copied[ref_key] = {"file": source_file, **ref_value}
+            anchor_ref_values = interval.get("year_anchor_source_refs")
+            if isinstance(anchor_ref_values, list):
+                copied["year_anchor_source_refs"] = [
+                    {"file": source_file, **ref_value}
+                    for ref_value in anchor_ref_values
+                    if isinstance(ref_value, dict)
+                ]
             period_intervals.append(copied)
         for evidence in item.get("document_metadata_dates", []):
             if not isinstance(evidence, dict):
@@ -2171,6 +2499,15 @@ def build_preflight(
             source_ref = evidence.get("source_ref") if isinstance(evidence.get("source_ref"), dict) else {}
             copied["source_ref"] = {"file": source_file, **source_ref}
             contextual_date_evidence.append(copied)
+    period_intervals.sort(
+        key=lambda interval: (
+            str(interval.get("start", "")),
+            str(interval.get("end", "")),
+            str(interval.get("source_ref", {}).get("file", "")),
+            int(interval.get("source_ref", {}).get("page", 0) or 0),
+            int(interval.get("source_ref", {}).get("line", 0) or 0),
+        )
+    )
     out_of_period_generated_dates = [
         evidence
         for evidence in document_metadata_dates
@@ -2202,6 +2539,22 @@ def build_preflight(
     if all_lines and not coverage_years:
         warnings.append("No statement years were detected; verify the PDFs belong to the requested tax year.")
         add_gate(gates, "unknown-year-coverage", "No statement years were detected; verify statement periods manually.")
+
+    inferred_period_intervals = [
+        interval for interval in period_intervals
+        if isinstance(interval, dict) and interval.get("provenance") == "inferred-chain"
+    ]
+    if inferred_period_intervals:
+        ranges = ", ".join(
+            f"{interval.get('start')} through {interval.get('end')}"
+            for interval in inferred_period_intervals
+        )
+        message = (
+            "Statement period year(s) were inferred from exact source-linked account identifiers "
+            f"and directly adjacent resolved periods: {ranges}. Review the inferred source periods."
+        )
+        warnings.append(message)
+        add_gate(gates, "inferred-period-year", message)
 
     coverage_review = period_coverage_review(period_intervals, tax_year)
     possible_gaps = coverage_review.get("calendar_gaps")
@@ -2523,6 +2876,7 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
                         for part in (
                             f"{interval.get('start')}..{interval.get('end')}" if isinstance(interval, dict) else "",
                             str(interval.get("confidence")) if isinstance(interval, dict) else "",
+                            str(interval.get("provenance")) if isinstance(interval, dict) else "",
                             compact_period_endpoint_refs(interval),
                         )
                         if part
