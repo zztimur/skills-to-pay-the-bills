@@ -21,6 +21,7 @@ fails. Fixtures are synthetic; account-like numbers are marked for privacy-gate.
 """
 from __future__ import annotations
 
+import csv
 import json
 import re
 import shutil
@@ -492,24 +493,56 @@ check("YR-4 temporal 'since 01.01.2025' keeps the year (not heritage-suppressed)
       d and 2025 in d["coverage_hints"]["detected_years"] and "unknown-year-coverage" not in gates_of(d),
       f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
 
-# Characterization fixture for the next policy chunk. A generated-on date is
-# currently unclassified year evidence, so a statement with no source-bound
-# period interval falls back to that year for coverage and blocks as mixed.
-# Chunk 2 will intentionally replace this expected behavior with a dedicated,
-# source-bound metadata-date review artifact; keep this fixture generic.
-p = make_pdf("yr-generated-date-characterization.pdf", [
+# A generated-on date is document metadata rather than year-coverage evidence.
+# It retains a source anchor and review gate, but a missing statement period must
+# still be reported as unknown coverage instead of being silently "covered" by
+# document production metadata.
+p = make_pdf("yr-generated-date-metadata.pdf", [
     "Example Bank Account Extract",
     "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
     "Currency USD",
     "Transaction date 31/12",
     "Extracto de cuenta generado el 31 de Diciembre de 2026",
 ])
-proc, d = run("yr-generated-date-characterization", [str(p)])
-check("YR-5 generated-on date currently falls back to mixed-year coverage",
-      d and {"mixed-years", "unresolved-year-evidence"}.issubset(gates_of(d))
-      and d["coverage_hints"]["detected_years"] == [2026]
+proc, d = run("yr-generated-date-metadata", [str(p)])
+metadata_dates = d["coverage_hints"].get("document_metadata_dates", []) if d else []
+metadata_ref = metadata_dates[0].get("source_ref", {}) if isinstance(metadata_dates, list) and metadata_dates else {}
+csv_metadata = ""
+if d and isinstance(d.get("artifacts"), dict):
+    csv_path = Path(str(d["artifacts"].get("review_csv", "")))
+    if csv_path.exists():
+        with csv_path.open(newline="", encoding="utf-8") as handle:
+            csv_rows = list(csv.DictReader(handle))
+        if len(csv_rows) == 1:
+            csv_metadata = csv_rows[0].get("document_metadata_dates", "")
+check("YR-5 generated-on date is source-bound metadata, not fallback coverage",
+      d and {"out-of-period-generated-date", "unknown-year-coverage"}.issubset(gates_of(d))
+      and not ({"mixed-years", "unresolved-year-evidence"} & set(gates_of(d)))
+      and d["coverage_hints"]["detected_years"] == []
       and d["coverage_hints"]["statement_period_years"] == []
-      and d["coverage_hints"]["period_intervals"] == [],
+      and d["coverage_hints"]["period_intervals"] == []
+      and isinstance(metadata_ref, dict) and metadata_ref.get("file") == str(p)
+      and metadata_ref.get("page") == 1 and metadata_ref.get("line") == 5
+      and csv_metadata == "2026-12-31 generated-on high p1/l5",
+      f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)} metadata={metadata_dates} csv={csv_metadata!r}")
+proc, handoff = run_handoff("yr-generated-date-no-handoff", WORK / "yr-generated-date-metadata.json", gates_of(d))
+check("YR-5A generated-on gate cannot enter reviewed handoff before dedicated support",
+      proc.returncode != 0 and handoff is None and "out-of-period-generated-date" in proc.stderr,
+      f"exit={proc.returncode} stderr={proc.stderr.strip()}")
+
+p = make_pdf("yr-generated-date-with-period.pdf", [
+    "Example Bank Monthly Statement",
+    "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025",
+    "Currency USD",
+    "Extracto de cuenta generado el 31 de Diciembre de 2026",
+])
+proc, d = run("yr-generated-date-with-period", [str(p)])
+check("YR-6 generated-on metadata does not alter a source-bound 2025 period",
+      d and "out-of-period-generated-date" in gates_of(d)
+      and not ({"mixed-years", "unresolved-year-evidence", "unknown-year-coverage"} & set(gates_of(d)))
+      and d["coverage_hints"]["detected_years"] == [2025]
+      and d["coverage_hints"]["statement_period_years"] == [2025],
       f"years={d['coverage_hints']['detected_years'] if d else '?'} gates={gates_of(d)}")
 
 # --------------------------------------------------------------------------- #

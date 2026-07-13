@@ -537,6 +537,16 @@ TEXT_DATE_DAY_FIRST_RE = re.compile(
     rf"\b(?P<day>\d{{1,2}})(?:st|nd|rd|th)?(?:\s+de\s+|[-\s]+)(?P<month>{_MONTH_TOKEN})\.?(?:\s+de\s+|[-,\s]+)(?P<year>19\d{{2}}|20\d{{2}})\b",
     re.I,
 )
+# A generated-on date describes when the issuer produced the document, not the
+# account activity it covers. Keep this vocabulary narrow and source-bound: a
+# generic date elsewhere on a page must still follow the ordinary evidence
+# path. The record is preserved for review, but it never establishes statement
+# period or fallback year coverage.
+DOCUMENT_GENERATED_ON_RE = re.compile(
+    r"\b(?:extracto|estado)\s+de\s+cuenta\s+generad[oa]\s+el\b|"
+    r"\baccount\s+(?:statement|extract)\s+generated\s+(?:on|at)\b",
+    re.I,
+)
 # This is evaluated only between two complete parsed dates. Include the Spanish
 # range connector ``a`` as well as ``al`` so a labelled ``YYYY/MM/DD a
 # YYYY/MM/DD`` period becomes source-bound coverage evidence instead of a
@@ -1039,6 +1049,45 @@ def line_dates(line: str) -> list[tuple[date, tuple[int, int], str]]:
             seen.add(key)
             deduped.append(item)
     return deduped
+
+
+def detect_document_metadata_dates(page_lines: Iterable[object]) -> list[dict[str, object]]:
+    """Return source-bound generated-on dates without promoting them to coverage.
+
+    Only date tokens after a narrow document-generation label are retained. The
+    compact artifact intentionally carries the parsed date and source anchor,
+    never the extracted statement line itself.
+    """
+    evidence: list[dict[str, object]] = []
+    seen: set[tuple[int, int, str]] = set()
+    for raw_page in page_lines:
+        if not isinstance(raw_page, dict):
+            continue
+        page = int(raw_page.get("page", 0) or 0)
+        raw_lines = raw_page.get("lines")
+        if not isinstance(raw_lines, list):
+            continue
+        for line_number, raw_line in enumerate(raw_lines, start=1):
+            line = str(raw_line)
+            marker = DOCUMENT_GENERATED_ON_RE.search(line)
+            if not marker:
+                continue
+            for parsed, span, confidence in line_dates(line):
+                if span[0] < marker.end():
+                    continue
+                key = (page, line_number, parsed.isoformat())
+                if key in seen:
+                    continue
+                seen.add(key)
+                evidence.append(
+                    {
+                        "kind": "generated-on",
+                        "date": parsed.isoformat(),
+                        "confidence": confidence,
+                        "source_ref": {"page": page, "line": line_number},
+                    }
+                )
+    return evidence
 
 
 def detect_period_intervals(page_lines: Iterable[object]) -> list[dict[str, object]]:
@@ -1688,10 +1737,25 @@ def build_preflight(
         page_lines = item.get("page_lines", [])
         if not structural_stop:
             all_lines.extend(lines)
-        years = detect_years(lines)
-        period_intervals = detect_period_intervals(page_lines if isinstance(page_lines, list) else [])
+        parsed_page_lines = page_lines if isinstance(page_lines, list) else []
+        document_metadata_dates = detect_document_metadata_dates(parsed_page_lines)
+        metadata_refs = {
+            (int(source_ref.get("page", 0)), int(source_ref.get("line", 0)))
+            for evidence in document_metadata_dates
+            if isinstance(evidence.get("source_ref"), dict)
+            for source_ref in [evidence["source_ref"]]
+        }
+        year_evidence_lines = [
+            str(raw_line)
+            for raw_page in parsed_page_lines
+            if isinstance(raw_page, dict) and isinstance(raw_page.get("lines"), list)
+            for line_number, raw_line in enumerate(raw_page["lines"], start=1)
+            if (int(raw_page.get("page", 0) or 0), line_number) not in metadata_refs
+        ]
+        years = detect_years(year_evidence_lines if parsed_page_lines else lines)
+        period_intervals = detect_period_intervals(parsed_page_lines)
         contextual_date_evidence = detect_contextual_date_evidence(
-            page_lines if isinstance(page_lines, list) else [], period_intervals
+            parsed_page_lines, period_intervals
         )
         contextual_date_evidence.extend(detect_tax_year_boundary_openings(period_intervals, tax_year))
         statement_period_years = statement_period_years_for_tax_year(period_intervals, tax_year)
@@ -1721,6 +1785,7 @@ def build_preflight(
                 "detected_periods": detect_periods(lines),
                 "statement_period_years": statement_period_years,
                 "period_intervals": period_intervals,
+                "document_metadata_dates": document_metadata_dates,
                 "contextual_date_evidence": contextual_date_evidence,
                 "contextual_years": contextual_years,
                 "unresolved_years": unresolved_years,
@@ -1770,6 +1835,7 @@ def build_preflight(
     unresolved_years = sorted({year for item in statement_files for year in item.get("unresolved_years", [])})
     coverage_years = sorted({year for item in statement_files for year in item.get("coverage_years", [])})
     period_intervals: list[dict[str, object]] = []
+    document_metadata_dates: list[dict[str, object]] = []
     contextual_date_evidence: list[dict[str, object]] = []
     for item in statement_files:
         source_file = str(item.get("file") or "")
@@ -1782,6 +1848,13 @@ def build_preflight(
             end_source_ref = interval.get("end_source_ref") if isinstance(interval.get("end_source_ref"), dict) else source_ref
             copied["end_source_ref"] = {"file": source_file, **end_source_ref}
             period_intervals.append(copied)
+        for evidence in item.get("document_metadata_dates", []):
+            if not isinstance(evidence, dict):
+                continue
+            copied = dict(evidence)
+            source_ref = evidence.get("source_ref") if isinstance(evidence.get("source_ref"), dict) else {}
+            copied["source_ref"] = {"file": source_file, **source_ref}
+            document_metadata_dates.append(copied)
         for evidence in item.get("contextual_date_evidence", []):
             if not isinstance(evidence, dict):
                 continue
@@ -1789,6 +1862,21 @@ def build_preflight(
             source_ref = evidence.get("source_ref") if isinstance(evidence.get("source_ref"), dict) else {}
             copied["source_ref"] = {"file": source_file, **source_ref}
             contextual_date_evidence.append(copied)
+    out_of_period_generated_dates = [
+        evidence
+        for evidence in document_metadata_dates
+        if str(evidence.get("date", ""))[:4] != str(tax_year)
+    ]
+    if out_of_period_generated_dates:
+        generated_dates = stable_unique(
+            str(evidence.get("date")) for evidence in out_of_period_generated_dates if evidence.get("date")
+        )
+        message = (
+            f"Generated-on document metadata date(s) outside requested tax year {tax_year}: "
+            f"{', '.join(generated_dates)}. They do not establish statement-period coverage."
+        )
+        warnings.append(message)
+        add_gate(gates, "out-of-period-generated-date", message)
     outside_years = [year for year in coverage_years if year != tax_year]
     if outside_years:
         message = f"Detected statement-period year(s) outside requested tax year {tax_year}: {', '.join(str(year) for year in outside_years)}."
@@ -1937,6 +2025,7 @@ def build_preflight(
             "outside_requested_years": outside_years,
             "detected_periods": period_values,
             "period_intervals": period_intervals,
+            "document_metadata_dates": document_metadata_dates,
             "contextual_date_evidence": contextual_date_evidence,
             "period_coverage_review": coverage_review,
             "low_text_files": [
@@ -2008,6 +2097,7 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
         "detected_periods",
         "statement_period_years",
         "period_intervals",
+        "document_metadata_dates",
         "contextual_years",
         "contextual_date_evidence",
         "unresolved_years",
@@ -2032,6 +2122,7 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
                 continue
             currency = item.get("currency") if isinstance(item.get("currency"), dict) else {}
             intervals = item.get("period_intervals") if isinstance(item.get("period_intervals"), list) else []
+            metadata_dates = item.get("document_metadata_dates") if isinstance(item.get("document_metadata_dates"), list) else []
             contextual = item.get("contextual_date_evidence") if isinstance(item.get("contextual_date_evidence"), list) else []
 
             def compact_source_ref(value: object, key: str = "source_ref") -> str:
@@ -2074,6 +2165,20 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
                     )
                     for interval in intervals
                     if isinstance(interval, dict)
+                ),
+                "document_metadata_dates": "; ".join(
+                    " ".join(
+                        part
+                        for part in (
+                            str(evidence.get("date") or ""),
+                            str(evidence.get("kind") or ""),
+                            str(evidence.get("confidence") or ""),
+                            compact_source_ref(evidence),
+                        )
+                        if part
+                    )
+                    for evidence in metadata_dates
+                    if isinstance(evidence, dict)
                 ),
                 "contextual_years": "; ".join(str(year) for year in item.get("contextual_years", [])),
                 "contextual_date_evidence": "; ".join(
@@ -2366,6 +2471,11 @@ def command_review_handoff(args: argparse.Namespace) -> int:
 
     source = load_json_artifact(input_path, "preflight JSON")
     gates = review_gates_for_handoff(source)
+    if any(gate["code"] == "out-of-period-generated-date" for gate in gates):
+        raise PreflightError(
+            "out-of-period-generated-date cannot create a reviewed handoff yet; "
+            "review the document metadata and rerun after dedicated resolution support is available."
+        )
     expected_codes = {gate["code"] for gate in gates}
     accepted_codes = [str(code).strip() for code in (args.accept_gate or []) if str(code).strip()]
     accepted_set = set(accepted_codes)
@@ -3346,20 +3456,16 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("boilerplate-year: a date-form year after 'since' must be kept, not suppressed")
         if detect_years(["Serving customers since 1904"]) != []:
             failures.append("boilerplate-year: a bare heritage 'since 1904' must still be suppressed")
-        # Characterization fixture for the next policy chunk. A source-labelled
-        # generated-on date is currently treated as ordinary year evidence: it
-        # is neither a copyright/heritage marker nor a source-bound statement
-        # period. Keep this generic baseline passing until the metadata-date
-        # policy intentionally replaces it with a dedicated review artifact.
+        # A source-labelled generated-on date is document metadata, not a
+        # statement period. It must retain a source anchor while being excluded
+        # from generic year fallback coverage.
         generated_date_line = "Extracto de cuenta generado el 31 de Diciembre de 2026"
-        if detect_years([generated_date_line]) != [2026]:
-            failures.append("generated-date-characterization: generated-on year must document current detector behavior")
         if detect_periods([generated_date_line]):
-            failures.append("generated-date-characterization: generated-on date must not be a statement-period label")
-        generated_date_characterization = build_preflight(
+            failures.append("generated-date-metadata: generated-on date must not be a statement-period label")
+        generated_date_metadata = build_preflight(
             [
                 synthetic_file(
-                    "generated-date-characterization.pdf",
+                    "generated-date-metadata.pdf",
                     "Example Bank Account Extract\nAccount 12345678\nCurrency USD\n"
                     "Transaction date 31/12\n"
                     + generated_date_line,
@@ -3367,23 +3473,98 @@ def command_self_test(_args: argparse.Namespace) -> int:
             ],
             2025,
             "one-account",
-            root / "generated-date-characterization.json",
-            root / "generated-date-characterization-review.csv",
+            root / "generated-date-metadata.json",
+            root / "generated-date-metadata-review.csv",
         )
         generated_date_gates = {
             str(gate.get("code"))
-            for gate in generated_date_characterization["review_gates"]
+            for gate in generated_date_metadata["review_gates"]
             if isinstance(gate, dict)
         }
-        generated_date_coverage = generated_date_characterization.get("coverage_hints", {})
+        generated_date_coverage = generated_date_metadata.get("coverage_hints", {})
+        generated_date_records = (
+            generated_date_coverage.get("document_metadata_dates", [])
+            if isinstance(generated_date_coverage, dict)
+            else []
+        )
         if not (
-            {"mixed-years", "unresolved-year-evidence"} <= generated_date_gates
+            {"out-of-period-generated-date", "unknown-year-coverage"} <= generated_date_gates
+            and not ({"mixed-years", "unresolved-year-evidence"} & generated_date_gates)
             and isinstance(generated_date_coverage, dict)
-            and generated_date_coverage.get("detected_years") == [2026]
+            and generated_date_coverage.get("detected_years") == []
             and generated_date_coverage.get("period_intervals") == []
+            and generated_date_records == [
+                {
+                    "kind": "generated-on",
+                    "date": "2026-12-31",
+                    "confidence": "high",
+                    "source_ref": {"file": "generated-date-metadata.pdf", "page": 1, "line": 5},
+                }
+            ]
         ):
             failures.append(
-                "generated-date-characterization: expected current fallback coverage path for generated-on year"
+                f"generated-date-metadata: expected source-bound metadata without year coverage, got {generated_date_metadata}"
+            )
+        generated_date_source = root / "generated-date-metadata-source.json"
+        write_json(generated_date_source, generated_date_metadata)
+        generated_date_csv = root / "generated-date-metadata-review.csv"
+        write_review_csv(generated_date_csv, generated_date_metadata)
+        try:
+            command_review_handoff(
+                argparse.Namespace(
+                    input=str(generated_date_source),
+                    out=str(root / "generated-date-metadata-handoff.json"),
+                    accept_gate=sorted(generated_date_gates),
+                    user_review_confirmed=True,
+                    confirm_statement_year=[],
+                    classify_contextual_year=[],
+                    confirm_currency=None,
+                    confirm_one_account=False,
+                    confirm_institution=None,
+                )
+            )
+            failures.append("generated-date-metadata: reviewed handoff must remain unavailable until a dedicated resolution exists")
+        except PreflightError:
+            pass
+        with generated_date_csv.open(newline="", encoding="utf-8") as handle:
+            generated_date_rows = list(csv.DictReader(handle))
+        if (
+            len(generated_date_rows) != 1
+            or generated_date_rows[0].get("document_metadata_dates") != "2026-12-31 generated-on high p1/l5"
+        ):
+            failures.append(f"generated-date-metadata: expected compact CSV source reference, got {generated_date_rows}")
+
+        # A real 2025 period remains coverage evidence even when a document
+        # carries an out-of-period generated-on date.
+        generated_date_with_period = build_preflight(
+            [
+                synthetic_file(
+                    "generated-date-with-period.pdf",
+                    "Example Bank Monthly Statement\nAccount 12345678\n"
+                    "Statement period January 1 2025 to January 31 2025\nCurrency USD\n"
+                    + generated_date_line,
+                )
+            ],
+            2025,
+            "one-account",
+            root / "generated-date-with-period.json",
+            root / "generated-date-with-period-review.csv",
+        )
+        generated_period_gates = {
+            str(gate.get("code"))
+            for gate in generated_date_with_period["review_gates"]
+            if isinstance(gate, dict)
+        }
+        generated_period_coverage = generated_date_with_period.get("coverage_hints", {})
+        if not (
+            "out-of-period-generated-date" in generated_period_gates
+            and not ({"mixed-years", "unresolved-year-evidence", "unknown-year-coverage"} & generated_period_gates)
+            and isinstance(generated_period_coverage, dict)
+            and generated_period_coverage.get("detected_years") == [2025]
+            and generated_period_coverage.get("statement_period_years") == [2025]
+        ):
+            failures.append(
+                f"generated-date-metadata: expected 2025 period coverage to remain intact, got {generated_date_with_period}"
             )
         # Suppression is per-token: a real out-of-year period must still gate
         # even when the same year also appears in a footer.
