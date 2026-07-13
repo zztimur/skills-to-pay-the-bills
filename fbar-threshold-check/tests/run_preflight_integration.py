@@ -123,6 +123,85 @@ def make_sanitized_cop_style_fixture(work: Path) -> list[Path]:
     return paths
 
 
+def make_compact_cop_column_fixture(work: Path, *, saldo_header: str = "SALDO") -> list[Path]:
+    """Generate a redacted compact COP table with a final PDF-positioned Saldo cell.
+
+    The unrelated numeric value between Descripción and Saldo is intentional:
+    it proves the extractor chooses the final column by coordinates rather than
+    a last-number heuristic. The fixture contains only invented values.
+    """
+    quarters = (
+        (
+            "q1",
+            "2025/01/01",
+            "2025/03/31",
+            [
+                ("1/01", "COMPRA REDACTADA", "9,800,000"),
+                ("4/01", "COMPRA REDACTADA", "9,876,543.21"),
+                ("31/01", "CIERRE REDACTADO", "9,850,000"),
+                ("28/02", "CIERRE REDACTADO", "9,875,000"),
+                ("31/03", "CIERRE REDACTADO", "9,900,000"),
+            ],
+        ),
+        (
+            "q2",
+            "2025/04/01",
+            "2025/06/30",
+            [
+                ("1/04", "COMPRA REDACTADA", "9,950,000"),
+                ("30/04", "CIERRE REDACTADO", "9,930,000"),
+                ("31/05", "CIERRE REDACTADO", "9,940,000"),
+                ("15/06", "ABONO REDACTADO", "9,925,000"),
+                ("30/06", "CIERRE REDACTADO", "9,960,000"),
+            ],
+        ),
+        (
+            "q3",
+            "2025/07/01",
+            "2025/09/30",
+            [
+                ("1/07", "COMPRA REDACTADA", "9,975,000"),
+                ("31/07", "CIERRE REDACTADO", "10,000,000"),
+                ("31/08", "CIERRE REDACTADO", "10,100,000"),
+                ("15/09", "ABONO REDACTADO", "10,250,000"),
+                ("30/09", "CIERRE REDACTADO", "10,200,000"),
+            ],
+        ),
+        (
+            "q4",
+            "2025/10/01",
+            "2025/12/31",
+            [
+                ("1/10", "COMPRA REDACTADA", "10,300,000"),
+                ("10/10", "AJUSTE REDACTADO", "10,500,000"),
+                ("31/10", "CIERRE REDACTADO", "10,400,000"),
+                ("30/11", "CIERRE REDACTADO", "10,350,000"),
+                ("31/12", "CIERRE REDACTADO", "10,250,000"),
+            ],
+        ),
+    )
+    paths: list[Path] = []
+    for quarter, start, end, rows in quarters:
+        path = work / f"compact-cop-{saldo_header.lower()}-{quarter}.pdf"
+        document = canvas.Canvas(str(path))
+        document.drawString(40, 800, "ESTADO DE CUENTA REDACTADO")
+        document.drawString(40, 782, "NÚMERO 76543210")  # privacy-gate: allow (synthetic account fixture)
+        document.drawString(40, 764, f"DESDE {start} HASTA {end}")
+        document.drawString(40, 720, "FECHA")
+        document.drawString(130, 720, "DESCRIPCIÓN")
+        document.drawString(535, 720, saldo_header)
+        y = 700
+        for transaction_date, description, balance in rows:
+            document.drawString(40, y, transaction_date)
+            document.drawString(130, y, description)
+            document.drawString(450, y, "700,001")
+            document.drawString(535, y, balance)
+            y -= 18
+        document.save()
+        paths.append(path)
+    return paths
+
+
 def run(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, capture_output=True, text=True)
 
@@ -384,6 +463,104 @@ with tempfile.TemporaryDirectory(prefix="fbar-preflight-integration-") as tempor
         "FLOW-1 sanitized Spanish table fixture preserves source-bound dates, balances, coverage, and reviewed institution",
         flow_ok,
         "" if flow_ok else json.dumps(flow_checks, sort_keys=True),
+    )
+
+    # The compact table has no timestamp, no per-row currency marker, and an
+    # incidental numeric value before the final balance. It can use the strict
+    # coordinate parser only after the reviewer has confirmed COP in the
+    # preflight handoff.
+    compact_style = make_compact_cop_column_fixture(work)
+    compact_preflight_process, compact_preflight_path, compact_preflight_data = preflight(
+        work, "compact-cop", compact_style, require_institution=True
+    )
+    compact_handoff_process, compact_handoff_path, _compact_handoff_data = create_reviewed_handoff(
+        work, "compact-cop", compact_preflight_path, compact_preflight_data or {}, institution="Marca66"
+    )
+    compact_extract_process, _compact_account_path, compact_account_data = extract(
+        work, "compact-cop", compact_style, compact_handoff_path
+    )
+    compact_rows = compact_account_data.get("daily_ledger") if isinstance(compact_account_data, dict) else []
+    compact_observed = {
+        str(row.get("date")): row
+        for row in compact_rows
+        if isinstance(row, dict) and row.get("balance_source") == "observed"
+    } if isinstance(compact_rows, list) else {}
+    compact_values_match = {
+        day: Decimal(str(row.get("native_balance"))) for day, row in compact_observed.items()
+    } == expected_observed
+    compact_notes = [note for row in compact_observed.values() for note in row.get("notes", []) if isinstance(note, str)]
+    compact_confidence = {row.get("confidence") for row in compact_observed.values()}
+    compact_warnings = compact_account_data.get("warnings") if isinstance(compact_account_data, dict) else []
+    compact_checks = {
+        "reviewed_preflight": compact_preflight_process.returncode == 0 and compact_handoff_process.returncode == 0,
+        "all_expected_balances": compact_values_match,
+        "high_confidence": compact_confidence == {"high"},
+        "final_saldo_column_note": any("compact COP Fecha Descripción Saldo table by PDF columns" in note for note in compact_notes),
+        "no_omitted_rows": not any("Compact COP table" in str(warning) and "omitted" in str(warning) for warning in compact_warnings),
+    }
+    compact_detail = {
+        **compact_checks,
+        "missing_dates": sorted(set(expected_observed) - set(compact_observed)),
+        "unexpected_dates": sorted(set(compact_observed) - set(expected_observed)),
+    }
+    check(
+        "FLOW-2 compact COP columns select only the final Saldo cell after a reviewed COP handoff",
+        compact_extract_process.returncode == 0 and all(compact_checks.values()),
+        "" if all(compact_checks.values()) else json.dumps(compact_detail, sort_keys=True),
+    )
+
+    # A header typo must not turn on the compact parser. The existing generic
+    # path can still expose medium-confidence rows for reviewer inspection.
+    mismatch_style = make_compact_cop_column_fixture(work, saldo_header="SALDOS")
+    mismatch_preflight_process, mismatch_preflight_path, mismatch_preflight_data = preflight(
+        work, "compact-cop-mismatch", mismatch_style, require_institution=True
+    )
+    mismatch_handoff_process, mismatch_handoff_path, _mismatch_handoff_data = create_reviewed_handoff(
+        work, "compact-cop-mismatch", mismatch_preflight_path, mismatch_preflight_data or {}, institution="Marca66"
+    )
+    mismatch_extract_process, _mismatch_account_path, mismatch_account_data = extract(
+        work, "compact-cop-mismatch", mismatch_style, mismatch_handoff_path
+    )
+    mismatch_rows = mismatch_account_data.get("daily_ledger") if isinstance(mismatch_account_data, dict) else []
+    mismatch_observed = [
+        row for row in mismatch_rows if isinstance(row, dict) and row.get("balance_source") == "observed"
+    ] if isinstance(mismatch_rows, list) else []
+    mismatch_notes = [note for row in mismatch_observed for note in row.get("notes", []) if isinstance(note, str)]
+    mismatch_checks = {
+        "reviewed_preflight": mismatch_preflight_process.returncode == 0 and mismatch_handoff_process.returncode == 0,
+        "generic_rows_remain_reviewable": len(mismatch_observed) == len(expected_observed)
+        and {row.get("confidence") for row in mismatch_observed} == {"medium"},
+        "compact_profile_not_used": not any("compact COP Fecha Descripción Saldo table by PDF columns" in note for note in mismatch_notes),
+    }
+    check(
+        "GUARD-1 compact COP parsing refuses a mismatched header",
+        mismatch_extract_process.returncode == 0 and all(mismatch_checks.values()),
+        "" if all(mismatch_checks.values()) else json.dumps(mismatch_checks, sort_keys=True),
+    )
+
+    # Missing source-bound page periods must keep the coordinate path off.
+    unbound_data = json.loads(compact_preflight_path.read_text(encoding="utf-8"))
+    for item in unbound_data.get("statement_files", []):
+        if isinstance(item, dict):
+            item["period_intervals"] = []
+    compact_preflight_path.write_text(json.dumps(unbound_data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    unbound_handoff_process, unbound_handoff_path, _unbound_handoff_data = create_reviewed_handoff(
+        work, "compact-cop-unbound", compact_preflight_path, unbound_data, institution="Marca66"
+    )
+    unbound_extract_process, _unbound_account_path, unbound_account_data = extract(
+        work, "compact-cop-unbound", compact_style, unbound_handoff_path
+    )
+    unbound_rows = unbound_account_data.get("daily_ledger") if isinstance(unbound_account_data, dict) else []
+    unbound_observed = [
+        row for row in unbound_rows if isinstance(row, dict) and row.get("balance_source") == "observed"
+    ] if isinstance(unbound_rows, list) else []
+    unbound_notes = [note for row in unbound_observed for note in row.get("notes", []) if isinstance(note, str)]
+    check(
+        "GUARD-2 compact COP parsing refuses pages without a re-verified period",
+        unbound_handoff_process.returncode == 0 and unbound_extract_process.returncode == 0
+        and not unbound_observed
+        and not any("compact COP Fecha Descripción Saldo table by PDF columns" in note for note in unbound_notes),
+        unbound_extract_process.stderr.strip(),
     )
 
     reordered_process, _reordered_path, _reordered_data = extract(work, "reordered", [february, january], ready_path)

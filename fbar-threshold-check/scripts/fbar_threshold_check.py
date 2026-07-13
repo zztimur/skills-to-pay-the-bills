@@ -219,6 +219,14 @@ PERIOD_END_SUMMARY_RE = re.compile(
 COP_TRANSACTION_TABLE_HEADER_RE = re.compile(
     r"^fecha\s+descripci[oó]n\s+movimiento\s+tarjeta\s+d[eé]bito\s+abono\s+saldo$", re.I
 )
+# The compact three-column form is deliberately recognised from PDF geometry,
+# not flattened text. In this layout the transaction description can contain
+# arbitrary numbers, so a "last numeric token" fallback is not safe enough to
+# identify the final Saldo cell.
+COMPACT_COP_TABLE_MIN_DATE_TO_DESCRIPTION_GAP = 50.0
+COMPACT_COP_TABLE_MIN_DESCRIPTION_TO_SALDO_GAP = 100.0
+COMPACT_COP_SALDO_COLUMN_TOLERANCE = 24.0
+PDF_WORD_ROW_TOLERANCE = 1.5
 ISO_TIMESTAMP_RE = re.compile(r"\b20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\b")
 
 # One monetary token. Whitespace bridges digit groups only in the explicit
@@ -585,6 +593,194 @@ def is_whole_cop_comma_grouped_token(token: str) -> bool:
     return bool(re.fullmatch(r"\d{1,3}(?:,\d{3})+", normalized))
 
 
+def visual_word_rows(words: list[dict[str, object]]) -> list[list[dict[str, object]]]:
+    """Group pdfplumber words into visual rows without retaining page text."""
+    rows: list[list[dict[str, object]]] = []
+    for word in sorted(words, key=lambda item: (float(item.get("top", 0)), float(item.get("x0", 0)))):
+        if not rows or abs(float(word.get("top", 0)) - float(rows[-1][0].get("top", 0))) > PDF_WORD_ROW_TOLERANCE:
+            rows.append([word])
+        else:
+            rows[-1].append(word)
+    return rows
+
+
+def compact_cop_table_header_columns(
+    visual_rows: list[list[dict[str, object]]],
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]] | None:
+    """Return a trusted compact `Fecha | Descripción | Saldo` header only."""
+    for row in visual_rows:
+        by_label: dict[str, list[dict[str, object]]] = defaultdict(list)
+        for word in row:
+            by_label[clean_text(word.get("text")).casefold()].append(word)
+        fechas = by_label.get("fecha", [])
+        descriptions = [*by_label.get("descripción", []), *by_label.get("descripcion", [])]
+        saldos = by_label.get("saldo", [])
+        if len(fechas) != 1 or len(descriptions) != 1 or len(saldos) != 1:
+            continue
+        fecha, description, saldo = fechas[0], descriptions[0], saldos[0]
+        fecha_x = float(fecha.get("x0", 0))
+        description_x = float(description.get("x0", 0))
+        saldo_x = float(saldo.get("x0", 0))
+        if (
+            fecha_x < description_x < saldo_x
+            and description_x - fecha_x >= COMPACT_COP_TABLE_MIN_DATE_TO_DESCRIPTION_GAP
+            and saldo_x - description_x >= COMPACT_COP_TABLE_MIN_DESCRIPTION_TO_SALDO_GAP
+        ):
+            return fecha, description, saldo
+    return None
+
+
+def compact_cop_amount_word(word: dict[str, object]) -> tuple[Decimal, str, tuple[str, ...]] | None:
+    """Accept exactly one isolated monetary word in the trusted Saldo column."""
+    raw = clean_text(word.get("text"))
+    values = parse_money_values(raw)
+    if len(values) != 1:
+        return None
+    amount, token, position, notes = values[0]
+    if position != 0 or token != raw:
+        return None
+    return amount, token, notes
+
+
+def compact_cop_source_ref(
+    source_rows: list[tuple[SourceRef, str]],
+    date_token: str,
+    balance_token: str,
+    used_line_numbers: set[int],
+) -> SourceRef | None:
+    """Bind a visual row back to one unused, source-text line on the page."""
+    date_pattern = re.compile(rf"(?<!\d){re.escape(date_token)}(?!\d)")
+    for ref, line in source_rows:
+        if ref.line in used_line_numbers:
+            continue
+        if date_pattern.search(line) and balance_token in line:
+            used_line_numbers.add(ref.line)
+            return ref
+    return None
+
+
+def extract_compact_cop_table_candidates(
+    pdf_paths: list[str],
+    lines: list[tuple[SourceRef, str]],
+    tax_year: int,
+    currency: str,
+    page_period_contexts: dict[tuple[str, int], tuple[PagePeriodContext, ...]],
+    currency_confirmed: bool,
+) -> tuple[list[BalanceCandidate], set[tuple[str, int]], list[str]]:
+    """Extract only final Saldo cells from a reviewed, source-bound compact COP table.
+
+    A compact page is handled only when the user confirmed COP, exactly one
+    preflight period was re-verified on that page, the visual header has all
+    three expected columns, each row has one left-column DD/MM date, and one
+    monetary word aligns with the final Saldo header.  Any malformed row is
+    omitted rather than falling back to an unanchored numeric token.
+    """
+    if currency != "COP" or not currency_confirmed:
+        return [], set(), []
+    try:
+        import pdfplumber  # type: ignore
+    except ImportError as exc:  # pragma: no cover - environment-specific.
+        raise FbarError("pdfplumber is required for extract-account. Install/use a runtime with pdfplumber.", 2) from exc
+
+    source_rows_by_page: dict[tuple[str, int], list[tuple[SourceRef, str]]] = defaultdict(list)
+    for ref, line in lines:
+        source_rows_by_page[(normalize_preflight_path(ref.file), ref.page)].append((ref, line))
+
+    candidates: list[BalanceCandidate] = []
+    handled_pages: set[tuple[str, int]] = set()
+    warnings: list[str] = []
+    for raw_path in pdf_paths:
+        path = Path(raw_path)
+        try:
+            with pdfplumber.open(str(path)) as pdf:
+                for page_number, page in enumerate(pdf.pages, start=1):
+                    page_key = (normalize_preflight_path(path), page_number)
+                    contexts = page_period_contexts.get(page_key, ())
+                    if len(contexts) != 1:
+                        continue
+                    visual_rows = visual_word_rows(page.extract_words(use_text_flow=True, keep_blank_chars=False))
+                    header = compact_cop_table_header_columns(visual_rows)
+                    if header is None:
+                        continue
+                    fecha_header, description_header, saldo_header = header
+                    handled_pages.add(page_key)
+                    header_top = float(fecha_header.get("top", 0))
+                    date_column_right = (float(fecha_header.get("x0", 0)) + float(description_header.get("x0", 0))) / 2
+                    saldo_column_left = float(saldo_header.get("x0", 0)) - COMPACT_COP_SALDO_COLUMN_TOLERANCE
+                    source_rows = source_rows_by_page.get(page_key, [])
+                    used_line_numbers: set[int] = set()
+                    matched_rows = 0
+                    omitted_rows = 0
+                    for row in visual_rows:
+                        if not row or float(row[0].get("top", 0)) <= header_top + PDF_WORD_ROW_TOLERANCE:
+                            continue
+                        date_words = [
+                            word
+                            for word in row
+                            if float(word.get("x0", 0)) <= date_column_right
+                            and SHORT_TRANSACTION_DATE_RE.fullmatch(clean_text(word.get("text")))
+                        ]
+                        if len(date_words) != 1:
+                            continue
+                        matched_rows += 1
+                        date_token = clean_text(date_words[0].get("text"))
+                        saldo_words = [
+                            word
+                            for word in row
+                            if float(word.get("x0", 0)) >= saldo_column_left and compact_cop_amount_word(word) is not None
+                        ]
+                        if len(saldo_words) != 1:
+                            omitted_rows += 1
+                            continue
+                        parsed_amount = compact_cop_amount_word(saldo_words[0])
+                        if parsed_amount is None:  # defensive: filtered above
+                            omitted_rows += 1
+                            continue
+                        amount, token, parse_notes = parsed_amount
+                        inferred_date = infer_short_transaction_date(date_token, contexts, day_first=True)
+                        if inferred_date is None or inferred_date.value.year != tax_year:
+                            omitted_rows += 1
+                            continue
+                        source_ref = compact_cop_source_ref(source_rows, date_token, token, used_line_numbers)
+                        if source_ref is None:
+                            omitted_rows += 1
+                            continue
+                        contextual_cop_grouping = is_whole_cop_comma_grouped_token(token)
+                        notes = [
+                            "Recognized source-bound compact COP Fecha Descripción Saldo table by PDF columns; selected the final Saldo cell.",
+                            inferred_date.note,
+                        ]
+                        if contextual_cop_grouping:
+                            notes.append(
+                                "Whole-COP comma grouping accepted only in the confirmed, source-bound compact COP Saldo table context."
+                            )
+                        else:
+                            notes.extend(parse_notes)
+                        candidates.append(
+                            BalanceCandidate(
+                                balance_date=inferred_date.value,
+                                amount=amount,
+                                currency=currency,
+                                confidence="high" if not parse_notes or contextual_cop_grouping else "medium",
+                                source=source_ref,
+                                notes=tuple(notes),
+                            )
+                        )
+                    if matched_rows == 0:
+                        warnings.append(
+                            f"Compact COP table on {path.name} page {page_number} had no source-bound DD/MM transaction rows."
+                        )
+                    elif omitted_rows:
+                        warnings.append(
+                            f"Compact COP table on {path.name} page {page_number} omitted {omitted_rows} of {matched_rows} DD/MM row(s) that could not be bound to one final Saldo cell and source line."
+                        )
+        except FbarError:
+            raise
+        except Exception as exc:
+            raise FbarError(f"Could not read {path} as a PDF: {exc}", 2) from exc
+    return candidates, handled_pages, warnings
+
+
 def infer_currency(text: str, override: str | None, warnings: list[str]) -> str:
     if override:
         code = normalize_currency(override)
@@ -720,6 +916,8 @@ def extract_balance_candidates(
     currency: str,
     page_period_contexts: dict[tuple[str, int], tuple[PagePeriodContext, ...]] | None = None,
     currency_confirmed: bool = False,
+    excluded_page_keys: set[tuple[str, int]] | None = None,
+    external_candidate_count: int = 0,
 ) -> tuple[list[BalanceCandidate], list[str]]:
     warnings: list[str] = []
     candidates: list[BalanceCandidate] = []
@@ -735,9 +933,12 @@ def extract_balance_candidates(
     bare_small_amount_candidates = 0
     ambiguous_amount_lines = 0
     period_contexts = page_period_contexts or {}
+    excluded_pages = excluded_page_keys or set()
     for ref, line in lines:
         lower = line.lower()
         page_key = (normalize_preflight_path(ref.file), ref.page)
+        if page_key in excluded_pages:
+            continue
         page_lower = page_text[(ref.file, ref.page)]
         inferred_short_date = infer_short_transaction_date(
             line,
@@ -891,7 +1092,7 @@ def extract_balance_candidates(
         warnings.append(
             f"{ambiguous_amount_lines} balance line(s) had ambiguous thousands/decimal separators; verify native balance magnitudes in the review CSV."
         )
-    if not candidates:
+    if not candidates and not external_candidate_count:
         warnings.append("No balance candidates were extracted from the statement text.")
     return candidates, warnings
 
@@ -1801,14 +2002,30 @@ def command_extract_account(args: argparse.Namespace) -> int:
         warnings.append("Account currency is not confirmed; do not confirm this ledger until resolved.")
     institution = resolve_institution(preflight, user_resolutions, args.institution)
 
-    candidates, candidate_warnings = extract_balance_candidates(
+    compact_candidates, compact_page_keys, compact_warnings = extract_compact_cop_table_candidates(
+        args.pdf,
+        lines,
+        args.tax_year,
+        currency,
+        page_period_contexts,
+        currency_confirmed=bool(confirmed_currency and confirmed_currency == currency),
+    )
+    fallback_candidates, candidate_warnings = extract_balance_candidates(
         lines,
         args.tax_year,
         currency,
         page_period_contexts=page_period_contexts,
         currency_confirmed=bool(confirmed_currency and confirmed_currency == currency),
+        excluded_page_keys=compact_page_keys,
+        external_candidate_count=len(compact_candidates),
     )
+    candidates = [*compact_candidates, *fallback_candidates]
+    warnings.extend(compact_warnings)
     warnings.extend(candidate_warnings)
+    # The compact-coordinate path opens the PDFs after the first post-text
+    # fingerprint check. Re-check now so every extraction pass is bound to the
+    # exact preflighted bytes, not merely the initial text-layer pass.
+    verify_preflight_statement_fingerprints(preflight, args.pdf)
     daily_rows, coverage, coverage_warnings = build_daily_rows(args.tax_year, currency, candidates)
     warnings.extend(coverage_warnings)
 
