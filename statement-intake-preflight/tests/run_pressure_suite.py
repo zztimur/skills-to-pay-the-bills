@@ -1458,6 +1458,41 @@ check("BAS-5 future generated-on remains a review gate beside a valid body inter
       and d["coverage_hints"]["year_anchors"] == [],
       f"gates={gates_of(d)} coverage={d['coverage_hints'] if d else '?'}")
 
+future_generated_preflight = d
+future_generated_source = WORK / "baseline-future-generated-on.json"
+future_generated_gates = gates_of(future_generated_preflight)
+future_generated_before = future_generated_source.read_bytes() if future_generated_source.exists() else b""
+proc, future_generated_handoff = run_handoff(
+    "baseline-future-generated-on-reviewed",
+    future_generated_source,
+    future_generated_gates,
+    ["--confirm-generated-on-date", "2026-06-01"],
+)
+generated_resolution = future_generated_handoff.get("user_resolutions", {}).get("generated_on_dates", {}) if future_generated_handoff else {}
+check("BAS-5A valid body evidence still requires and preserves exact generated-on metadata confirmation",
+      proc.returncode == 0 and future_generated_preflight and future_generated_handoff
+      and future_generated_gates == ["out-of-period-generated-date"]
+      and future_generated_handoff.get("coverage_hints") == future_generated_preflight.get("coverage_hints")
+      and future_generated_source.read_bytes() == future_generated_before
+      and future_generated_handoff.get("coverage_hints", {}).get("statement_period_years") == [2025]
+      and isinstance(generated_resolution, dict)
+      and generated_resolution.get("confirmed_dates") == ["2026-06-01"]
+      and generated_resolution.get("source_date_evidence")
+      == future_generated_preflight.get("coverage_hints", {}).get("document_metadata_dates")
+      and generated_resolution.get("resolved_gate_codes") == ["out-of-period-generated-date"],
+      f"exit={proc.returncode} stderr={proc.stderr.strip()} resolution={generated_resolution}")
+
+for label, confirmation in (("missing", []), ("wrong", ["2026-06-02"])):
+    proc, rejected_handoff = run_handoff(
+        f"baseline-future-generated-on-{label}-confirmation",
+        future_generated_source,
+        future_generated_gates,
+        [value for date_value in confirmation for value in ("--confirm-generated-on-date", date_value)],
+    )
+    check(f"BAS-5B future generated-on {label} confirmation is rejected despite valid body evidence",
+          proc.returncode != 0 and rejected_handoff is None and "confirm-generated-on-date" in proc.stderr,
+          f"exit={proc.returncode} stderr={proc.stderr.strip()}")
+
 # A table date outside a labelled range cannot currently create an interval from
 # that header; retaining this fixture prevents a later resolver from accepting
 # it as an in-range direct anchor.

@@ -4943,6 +4943,52 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append(
                 f"generated-date-metadata: expected 2025 period coverage to remain intact, got {generated_date_with_period}"
             )
+        generated_period_source = root / "generated-date-with-period-source.json"
+        generated_period_before = json.dumps(generated_date_with_period, sort_keys=True)
+        write_json(generated_period_source, generated_date_with_period)
+        generated_period_handoff = root / "generated-date-with-period-handoff.json"
+        try:
+            command_review_handoff(
+                argparse.Namespace(
+                    input=str(generated_period_source),
+                    out=str(generated_period_handoff),
+                    accept_gate=sorted(generated_period_gates),
+                    user_review_confirmed=True,
+                    confirm_generated_on_date=["2026-12-31"],
+                )
+            )
+            generated_period_reviewed = load_json_artifact(generated_period_handoff, "generated-date period handoff")
+            generated_period_resolution = generated_period_reviewed.get("user_resolutions", {}).get("generated_on_dates", {})
+            if (
+                load_json_artifact(generated_period_source, "generated-date period source") != generated_date_with_period
+                or json.dumps(generated_date_with_period, sort_keys=True) != generated_period_before
+                or generated_period_reviewed.get("coverage_hints") != generated_date_with_period.get("coverage_hints")
+                or not isinstance(generated_period_resolution, dict)
+                or generated_period_resolution.get("confirmed_dates") != ["2026-12-31"]
+                or generated_period_resolution.get("source_date_evidence")
+                != generated_period_coverage.get("document_metadata_dates")
+            ):
+                failures.append(
+                    f"generated-date-metadata: expected source-bound confirmation beside a valid body period, got {generated_period_reviewed}"
+                )
+        except PreflightError as exc:
+            failures.append(f"generated-date-metadata: expected valid body-period confirmation to succeed ({exc})")
+        for label, confirmed_dates in (("missing", []), ("wrong", ["2026-12-30"])):
+            try:
+                command_review_handoff(
+                    argparse.Namespace(
+                        input=str(generated_period_source),
+                        out=str(root / f"generated-date-with-period-{label}.json"),
+                        accept_gate=sorted(generated_period_gates),
+                        user_review_confirmed=True,
+                        confirm_generated_on_date=confirmed_dates,
+                    )
+                )
+                failures.append(
+                    f"generated-date-metadata: expected {label} generated-on confirmation to fail beside a valid body period"
+                )
+            except PreflightError:
+                pass
         # Suppression is per-token: a real out-of-year period must still gate
         # even when the same year also appears in a footer.
         if 2024 not in detect_years(["Statement period March 1 2024 to March 31 2024", "(c) 2024 Example Bancorp."]):
