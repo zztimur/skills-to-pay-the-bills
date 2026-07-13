@@ -10,7 +10,7 @@ This skill is intentionally narrow:
 
 Required companion skill: `statement-intake-preflight`. Extraction requires its intake JSON with `status: ready-for-domain-extraction` and no review gates, or a source-bound reviewed `one-institution` handoff with every required typed resolution, plus the same ordered PDF paths, tax year, and institution.
 
-The preflight artifact records each PDF's normalized path, byte size, and lower-case SHA-256. Extraction verifies those fingerprints before reading the PDFs and immediately after all reads. It rejects legacy no-fingerprint artifacts, reordered or changed PDFs, raw review-required JSON, structural stops, genuine mixed-year or mixed-institution evidence, and incomplete/tampered reviewed handoffs. A reviewed institution name must match `--institution`.
+The preflight artifact records each PDF's normalized path, byte size, and lower-case SHA-256. Extraction verifies those fingerprints before reading the PDFs and immediately after all reads. It rejects legacy no-fingerprint artifacts, reordered or changed PDFs, raw review-required JSON, structural stops, genuine mixed-year or mixed-institution evidence, and incomplete/tampered reviewed handoffs. A reviewed institution name must match `--institution`; a reviewed out-of-period generated-on date must match the exact source date and reference and remains document metadata rather than year coverage.
 
 The user-facing deliverable is the PDF packet. JSON and CSV outputs remain available for row review and audit support, but the CSV is not the primary result unless the user asks for it.
 

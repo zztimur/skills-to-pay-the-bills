@@ -284,6 +284,96 @@ def main() -> int:
                     command_output(reviewed_extract),
                 )
 
+        generated_metadata_pdf = make_pdf(
+            root,
+            "generated-metadata.pdf",
+            ready_statement_lines("5.50") + ["Extracto de cuenta generado el 31 de Diciembre de 2026"],
+        )
+        generated_process, generated_preflight_path, generated_preflight = preflight(
+            root, "generated-metadata", [generated_metadata_pdf]
+        )
+        generated_valid = (
+            generated_process.returncode == 0
+            and isinstance(generated_preflight, dict)
+            and generated_preflight.get("status") == "review-required"
+            and [gate.get("code") for gate in generated_preflight.get("review_gates", [])]
+            == ["out-of-period-generated-date"]
+        )
+        check(
+            "out-of-period generated-on metadata requires source-bound review",
+            generated_valid,
+            command_output(generated_process),
+        )
+        if generated_valid:
+            reviewed_generated_path = root / "generated-metadata-reviewed.json"
+            reviewed_generated = command(
+                [
+                    sys.executable,
+                    str(PREFLIGHT_SCRIPT),
+                    "review-handoff",
+                    "--input",
+                    str(generated_preflight_path),
+                    "--out",
+                    str(reviewed_generated_path),
+                    "--accept-gate",
+                    "out-of-period-generated-date",
+                    "--confirm-generated-on-date",
+                    "2026-12-31",
+                    "--user-review-confirmed",
+                ]
+            )
+            reviewed_generated_data = (
+                json.loads(reviewed_generated_path.read_text(encoding="utf-8")) if reviewed_generated_path.is_file() else {}
+            )
+            generated_resolution = reviewed_generated_data.get("user_resolutions", {}).get("generated_on_dates", {})
+            generated_handoff_valid = (
+                reviewed_generated.returncode == 0
+                and generated_resolution.get("status") == "user-confirmed"
+                and generated_resolution.get("confirmed_dates") == ["2026-12-31"]
+            )
+            check(
+                "reviewed handoff retains the generated-on metadata resolution",
+                generated_handoff_valid,
+                command_output(reviewed_generated),
+            )
+            if generated_handoff_valid:
+                generated_extract = extract(
+                    [generated_metadata_pdf], reviewed_generated_path, root / "generated-metadata-analysis.json"
+                )
+                check(
+                    "source-bound generated-on handoff is accepted for interest extraction",
+                    generated_extract.returncode == 0,
+                    command_output(generated_extract),
+                )
+
+                missing_generated_data = json.loads(reviewed_generated_path.read_text(encoding="utf-8"))
+                missing_generated_data["user_resolutions"]["generated_on_dates"]["confirmed_dates"] = []
+                missing_generated_path = root / "generated-metadata-missing-date.json"
+                missing_generated_path.write_text(json.dumps(missing_generated_data, indent=2), encoding="utf-8")
+                missing_generated_extract = extract(
+                    [generated_metadata_pdf], missing_generated_path, root / "generated-metadata-missing-date-analysis.json"
+                )
+                check(
+                    "reviewed handoff rejects a missing generated-on date",
+                    missing_generated_extract.returncode != 0
+                    and "generated-on dates" in command_output(missing_generated_extract),
+                    command_output(missing_generated_extract),
+                )
+
+                tampered_anchor_data = json.loads(reviewed_generated_path.read_text(encoding="utf-8"))
+                tampered_anchor_data["user_resolutions"]["generated_on_dates"]["source_date_evidence"][0]["source_ref"]["line"] = 99
+                tampered_anchor_path = root / "generated-metadata-tampered-anchor.json"
+                tampered_anchor_path.write_text(json.dumps(tampered_anchor_data, indent=2), encoding="utf-8")
+                tampered_anchor_extract = extract(
+                    [generated_metadata_pdf], tampered_anchor_path, root / "generated-metadata-tampered-anchor-analysis.json"
+                )
+                check(
+                    "reviewed handoff rejects a tampered generated-on source anchor",
+                    tampered_anchor_extract.returncode != 0
+                    and "generated-on date evidence" in command_output(tampered_anchor_extract),
+                    command_output(tampered_anchor_extract),
+                )
+
         unknown_institution_pdf = make_pdf(
             root,
             "unknown-institution.pdf",

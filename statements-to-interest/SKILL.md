@@ -10,7 +10,7 @@ Analyze a preflighted statement set, extract interest income, convert to USD onl
 
 Proceed only when the request is for interest-income extraction or Schedule B tax-support documentation. Shared statement intake belongs to `statement-intake-preflight`; extraction requires its `--scope one-institution` JSON with either `status: ready-for-domain-extraction` and no review gates, or a source-bound reviewed handoff containing the required typed resolutions. Do not use this skill to determine FBAR maximum balances or thresholds; route that work to `fbar-threshold-check`.
 
-If preflight reports mixed institutions, mixed years, unreadable/scanned PDFs, mixed currencies, or ambiguous `$`, resolve that in `statement-intake-preflight` before continuing here. CSV or pasted rows require manual review outside this deterministic PDF workflow.
+If preflight reports mixed institutions, mixed years, unreadable/scanned PDFs, mixed currencies, ambiguous `$`, or out-of-period generated-on metadata, resolve that in `statement-intake-preflight` before continuing here. CSV or pasted rows require manual review outside this deterministic PDF workflow.
 
 ## Skill Dependencies
 
@@ -53,7 +53,7 @@ python "<package-root>/scripts/statements_to_interest.py" extract \
   --out work/interest-analysis.json
 ```
 
-Pass the same ordered `--pdf` paths used for preflight. Before reading PDFs and again immediately after all reads, extraction verifies each normalized path, byte size, and lower-case SHA-256 against the ready preflight or reviewed handoff. It rejects legacy no-fingerprint preflights, changed/reordered PDFs, raw review-required JSON, structural stops, genuine mixed-year or mixed-institution evidence, and incomplete/tampered reviewed handoffs. A reviewed `unknown-institution` resolution must match `--institution`; a reviewed currency resolution controls the account currency.
+Pass the same ordered `--pdf` paths used for preflight. Before reading PDFs and again immediately after all reads, extraction verifies each normalized path, byte size, and lower-case SHA-256 against the ready preflight or reviewed handoff. It rejects legacy no-fingerprint preflights, changed/reordered PDFs, raw review-required JSON, structural stops, genuine mixed-year or mixed-institution evidence, and incomplete/tampered reviewed handoffs. A reviewed `unknown-institution` resolution must match `--institution`; a reviewed currency resolution controls the account currency; an out-of-period generated-on resolution must exactly match its source date and reference and remains metadata rather than year coverage.
 
 Review the JSON and review CSV before reporting. Treat the CSV as an internal row-review artifact, not the user-facing deliverable unless the user asks for it. Confirm the ready `preflight` summary, source SHA-256 digest, and `verified_statement_files` list are present, then focus this skill's review on counted interest rows, excluded interest-like candidates, totals, and FX readiness. Do not invent missing rows. Clear exclusions such as withholding remain documented but do not block reporting. Any ambiguous excluded candidate makes the analysis `review-required`, even with counted rows: review every candidate, correct the source and rerun extraction when one is countable, or create `resolve-exclusions` JSON after a reviewer confirms all are non-interest. Pass that digest-bound file to `report` with `--excluded-candidates-resolution-json`. A zero-row packet also needs explicit preparer confirmation (`--zero-interest-confirmed` plus a non-empty note).
 
