@@ -99,6 +99,25 @@ def gates_of(data) -> list[str]:
     return [g["code"] for g in data["review_gates"]] if data else []
 
 
+def coverage_review_of(data) -> dict:
+    coverage = data.get("coverage_hints", {}) if isinstance(data, dict) else {}
+    return coverage.get("period_coverage_review", {}) if isinstance(coverage, dict) else {}
+
+
+def calendar_gaps_of(data) -> list:
+    gaps = coverage_review_of(data).get("calendar_gaps", [])
+    return gaps if isinstance(gaps, list) else []
+
+
+def gate_message_of(data, code: str) -> str:
+    if not isinstance(data, dict):
+        return ""
+    for gate in data.get("review_gates", []):
+        if isinstance(gate, dict) and gate.get("code") == code:
+            return str(gate.get("message", ""))
+    return ""
+
+
 def check(name: str, cond: bool, detail: str = "") -> None:
     results.append((name, bool(cond), detail))
 
@@ -569,13 +588,25 @@ proc, d = run("period-cross-year", [str(cross_year)])
 check("PER-3 an actual 2024-2025 statement period still trips mixed-years",
       d and "mixed-years" in gates_of(d), f"gates={gates_of(d)}")
 
+expected_missing_q2 = [{"start": "2025-04-01", "end": "2025-06-30"}]
 proc, d = run("period-missing-q2", [str(q1), str(q3), str(q4)])
-check("PER-4 omitted Q2 trips possible-missing-statement-period",
-      d and "possible-missing-statement-period" in gates_of(d), f"gates={gates_of(d)}")
+check("PER-4 omitted Q2 reports the exact April-through-June coverage gap",
+      d and d["status"] == "review-required"
+      and calendar_gaps_of(d) == expected_missing_q2
+      and coverage_review_of(d).get("intervals_detected") == 3
+      and "possible-missing-statement-period" in gates_of(d)
+      and "2025-04-01 through 2025-06-30" in gate_message_of(d, "possible-missing-statement-period"),
+      f"gaps={calendar_gaps_of(d)} gates={gates_of(d)}")
 
+expected_missing_q4 = [{"start": "2025-10-01", "end": "2025-12-31"}]
 proc, d = run("period-missing-q4", [str(q1), str(q2), str(q3)])
-check("PER-5 omitted Q4 trips possible-missing-statement-period",
-      d and "possible-missing-statement-period" in gates_of(d), f"gates={gates_of(d)}")
+check("PER-5 omitted Q4 reports the exact October-through-December coverage gap",
+      d and d["status"] == "review-required"
+      and calendar_gaps_of(d) == expected_missing_q4
+      and coverage_review_of(d).get("intervals_detected") == 3
+      and "possible-missing-statement-period" in gates_of(d)
+      and "2025-10-01 through 2025-12-31" in gate_message_of(d, "possible-missing-statement-period"),
+      f"gaps={calendar_gaps_of(d)} gates={gates_of(d)}")
 
 # COP statements use Spanish abbreviated months and hyphenated dates.
 # Keep the fixture synthetic while exercising the real PDF text-extraction path.
@@ -599,12 +630,16 @@ check("PER-6 Spanish abbreviated quarterly dates produce 2025 period coverage",
       f"coverage={d['coverage_hints'] if d else '?'}")
 
 proc, d = run("spanish-period-missing-q2", [str(spanish_q1), str(spanish_q3), str(spanish_q4)])
-check("PER-7 Spanish abbreviated omitted Q2 trips possible-missing-statement-period",
-      d and "possible-missing-statement-period" in gates_of(d), f"gates={gates_of(d)}")
+check("PER-7 Spanish abbreviated omitted Q2 retains the exact coverage gap",
+      d and calendar_gaps_of(d) == expected_missing_q2
+      and "possible-missing-statement-period" in gates_of(d),
+      f"gaps={calendar_gaps_of(d)} gates={gates_of(d)}")
 
 proc, d = run("spanish-period-missing-q4", [str(spanish_q1), str(spanish_q2), str(spanish_q3)])
-check("PER-8 Spanish abbreviated omitted Q4 trips possible-missing-statement-period",
-      d and "possible-missing-statement-period" in gates_of(d), f"gates={gates_of(d)}")
+check("PER-8 Spanish abbreviated omitted Q4 retains the exact coverage gap",
+      d and calendar_gaps_of(d) == expected_missing_q4
+      and "possible-missing-statement-period" in gates_of(d),
+      f"gaps={calendar_gaps_of(d)} gates={gates_of(d)}")
 
 institution_noise = make_pdf("institution-noise.pdf", [
     "Marca66 S.A.",

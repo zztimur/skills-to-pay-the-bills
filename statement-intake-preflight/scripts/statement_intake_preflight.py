@@ -3620,12 +3620,58 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if not any(gate.get("code") == "mixed-years" for gate in genuine_mixed_period["review_gates"]):  # type: ignore[index]
             failures.append("contextual-year: a genuine 2024-2025 statement period must still trip mixed-years")
 
+        reordered_complete_periods = build_preflight(
+            [q4, q2, q3, q1],
+            2025,
+            "one-account",
+            root / "reordered-periods.json",
+            root / "reordered-periods-review.csv",
+        )
+        reordered_coverage = reordered_complete_periods.get("coverage_hints", {})  # type: ignore[union-attr]
+        reordered_gaps = (
+            reordered_coverage.get("period_coverage_review", {}).get("calendar_gaps", [])
+            if isinstance(reordered_coverage, dict)
+            else []
+        )
+        if reordered_gaps or any(
+            gate.get("code") == "possible-missing-statement-period"
+            for gate in reordered_complete_periods["review_gates"]  # type: ignore[index]
+        ):
+            failures.append(
+                f"reordered-periods: complete source periods must not create a coverage gap, got {reordered_gaps}"
+            )
+
+        expected_missing_period_gaps = {
+            "missing-q2": [{"start": "2025-04-01", "end": "2025-06-30"}],
+            "missing-q4": [{"start": "2025-10-01", "end": "2025-12-31"}],
+        }
         for label, files in (("missing-q2", [q1, q3, q4]), ("missing-q4", [q1, q2, q3])):
             missing_period = build_preflight(
                 files, 2025, "one-account", root / f"{label}.json", root / f"{label}-review.csv"
             )
-            if not any(gate.get("code") == "possible-missing-statement-period" for gate in missing_period["review_gates"]):  # type: ignore[index]
-                failures.append(f"{label}: expected possible-missing-statement-period gate")
+            missing_coverage = missing_period.get("coverage_hints", {})  # type: ignore[union-attr]
+            missing_review = (
+                missing_coverage.get("period_coverage_review", {})
+                if isinstance(missing_coverage, dict)
+                else {}
+            )
+            missing_gaps = missing_review.get("calendar_gaps", []) if isinstance(missing_review, dict) else []
+            gate_messages = [
+                str(gate.get("message", ""))
+                for gate in missing_period["review_gates"]  # type: ignore[index]
+                if gate.get("code") == "possible-missing-statement-period"
+            ]
+            expected_gaps = expected_missing_period_gaps[label]
+            expected_range = f"{expected_gaps[0]['start']} through {expected_gaps[0]['end']}"
+            if (
+                missing_gaps != expected_gaps
+                or missing_review.get("intervals_detected") != 3
+                or not gate_messages
+                or expected_range not in gate_messages[0]
+            ):
+                failures.append(
+                    f"{label}: expected exact coverage gap {expected_gaps}, got {missing_review} gates={gate_messages}"
+                )
 
         # CSV cells that begin with a formula lead are neutralized.
         if csv_safe("=HYPERLINK(\"http://x\")") != "'=HYPERLINK(\"http://x\")":
