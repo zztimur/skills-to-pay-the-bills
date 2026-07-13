@@ -551,9 +551,10 @@ CONTEXTUAL_BALANCE_RE = re.compile(
 
 
 # A three-letter ISO token is only trusted as a currency when it is corroborated:
-# either its line carries a currency-label word, or the code sits directly beside
-# an amount. This keeps all-caps prose ("PLEASE TRY OUR APP") and merchant names
-# out of the confirmed set while still surfacing them as weak candidates.
+# either its line carries a currency-label word, sits directly beside an amount,
+# or appears in an explicit account-movements currency header. This keeps
+# all-caps prose ("PLEASE TRY OUR APP") and merchant names out of the confirmed
+# set while still surfacing them as weak candidates.
 CURRENCY_LABEL_RE = re.compile(
     # English/Spanish plus German (Währung, umlaut-stripped Wahrung) -- so a
     # European statement that labels its currency in its own language ("Währung:
@@ -563,7 +564,7 @@ CURRENCY_LABEL_RE = re.compile(
     # produced false confirmations. French/Italian/Dutch statements still confirm
     # via the € symbol or an adjacent amount, so nothing real is lost.
     r"\b(?:currenc(?:y|ies)|monedas?|divisas?|w[aä]hrung|"
-    r"denominat(?:ed|ion)|iso\s*4217)\b",
+    r"denominat(?:ed|ion)|iso\s*4217|movimientos?\s+de\s+cuenta\s+en)\b",
     re.I,
 )
 # A currency label only confirms a code within this many characters of it, so
@@ -2475,6 +2476,10 @@ def command_self_test(_args: argparse.Namespace) -> int:
         # statement labeled only in its own language is not left unknown.
         if detect_currency([clean_line("Währung: CHF")])["code"] != "CHF":  # type: ignore[index]
             failures.append("currency-label-de: 'Währung: CHF' must confirm CHF")
+        if detect_currency(["Movimientos de cuenta en COP", "$12,000"])["code"] != "COP":  # type: ignore[index]
+            failures.append("currency-account-movements: a COP account-movements header must confirm COP")
+        if detect_currency(["Movimientos de cuenta en", "COP"])["code"] != "UNKNOWN":  # type: ignore[index]
+            failures.append("currency-account-movements: a split header must not confirm COP")
         # Round-8 A: "devise" and "valuta" are deliberately NOT currency labels --
         # "devise" collides with the English verb ("devise a EUR plan") and
         # "valuta" means "value date" in German/Nordic banking ("Valuta 15.01.2025
