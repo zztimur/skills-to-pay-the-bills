@@ -1633,7 +1633,10 @@ def build_preflight(
         warnings.append(message)
         add_gate(gates, "possible-mixed-institutions", message)
     if all_lines and institution_required and not institution_hints:
-        message = "No institution hint was found in early statement text; verify the institution manually."
+        message = (
+            "No institution hint was found in early statement text; a graphical logo or filename is not automatic "
+            "institution evidence, so verify the institution manually."
+        )
         warnings.append(message)
         add_gate(gates, "unknown-institution", message)
 

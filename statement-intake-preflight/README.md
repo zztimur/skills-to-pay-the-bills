@@ -18,6 +18,8 @@ Use `one-account --require-institution` when the next step is `fbar-threshold-ch
 
 Do not OCR screenshots. Do not smooth over a mystery `$`. Do not pretend a folder name proves the bank, account, currency, or year. If the text layer is weak, the years are mixed, account hints multiply, or currency is fuzzy, the output should say that plainly before any downstream skill starts doing more expensive work.
 
+A visible logo or filename can help a human review a likely institution, but it is not automatic issuer evidence.
+
 This is support documentation, not a tax conclusion. A clean preflight means the input is ready for the next parser. It does not mean the account is complete, the interest total is right, or an FBAR threshold answer exists.
 
 ## When It Asks You Something
