@@ -14,7 +14,7 @@ import sys
 import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Iterable
@@ -45,7 +45,7 @@ EXCLUSION_RESOLUTION_SCHEMA_VERSION = "1.0"
 MIN_TEXT_CHARS = 40
 PREFLIGHT_SKILL = "statement-intake-preflight"
 SKILL_ROOTS_ENV = "STATEMENTS_TO_INTEREST_SKILL_ROOTS"
-PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0", "1.1"}
+PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0", "1.1", "1.2"}
 PREFLIGHT_READY_STATUS = "ready-for-domain-extraction"
 PREFLIGHT_REVIEWED_HANDOFF_STATUS = "reviewed-for-domain-extraction"
 PREFLIGHT_REVIEWED_HANDOFF_TYPE = "reviewed-handoff"
@@ -1228,6 +1228,197 @@ def reviewed_resolution_gate_codes(resolution: dict, expected: set[str], key: st
         )
 
 
+def _period_source_ref(value: object, label: str, source_file: str, aggregate: bool) -> dict:
+    """Normalize a period location and retain its statement-file binding."""
+    if not isinstance(value, dict):
+        raise SystemExit(f"Preflight {label} must be a source reference object; rerun preflight.")
+    try:
+        page, line = int(value.get("page")), int(value.get("line"))
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"Preflight {label} has an invalid page or line; rerun preflight.") from exc
+    if page <= 0 or line <= 0:
+        raise SystemExit(f"Preflight {label} has a non-positive page or line; rerun preflight.")
+    recorded_file = value.get("file")
+    if (aggregate and str(recorded_file or "") != source_file) or (
+        not aggregate and recorded_file is not None and str(recorded_file) != source_file
+    ):
+        raise SystemExit(f"Preflight {label} is not bound to its statement file; rerun preflight.")
+    return {"file": source_file, "page": page, "line": line}
+
+
+def _normalized_period_interval(value: object, source_file: str, aggregate: bool, label: str) -> dict:
+    """Accept only explicit direct or source-referenced inferred period provenance."""
+    if not isinstance(value, dict):
+        raise SystemExit(f"Preflight {label} must be an object; rerun preflight.")
+    try:
+        start, end = date.fromisoformat(str(value.get("start") or "")), date.fromisoformat(str(value.get("end") or ""))
+    except ValueError as exc:
+        raise SystemExit(f"Preflight {label} has invalid period dates; rerun preflight.") from exc
+    if end < start:
+        raise SystemExit(f"Preflight {label} ends before it starts; rerun preflight.")
+    confidence = str(value.get("confidence") or "")
+    if confidence not in {"high", "medium"}:
+        raise SystemExit(f"Preflight {label} has invalid period confidence; rerun preflight.")
+    source_ref = _period_source_ref(value.get("source_ref"), f"{label}.source_ref", source_file, aggregate)
+    end_ref = _period_source_ref(value.get("end_source_ref"), f"{label}.end_source_ref", source_file, aggregate)
+    result = {"start": start.isoformat(), "end": end.isoformat(), "confidence": confidence, "source_ref": source_ref, "end_source_ref": end_ref}
+    provenance = value.get("provenance")
+    if provenance is None:
+        if any(key in value for key in ("period_header_source_ref", "year_anchor_source_ref", "year_anchor_source_refs")):
+            raise SystemExit(f"Preflight {label} has unlabelled period provenance fields; rerun preflight.")
+        result["provenance"] = "direct-source-range"
+    elif provenance == "direct-anchor":
+        if confidence != "high":
+            raise SystemExit(f"Preflight {label} direct-anchor evidence must be high confidence; rerun preflight.")
+        header = _period_source_ref(value.get("period_header_source_ref"), f"{label}.period_header_source_ref", source_file, aggregate)
+        anchor = _period_source_ref(value.get("year_anchor_source_ref"), f"{label}.year_anchor_source_ref", source_file, aggregate)
+        raw_anchors = value.get("year_anchor_source_refs")
+        if header != source_ref or not isinstance(raw_anchors, list) or not raw_anchors:
+            raise SystemExit(f"Preflight {label} has inconsistent direct-anchor provenance; rerun preflight.")
+        anchors = [_period_source_ref(item, f"{label}.year_anchor_source_refs", source_file, aggregate) for item in raw_anchors]
+        if anchors[0] != anchor:
+            raise SystemExit(f"Preflight {label} has inconsistent direct-anchor references; rerun preflight.")
+        result.update({"provenance": "direct-anchor", "period_header_source_ref": header, "year_anchor_source_ref": anchor, "year_anchor_source_refs": anchors})
+    elif provenance == "inferred-chain":
+        if confidence != "medium":
+            raise SystemExit(f"Preflight {label} inferred-chain evidence must be medium confidence; rerun preflight.")
+        header = _period_source_ref(value.get("period_header_source_ref"), f"{label}.period_header_source_ref", source_file, aggregate)
+        if header != source_ref or any(key in value for key in ("year_anchor_source_ref", "year_anchor_source_refs")):
+            raise SystemExit(f"Preflight {label} has inconsistent inferred-chain provenance; rerun preflight.")
+        result.update({"provenance": "inferred-chain", "period_header_source_ref": header})
+    else:
+        raise SystemExit(f"Preflight {label} has unsupported period provenance; rerun preflight.")
+    return result
+
+
+def preflight_v12_period_contract(source: dict) -> tuple[list[dict], list[dict]]:
+    """Validate schema-1.2 source period evidence and its aggregate mirror."""
+    if str(source.get("schema_version") or "") != "1.2":
+        return [], []
+    raw_files, coverage = source.get("statement_files"), source.get("coverage_hints")
+    if not isinstance(raw_files, list) or not raw_files or not isinstance(coverage, dict):
+        raise SystemExit("Preflight schema 1.2 has no statement period provenance; rerun preflight.")
+    expected: list[dict] = []
+    source_files: set[str] = set()
+    for index, raw_file in enumerate(raw_files, start=1):
+        if not isinstance(raw_file, dict) or not str(raw_file.get("file") or "") or not isinstance(raw_file.get("period_intervals"), list):
+            raise SystemExit("Preflight schema 1.2 has an invalid statement period record; rerun preflight.")
+        source_file = str(raw_file["file"])
+        source_files.add(source_file)
+        expected.extend(_normalized_period_interval(item, source_file, False, f"statement_files[{index}].period_intervals") for item in raw_file["period_intervals"])
+    raw_aggregate = coverage.get("period_intervals")
+    if not isinstance(raw_aggregate, list):
+        raise SystemExit("Preflight schema 1.2 has no aggregate period_intervals list; rerun preflight.")
+    aggregate: list[dict] = []
+    for item in raw_aggregate:
+        if not isinstance(item, dict) or not isinstance(item.get("source_ref"), dict):
+            raise SystemExit("Preflight schema 1.2 aggregate period evidence is invalid; rerun preflight.")
+        source_file = str(item["source_ref"].get("file") or "")
+        if not source_file:
+            raise SystemExit("Preflight schema 1.2 aggregate period evidence has no source file; rerun preflight.")
+        aggregate.append(_normalized_period_interval(item, source_file, True, "coverage_hints.period_intervals"))
+    canonical = lambda values: sorted(json.dumps(value, sort_keys=True, separators=(",", ":")) for value in values)
+    if canonical(expected) != canonical(aggregate):
+        raise SystemExit("Preflight schema 1.2 aggregate period evidence does not exactly mirror statement sources; rerun preflight.")
+    raw_unresolved = coverage.get("unresolved_periods")
+    if not isinstance(raw_unresolved, list):
+        raise SystemExit("Preflight schema 1.2 has no unresolved_periods list; rerun preflight.")
+    unresolved: list[dict] = []
+    ids: set[str] = set()
+    for item in raw_unresolved:
+        if not isinstance(item, dict) or not re.fullmatch(r"period-[0-9a-f]{16}", str(item.get("id") or "")):
+            raise SystemExit("Preflight unresolved period evidence has invalid IDs; rerun preflight.")
+        period_id = str(item["id"])
+        if period_id in ids:
+            raise SystemExit("Preflight unresolved period evidence has duplicate IDs; rerun preflight.")
+        ids.add(period_id)
+        endpoints: dict[str, dict[str, int]] = {}
+        for key in ("displayed_start", "displayed_end"):
+            endpoint = item.get(key)
+            if not isinstance(endpoint, dict):
+                raise SystemExit("Preflight unresolved period evidence has invalid displayed endpoints; rerun preflight.")
+            try:
+                month, day = int(endpoint.get("month")), int(endpoint.get("day"))
+                date(2000, month, day)
+            except (TypeError, ValueError) as exc:
+                raise SystemExit("Preflight unresolved period evidence has invalid displayed endpoints; rerun preflight.") from exc
+            endpoints[key] = {"month": month, "day": day}
+        raw_ref = item.get("source_ref")
+        source_file = str(raw_ref.get("file") or "") if isinstance(raw_ref, dict) else ""
+        if not source_file or source_file not in source_files:
+            raise SystemExit("Preflight unresolved period evidence has no source file; rerun preflight.")
+        unresolved.append({"id": period_id, **endpoints, "source_ref": _period_source_ref(raw_ref, "coverage_hints.unresolved_periods.source_ref", source_file, True)})
+    return aggregate, sorted(unresolved, key=lambda item: str(item["id"]))
+
+
+def preflight_v12_account_opening_evidence(periods: list[dict], tax_year: int) -> dict | None:
+    """Recompute the one permitted leading coverage-gap resolution."""
+    year_start, year_end = date(tax_year, 1, 1), date(tax_year, 12, 31)
+    clipped: list[dict] = []
+    for item in periods:
+        start, end = date.fromisoformat(str(item["start"])), date.fromisoformat(str(item["end"]))
+        if end >= year_start and start <= year_end:
+            clipped.append({**item, "start": max(start, year_start).isoformat(), "end": min(end, year_end).isoformat()})
+    clipped.sort(key=lambda item: (str(item["start"]), str(item["end"]), json.dumps(item["source_ref"], sort_keys=True)))
+    if len(clipped) < 2:
+        return None
+    merged: list[list[date]] = []
+    for item in clipped:
+        start, end = date.fromisoformat(str(item["start"])), date.fromisoformat(str(item["end"]))
+        if not merged or start > merged[-1][1] + timedelta(days=1):
+            merged.append([start, end])
+        elif end > merged[-1][1]:
+            merged[-1][1] = end
+    gaps: list[dict[str, str]] = []
+    if merged[0][0] > year_start:
+        gaps.append({"start": year_start.isoformat(), "end": (merged[0][0] - timedelta(days=1)).isoformat()})
+    for previous, current in zip(merged, merged[1:]):
+        if current[0] > previous[1] + timedelta(days=1):
+            gaps.append({"start": (previous[1] + timedelta(days=1)).isoformat(), "end": (current[0] - timedelta(days=1)).isoformat()})
+    if merged[-1][1] < year_end:
+        gaps.append({"start": (merged[-1][1] + timedelta(days=1)).isoformat(), "end": year_end.isoformat()})
+    first = clipped[0]
+    if len(gaps) != 1 or gaps[0]["start"] != year_start.isoformat() or first["start"] <= year_start.isoformat() or (date.fromisoformat(gaps[0]["end"]) + timedelta(days=1)).isoformat() != first["start"]:
+        return None
+    return {"leading_coverage_gap": gaps[0], "first_source_period": {"start": first["start"], "end": first["end"], "source_ref": first["source_ref"]}}
+
+
+def validate_reviewed_v12_period_resolutions(resolutions: dict, source: dict, source_sha256: str, gate_codes: set[str]) -> None:
+    """Require exact period and account-opening reviewer decisions for schema 1.2."""
+    periods, unresolved = preflight_v12_period_contract(source)
+    if str(source.get("schema_version") or "") != "1.2":
+        return
+    try:
+        tax_year = int(source.get("tax_year", 0))
+    except (TypeError, ValueError) as exc:
+        raise SystemExit("Reviewed handoff source preflight has an invalid tax year.") from exc
+    period_gate = {"unresolved-period-year"} & gate_codes
+    period_years = reviewed_resolution_object(resolutions, "period_years")
+    if period_gate:
+        expected: list[dict] = []
+        for item in unresolved:
+            start = date(tax_year, int(item["displayed_start"]["month"]), int(item["displayed_start"]["day"]))
+            end_year = tax_year + 1 if (int(item["displayed_end"]["month"]), int(item["displayed_end"]["day"])) < (start.month, start.day) else tax_year
+            end = date(end_year, int(item["displayed_end"]["month"]), int(item["displayed_end"]["day"]))
+            expected.append({"period_id": item["id"], "confirmed_year": tax_year, "start": start.isoformat(), "end": end.isoformat(), "displayed_start": item["displayed_start"], "displayed_end": item["displayed_end"], "source_ref": item["source_ref"], "source_preflight_sha256": source_sha256})
+        if period_years.get("status") != "user-confirmed":
+            raise SystemExit("Reviewed handoff does not contain a user-confirmed period-year resolution.")
+        reviewed_resolution_gate_codes(period_years, period_gate, "period_years")
+        if period_years.get("confirmed_periods") != expected:
+            raise SystemExit("Reviewed handoff period-year resolution does not exactly match source period evidence.")
+    elif period_years != {"status": "not-required"}:
+        raise SystemExit("Reviewed handoff has an unexpected period-year resolution.")
+    opening = reviewed_resolution_object(resolutions, "account_opened_on")
+    opening_gate = {"possible-missing-statement-period"} & gate_codes
+    evidence = preflight_v12_account_opening_evidence(periods, tax_year)
+    if opening.get("status") == "user-confirmed":
+        expected_opening = {"status": "user-confirmed", "date": evidence["first_source_period"]["start"], **evidence, "resolved_gate_codes": ["possible-missing-statement-period"], "source_preflight_sha256": source_sha256} if opening_gate and evidence else None
+        if opening != expected_opening:
+            raise SystemExit("Reviewed handoff account-opening resolution does not exactly match source coverage evidence.")
+    elif opening != {"status": "not-required"}:
+        raise SystemExit("Reviewed handoff has an invalid account-opening resolution.")
+
+
 def validate_reviewed_statement_year_resolution(
     statement_years: dict, source: dict, year_gate_codes: set[str], source_year: int
 ) -> None:
@@ -1302,7 +1493,10 @@ def validate_reviewed_interest_resolutions(
     except (TypeError, ValueError) as exc:
         raise SystemExit("Reviewed handoff source preflight has an invalid tax year.") from exc
 
-    year_gate_codes = {"mixed-years", "unresolved-year-evidence", "unknown-year-coverage"} & gate_codes
+    period_gate_codes = {"unresolved-period-year"} & gate_codes
+    year_gate_codes = ({"mixed-years", "unresolved-year-evidence", "unknown-year-coverage"} & gate_codes) - (
+        {"unknown-year-coverage"} if period_gate_codes else set()
+    )
     statement_years = reviewed_resolution_object(raw_resolutions, "statement_years")
     validate_reviewed_statement_year_resolution(statement_years, source, year_gate_codes, source_year)
 
@@ -1369,6 +1563,8 @@ def validate_reviewed_interest_resolutions(
             )
     elif institution.get("status") != "not-required":
         raise SystemExit("Reviewed handoff has an unexpected institution resolution.")
+
+    validate_reviewed_v12_period_resolutions(raw_resolutions, source, source_sha256, gate_codes)
 
     return raw_resolutions
 
@@ -1478,6 +1674,7 @@ def load_preflight_json(
                 "rerun statement-intake-preflight after resolving its review gates."
             )
 
+    preflight_v12_period_contract(data)
     verified_files = verify_preflight_statement_fingerprints(data, pdf_paths)
     profile = data.get("profile")
     primary_institution = profile.get("primary_institution") if isinstance(profile, dict) else ""
@@ -2980,6 +3177,100 @@ def command_self_test(args: argparse.Namespace) -> int:
             ]
         ):
             failures.append(f"preflight-fingerprints: expected retained verified fingerprints, got {verified_files!r}")
+        # Schema 1.2 has source-bound period provenance. Cover a direct anchor,
+        # an inferred chain, exact reviewer resolutions, and a hand-edited mirror.
+        v12_path = tmp_path / "preflight-v12.json"
+        direct_period = {
+            "start": "2025-05-01", "end": "2025-07-31", "confidence": "high", "provenance": "direct-anchor",
+            "source_ref": {"page": 1, "line": 1}, "end_source_ref": {"page": 1, "line": 1},
+            "period_header_source_ref": {"page": 1, "line": 1}, "year_anchor_source_ref": {"page": 1, "line": 3},
+            "year_anchor_source_refs": [{"page": 1, "line": 3}],
+        }
+        inferred_period = {
+            "start": "2025-08-01", "end": "2025-12-31", "confidence": "medium", "provenance": "inferred-chain",
+            "source_ref": {"page": 1, "line": 2}, "end_source_ref": {"page": 1, "line": 2},
+            "period_header_source_ref": {"page": 1, "line": 2},
+        }
+        v12_source = json.loads(preflight_path.read_text(encoding="utf-8"))
+        v12_source["schema_version"] = "1.2"
+        v12_source["statement_files"][0]["period_intervals"] = [direct_period, inferred_period]
+        aggregate_periods = []
+        for record in (direct_period, inferred_period):
+            copied = json.loads(json.dumps(record))
+            for key in ("source_ref", "end_source_ref", "period_header_source_ref", "year_anchor_source_ref"):
+                if isinstance(copied.get(key), dict):
+                    copied[key]["file"] = str(pdf_path)
+            if isinstance(copied.get("year_anchor_source_refs"), list):
+                for ref in copied["year_anchor_source_refs"]:
+                    ref["file"] = str(pdf_path)
+            aggregate_periods.append(copied)
+        v12_source["coverage_hints"] = {"period_intervals": aggregate_periods, "unresolved_periods": []}
+        v12_path.write_text(json.dumps(v12_source), encoding="utf-8")
+        try:
+            load_preflight_json(str(v12_path), "one-institution", 2025, [str(pdf_path)], "Preflight Bank")
+        except SystemExit as exc:
+            failures.append(f"preflight-v12-direct-inferred: unexpected rejection {exc}")
+        tampered_v12 = json.loads(v12_path.read_text(encoding="utf-8"))
+        tampered_v12["coverage_hints"]["period_intervals"][0]["end_source_ref"]["line"] = 9
+        v12_path.write_text(json.dumps(tampered_v12), encoding="utf-8")
+        try:
+            load_preflight_json(str(v12_path), "one-institution", 2025, [str(pdf_path)], "Preflight Bank")
+            failures.append("preflight-v12-tampered: expected aggregate-provenance rejection")
+        except SystemExit as exc:
+            if "aggregate period evidence" not in str(exc):
+                failures.append(f"preflight-v12-tampered: unexpected rejection {exc}")
+
+        v12_source["status"] = PREFLIGHT_REVIEWED_HANDOFF_STATUS.replace("reviewed-for-domain-extraction", "review-required")
+        v12_source["review_gates"] = [
+            {"code": "unresolved-period-year", "severity": "review", "message": "confirm displayed period year"},
+            {"code": "unknown-year-coverage", "severity": "review", "message": "period year needs review"},
+            {"code": "possible-missing-statement-period", "severity": "review", "message": "confirm account opening"},
+        ]
+        v12_source["coverage_hints"]["unresolved_periods"] = [
+            {"id": "period-0123456789abcdef", "displayed_start": {"month": 5, "day": 1},
+             "displayed_end": {"month": 7, "day": 31}, "source_ref": aggregate_periods[0]["source_ref"]}
+        ]
+        v12_source_path = tmp_path / "preflight-v12-source.json"
+        v12_source_path.write_text(json.dumps(v12_source), encoding="utf-8")
+        v12_hash = sha256_file(v12_source_path, "v1.2 source preflight")
+        v12_handoff = {
+            "schema_version": "1.2", "skill": PREFLIGHT_SKILL, "artifact_type": PREFLIGHT_REVIEWED_HANDOFF_TYPE,
+            "status": PREFLIGHT_REVIEWED_HANDOFF_STATUS, "tax_year": 2025, "scope": "one-institution",
+            "statement_files": v12_source["statement_files"], "review_gates": v12_source["review_gates"],
+            "source_preflight": {"path": str(v12_source_path), "resolved_path": normalize_preflight_path(v12_source_path),
+                                  "sha256": v12_hash, "schema_version": "1.2", "status": "review-required",
+                                  "tax_year": 2025, "scope": "one-institution"},
+            "review": {"user_review_confirmed": True, "accepted_gate_codes": [gate["code"] for gate in v12_source["review_gates"]],
+                       "confirmed_at": "2026-07-13T00:00:00Z"},
+            "user_resolutions": {
+                "source_preflight_sha256": v12_hash, "statement_years": {"status": "not-required"},
+                "generated_on_dates": {"status": "not-required"}, "currency": {"status": "not-required"},
+                "institution": {"status": "not-required"},
+                "period_years": {"status": "user-confirmed", "resolved_gate_codes": ["unresolved-period-year"],
+                    "confirmed_periods": [{"period_id": "period-0123456789abcdef", "confirmed_year": 2025,
+                        "start": "2025-05-01", "end": "2025-07-31", "displayed_start": {"month": 5, "day": 1},
+                        "displayed_end": {"month": 7, "day": 31}, "source_ref": aggregate_periods[0]["source_ref"],
+                        "source_preflight_sha256": v12_hash}]},
+                "account_opened_on": {"status": "user-confirmed", "date": "2025-05-01",
+                    "leading_coverage_gap": {"start": "2025-01-01", "end": "2025-04-30"},
+                    "first_source_period": {"start": "2025-05-01", "end": "2025-07-31", "source_ref": aggregate_periods[0]["source_ref"]},
+                    "resolved_gate_codes": ["possible-missing-statement-period"], "source_preflight_sha256": v12_hash},
+            },
+        }
+        v12_handoff_path = tmp_path / "preflight-v12-handoff.json"
+        v12_handoff_path.write_text(json.dumps(v12_handoff), encoding="utf-8")
+        try:
+            load_preflight_json(str(v12_handoff_path), "one-institution", 2025, [str(pdf_path)], "Preflight Bank")
+        except SystemExit as exc:
+            failures.append(f"preflight-v12-reviewed: unexpected rejection {exc}")
+        v12_handoff["user_resolutions"]["period_years"]["confirmed_periods"][0]["source_ref"]["line"] = 9
+        v12_handoff_path.write_text(json.dumps(v12_handoff), encoding="utf-8")
+        try:
+            load_preflight_json(str(v12_handoff_path), "one-institution", 2025, [str(pdf_path)], "Preflight Bank")
+            failures.append("preflight-v12-reviewed-tampered: expected period-resolution rejection")
+        except SystemExit as exc:
+            if "period-year resolution" not in str(exc):
+                failures.append(f"preflight-v12-reviewed-tampered: unexpected rejection {exc}")
         try:
             load_preflight_json(None, "one-institution", 2025, [str(pdf_path)], "Preflight Bank")
             failures.append("missing-preflight: expected preflight rejection")

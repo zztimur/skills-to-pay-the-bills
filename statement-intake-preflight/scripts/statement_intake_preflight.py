@@ -34,7 +34,7 @@ except BaseException as _exc:  # noqa: BLE001 - see below  # pragma: no cover
 # Downstream skills (fbar-threshold-check, statements-to-interest) pin the set of
 # schema versions they accept, so bump this only on a breaking JSON change and
 # update those consumers in lockstep.
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 PREFLIGHT_SKILL = "statement-intake-preflight"
 READY_STATUS = "ready-for-domain-extraction"
 REVIEW_REQUIRED_STATUS = "review-required"
