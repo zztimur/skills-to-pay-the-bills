@@ -35,6 +35,8 @@ The result reports two views separately:
 
 Those are related but not identical. The skill keeps them separate so the support packet does not blur a daily reconstruction into a maximum-value filing concept.
 
+The extraction JSON also carries `review_summary.same_day_balance_candidates`, and the review CSV mirrors those flags in a compact `review_flags` column. The console only reports how many dates need review; inspect the retained artifacts for the actual candidate values and source references.
+
 ## Use It In Codex
 
 Ask for the skill directly:

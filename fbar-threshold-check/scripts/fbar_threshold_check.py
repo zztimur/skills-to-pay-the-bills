@@ -817,6 +817,7 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
             selected = max(day_candidates, key=lambda item: item.amount)
             confidence = selected.confidence
             notes = list(selected.notes)
+            review_flags: list[dict[str, object]] = []
             amounts = sorted({item.amount for item in day_candidates})
             if len(amounts) > 1:
                 low_amount, high_amount = amounts[0], amounts[-1]
@@ -829,6 +830,26 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                     notes.append(
                         f"Same-day balance candidates ranged from {fmt_native(low_amount)} to {fmt_native(high_amount)}; "
                         "the maximum was selected for threshold safety - verify against the statement."
+                    )
+                    review_flags.append(
+                        {
+                            "code": "material-same-day-balance-candidates",
+                            "candidate_count": len(day_candidates),
+                            "minimum_native_balance": fmt_native(low_amount),
+                            "maximum_native_balance": fmt_native(high_amount),
+                            "selected_native_balance": fmt_native(selected.amount),
+                            "selected_source_ref": source_ref_to_string(selected.source),
+                            "candidates": [
+                                {
+                                    "native_balance": fmt_native(item.amount),
+                                    "source_ref": source_ref_to_string(item.source),
+                                }
+                                for item in sorted(
+                                    day_candidates,
+                                    key=lambda item: (item.amount, source_ref_to_string(item.source)),
+                                )
+                            ],
+                        }
                     )
             last_balance = selected.amount
             last_ref = selected.source
@@ -849,6 +870,7 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                     "confidence": confidence,
                     "source_refs": [source_ref_to_string(selected.source)],
                     "notes": notes,
+                    "review_flags": review_flags,
                 }
             )
         elif last_balance is not None:
@@ -867,6 +889,7 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                     "confidence": "medium",
                     "source_refs": [source_ref_to_string(last_ref)] if last_ref else [],
                     "notes": ["No same-day balance found; carried forward most recent observed account balance."],
+                    "review_flags": [],
                 }
             )
         else:
@@ -882,6 +905,7 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                     "confidence": "missing",
                     "source_refs": [],
                     "notes": ["No opening or prior balance was available for this day."],
+                    "review_flags": [],
                 }
             )
 
@@ -935,6 +959,64 @@ def source_ref_to_string(ref: SourceRef | None) -> str:
     return f"{Path(ref.file).name}:p{ref.page}:l{ref.line}"
 
 
+def build_review_summary(rows: list[dict[str, object]]) -> dict[str, object]:
+    """Return a compact, deterministic card for rows that need human review."""
+    flagged_dates: list[dict[str, object]] = []
+    for row in rows:
+        flags = row.get("review_flags")
+        if not isinstance(flags, list) or not flags:
+            continue
+        flagged_dates.append(
+            {
+                "date": row.get("date"),
+                "flags": [flag for flag in flags if isinstance(flag, dict)],
+            }
+        )
+    return {
+        "same_day_balance_candidates": {
+            "count": len(flagged_dates),
+            "requires_user_review": bool(flagged_dates),
+            "items": flagged_dates,
+        }
+    }
+
+
+def format_review_flags(flags: object) -> str:
+    if not isinstance(flags, list):
+        return ""
+    summaries: list[str] = []
+    for flag in flags:
+        if not isinstance(flag, dict):
+            continue
+        if flag.get("code") == "material-same-day-balance-candidates":
+            summaries.append(
+                "same-day candidates "
+                f"(count={flag.get('candidate_count')}; "
+                f"selected={flag.get('selected_native_balance')}; "
+                f"range={flag.get('minimum_native_balance')}..{flag.get('maximum_native_balance')}; "
+                f"source={flag.get('selected_source_ref')})"
+            )
+        else:
+            summaries.append(str(flag.get("code") or "review flag"))
+    return " | ".join(summaries)
+
+
+def print_same_day_candidate_review_card(account_data: dict[str, object]) -> None:
+    summary = account_data.get("review_summary")
+    if not isinstance(summary, dict):
+        return
+    same_day = summary.get("same_day_balance_candidates")
+    if not isinstance(same_day, dict):
+        return
+    items = same_day.get("items")
+    if not isinstance(items, list) or not items:
+        return
+    print(
+        f"Same-day candidate review: {len(items)} date(s) need user review. "
+        "Detailed values and source references are in review_summary and the review CSV."
+    )
+
+
 def write_json(path: Path, data: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -982,6 +1064,7 @@ def write_account_csv(path: Path, account_data: dict[str, object]) -> None:
         "confidence",
         "source_refs",
         "notes",
+        "review_flags",
     ]
     account = account_data.get("account", {})
     if not isinstance(account, dict):
@@ -1005,6 +1088,7 @@ def write_account_csv(path: Path, account_data: dict[str, object]) -> None:
                     "confidence": row.get("confidence"),
                     "source_refs": "; ".join(row.get("source_refs", []) if isinstance(row.get("source_refs"), list) else []),
                     "notes": "; ".join(row.get("notes", []) if isinstance(row.get("notes"), list) else []),
+                    "review_flags": format_review_flags(row.get("review_flags")),
                 }
             )
 
@@ -1570,6 +1654,7 @@ def command_extract_account(args: argparse.Namespace) -> int:
         },
         "warnings": sorted(set(warnings)),
         "daily_ledger": daily_rows,
+        "review_summary": build_review_summary(daily_rows),
         "artifacts": {},
     }
     csv_path = Path(args.csv) if args.csv else account_csv_path(out_path)
@@ -1578,6 +1663,7 @@ def command_extract_account(args: argparse.Namespace) -> int:
     write_account_csv(csv_path, data)
     print(f"Wrote account JSON: {out_path}")
     print(f"Wrote review CSV: {csv_path}")
+    print_same_day_candidate_review_card(data)
     if warnings:
         print("Review warnings:")
         for warning in sorted(set(warnings)):
@@ -2802,6 +2888,20 @@ def test_same_day_variance() -> None:
     assert rows[0]["native_balance"] == "100000"
     assert rows[0]["confidence"] == "medium"
     assert any("maximum was selected" in note for note in rows[0]["notes"])
+    flags = rows[0]["review_flags"]
+    assert isinstance(flags, list) and len(flags) == 1
+    flag = flags[0]
+    assert isinstance(flag, dict)
+    assert flag["code"] == "material-same-day-balance-candidates"
+    assert flag["candidate_count"] == 2
+    assert flag["minimum_native_balance"] == "100"
+    assert flag["maximum_native_balance"] == "100000"
+    assert flag["selected_source_ref"] == "a.pdf:p1:l2"
+    summary = build_review_summary(rows)
+    same_day = summary["same_day_balance_candidates"]
+    assert isinstance(same_day, dict)
+    assert same_day["count"] == 1 and same_day["requires_user_review"] is True
+    assert format_review_flags(flags).startswith("same-day candidates (count=2;")
     assert coverage["material_same_day_variance_days"] == 1
     assert any("same-day balance candidates" in warning for warning in warnings)
 
