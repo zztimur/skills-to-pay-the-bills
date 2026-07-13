@@ -209,11 +209,14 @@ INSTITUTION_TERM_RE = re.compile(
 # marketing prose ("Mobile banking made easy", "avoid bankruptcy") cannot
 # become a header institution hint.
 INSTITUTION_STEM_RE = re.compile(r"\b(?:banco|bank)\w+", re.I)
-# A one-token alphanumeric brand like "Marca66" can also be a masthead. Keep
-# the rule narrow: it must contain both letters and digits and stay within the
-# header window, where transaction rows and footer links are already filtered.
-INSTITUTION_ALNUM_BRAND_RE = re.compile(
-    r"\b(?=[A-Za-z]*\d)(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z][A-Za-z0-9]{2,}\b",
+# An alphanumeric token alone is not issuer evidence: common page and report
+# labels such as "Page1" and "Report2025" match the same shape as a brand. A
+# candidate counts only when it is immediately followed by a legal-entity
+# suffix. Bare brands intentionally fall back to the reviewed confirmation.
+INSTITUTION_ALNUM_BRAND_LEGAL_RE = re.compile(
+    r"\b(?=[A-Za-z]*\d)[A-Za-z][A-Za-z0-9]{2,}\s+"
+    r"(?:a\.?g\.?|n\.?a\.?|n\.?v\.?|s\.?a\.?|s\.?p\.?a\.?|s\.?a\.?s\.?|"
+    r"gmbh|plc|inc(?:orporated)?|ltd|limited|llc|llp)\b",
     re.I,
 )
 # A stem stopword like "banking" is excluded on its own (marketing prose), but
@@ -287,12 +290,14 @@ def line_names_institution(line: str) -> bool:
     """Whether a line names a financial institution.
 
     Word-boundary term match, plus a "banco"/"bank" stem so a one-token brand
-    is recognized while common stem-sharing words are excluded -- except when a
-    stopword like "banking" heads a corporate entity name led by a proper noun.
+    is recognized while common stem-sharing words are excluded. An alphanumeric
+    brand needs an adjacent legal-entity suffix; otherwise it is review-only
+    evidence, never an automatic issuer. A stopword like "banking" can still
+    head a corporate entity name led by a proper noun.
     """
     if INSTITUTION_TERM_RE.search(line):
         return True
-    if INSTITUTION_ALNUM_BRAND_RE.search(line):
+    if INSTITUTION_ALNUM_BRAND_LEGAL_RE.search(line):
         return True
     for match in INSTITUTION_BANKING_ENTITY_RE.finditer(line):
         # Require the lead word to be a proper noun (capitalized/all-caps), so
@@ -2800,6 +2805,44 @@ def command_self_test(_args: argparse.Namespace) -> int:
         # institution hint.
         if not detect_institution_hints(["Marca66 S.A."]):
             failures.append("institution-stem: 'Marca66 S.A.' must be recognized as an institution")
+        for header in ("Page1", "Report2025", "Jan2025", "Q1FY2025"):
+            if line_names_institution(header):
+                failures.append(f"institution-alnum: {header!r} must not be automatic issuer evidence")
+            generic_text = (
+                f"{header}\nMonthly Statement\nAccount 12345678\n"
+                "Statement period January 1 2025 to January 31 2025\n"
+                "Currency USD\nClosing balance 100.00 USD"
+            )
+            unknown_issuer = build_preflight(
+                [synthetic_file(f"{header}.pdf", generic_text)],
+                2025,
+                "one-institution",
+                root / f"{header}-issuer.json",
+                root / f"{header}-issuer-review.csv",
+            )
+            if unknown_issuer["institution_hints"] or not any(
+                gate.get("code") == "unknown-institution" for gate in unknown_issuer["review_gates"]
+            ):
+                failures.append(f"institution-alnum: {header!r} must require an institution review")
+        required_unknown_issuer = build_preflight(
+            [
+                synthetic_file(
+                    "page1-required.pdf",
+                    "Page1\nMonthly Statement\nAccount 12345678\n"
+                    "Statement period January 1 2025 to January 31 2025\n"
+                    "Currency USD\nClosing balance 100.00 USD",
+                )
+            ],
+            2025,
+            "one-account",
+            root / "page1-required.json",
+            root / "page1-required-review.csv",
+            require_institution=True,
+        )
+        if required_unknown_issuer["institution_hints"] or not any(
+            gate.get("code") == "unknown-institution" for gate in required_unknown_issuer["review_gates"]
+        ):
+            failures.append("institution-alnum: Page1 must require issuer confirmation for FBAR intake")
         if not line_names_institution("Bankinter"):
             failures.append("institution-stem: 'Bankinter' must be recognized as an institution")
         if line_names_institution("Personal banking made easy"):

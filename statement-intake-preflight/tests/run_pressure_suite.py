@@ -45,9 +45,11 @@ WORK = Path(tempfile.mkdtemp(prefix="preflight-pressure-"))
 results: list[tuple[str, bool, str]] = []
 
 
-def make_pdf(name: str, lines: list[str]) -> Path:
+def make_pdf(name: str, lines: list[str], *, draw_logo: bool = False) -> Path:
     path = WORK / name
     doc = canvas.Canvas(str(path))
+    if draw_logo:
+        doc.circle(68, 770, 18, fill=1)
     y = 800
     for line in lines:
         if y < 60:
@@ -393,6 +395,29 @@ proc, d = run("inst-brand66", [str(p)], scope="one-institution")
 check("INST-7 one-token alphanumeric brand 'Marca66' is recognized as an institution",
       d and d["institution_hints"] and "unknown-institution" not in gates_of(d),
       f"hints={d['institution_hints'] if d else '?'}")
+
+for token in ("Page1", "Report2025", "Jan2025", "Q1FY2025"):
+    p = make_pdf(f"inst-{token}.pdf", [token, "Monthly Statement", "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+                                         "Statement period January 1 2025 to January 31 2025", "Currency USD", "Closing balance 100.00 USD"])
+    proc, d = run(f"inst-{token}", [str(p)], scope="one-institution")
+    check(f"INST-7A boilerplate alphanumeric header {token!r} requires issuer review",
+          d and d["institution_hints"] == [] and "unknown-institution" in gates_of(d),
+          f"hints={d['institution_hints'] if d else '?'} gates={gates_of(d)}")
+
+p = make_pdf("TrustedBank-logo.pdf", ["Monthly Statement", "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+                                        "Statement period January 1 2025 to January 31 2025", "Currency USD", "Closing balance 100.00 USD"],
+             draw_logo=True)
+proc, d = run("inst-logo-filename", [str(p)], scope="one-institution")
+check("INST-7B graphic logo and filename alone require issuer review",
+      d and d["institution_hints"] == [] and "unknown-institution" in gates_of(d),
+      f"hints={d['institution_hints'] if d else '?'} gates={gates_of(d)}")
+
+p = make_pdf("inst-page1-required.pdf", ["Page1", "Monthly Statement", "Account 12345678",  # privacy-gate: allow (synthetic account fixture)
+                                           "Statement period January 1 2025 to January 31 2025", "Currency USD", "Closing balance 100.00 USD"])
+proc, d = run("inst-page1-required", [str(p)], scope="one-account", extra=["--require-institution"])
+check("INST-7C boilerplate alphanumeric header cannot satisfy FBAR issuer requirement",
+      d and d["institution_hints"] == [] and "unknown-institution" in gates_of(d),
+      f"hints={d['institution_hints'] if d else '?'} gates={gates_of(d)}")
 
 a = make_pdf("inst-acc.pdf", ["Banco Bogota Ejemplo", "Cuenta Nro. 55556666",  # privacy-gate: allow (synthetic account fixture)
              "Periodo: 1 de enero 2025 al 31 de enero 2025", "Moneda: COP"])
