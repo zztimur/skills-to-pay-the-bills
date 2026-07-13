@@ -972,12 +972,15 @@ def detect_periods(lines: Iterable[str]) -> list[str]:
         if not line:
             continue
         has_year = bool(YEAR_RE.search(line))
-        labelled_endpoint = bool(SPLIT_PERIOD_START_RE.search(line) or SPLIT_PERIOD_END_RE.search(line))
+        # ``desde``/``from`` also occur inside transaction descriptions. Treat
+        # them as statement-period evidence only when they begin a compact
+        # heading, never merely because the word and one transaction date share
+        # a line.
+        period_heading = bool(PERIOD_HEADING_PREFIX_RE.search(line))
         if (
             NUMERIC_PERIOD_RE.search(line)
             or has_connected_period_dates(line)
-            or (labelled_endpoint and bool(line_dates(line)))
-            or (PERIOD_HEADING_PREFIX_RE.search(line) and has_year)
+            or (period_heading and has_year)
             or is_month_year_period_heading(line)
         ):
             periods.append(line)
@@ -3453,6 +3456,48 @@ def command_self_test(_args: argparse.Namespace) -> int:
         ]
         if detect_periods(transaction_narratives):
             failures.append("display-periods: transaction/month narratives must not become statement-period labels")
+
+        # A transaction line can contain a real date and the same Spanish
+        # ``desde`` word used by statement-period endpoints. It must not leak
+        # its narrative or balance values into the JSON/CSV review artifacts.
+        display_period_header = "Estado de cuenta para el periodo de: 2025/05/01 a 2025/05/31"
+        transaction_period_sentinel = "TXN-LEAK-CHECK-57"
+        transaction_with_endpoint_word = (
+            f"25/05/2025 {transaction_period_sentinel} desde transferencia $500,000.00 $500,001.00"
+        )
+        if detect_periods([display_period_header, transaction_with_endpoint_word]) != [display_period_header]:
+            failures.append("display-periods: dated transaction with 'desde' must not become a period label")
+        display_artifact = build_preflight(
+            [
+                synthetic_file(
+                    "display-periods.pdf",
+                    "\n".join(
+                        [
+                            "Example Financial Statement",
+                            "Account 12345678",
+                            display_period_header,
+                            "Currency USD",
+                            transaction_with_endpoint_word,
+                        ]
+                    ),
+                )
+            ],
+            2025,
+            "one-account",
+            root / "display-periods.json",
+            root / "display-periods-review.csv",
+        )
+        display_artifact_periods = display_artifact["statement_files"][0].get("detected_periods", [])  # type: ignore[index]
+        if display_artifact_periods != [display_period_header]:
+            failures.append(
+                f"display-periods: artifacts must retain only the statement heading, got {display_artifact_periods}"
+            )
+        write_json(root / "display-periods.json", display_artifact)
+        write_review_csv(root / "display-periods-review.csv", display_artifact)
+        display_json = (root / "display-periods.json").read_text(encoding="utf-8")
+        display_csv = (root / "display-periods-review.csv").read_text(encoding="utf-8")
+        if transaction_period_sentinel in display_json or transaction_period_sentinel in display_csv:
+            failures.append("display-periods: transaction narrative must not leak into JSON/CSV review artifacts")
 
         # Spanish abbreviated months with hyphenated day-month-year labels are
         # common in LATAM statements. They must become source-bound intervals,
