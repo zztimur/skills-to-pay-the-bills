@@ -347,6 +347,26 @@ MONTH_NAMES = (
     "diciembre",
 )
 
+MONTH_ABBREVIATIONS = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "sept": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+    "ene": 1,
+    "abr": 4,
+    "ago": 8,
+    "dic": 12,
+}
+
 MONTH_NUMBERS = {
     "january": 1,
     "february": 2,
@@ -372,6 +392,7 @@ MONTH_NUMBERS = {
     "octubre": 10,
     "noviembre": 11,
     "diciembre": 12,
+    **MONTH_ABBREVIATIONS,
 }
 
 # Structural statement words stripped before comparing two institution hints, so
@@ -484,16 +505,20 @@ NUMERIC_PERIOD_RE = re.compile(
 NUMERIC_DATE_RE = re.compile(
     r"\b(?P<first>\d{1,4})[./-](?P<second>\d{1,2})[./-](?P<third>\d{1,4})\b"
 )
-_MONTH_TOKEN = "|".join(re.escape(month) for month in MONTH_NAMES)
+_MONTH_TOKEN = "|".join(re.escape(month) for month in sorted(MONTH_NUMBERS, key=len, reverse=True))
+MONTH_TOKEN_RE = re.compile(rf"\b(?:{_MONTH_TOKEN})\.?(?!\w)", re.I)
 TEXT_DATE_MONTH_FIRST_RE = re.compile(
-    rf"\b(?P<month>{_MONTH_TOKEN})\s+(?P<day>\d{{1,2}})(?:st|nd|rd|th)?[,]?\s+(?P<year>19\d{{2}}|20\d{{2}})\b",
+    rf"\b(?P<month>{_MONTH_TOKEN})\.?(?:[\s-]+)(?P<day>\d{{1,2}})(?:st|nd|rd|th)?(?:\s*,\s*|[\s-]+)(?P<year>19\d{{2}}|20\d{{2}})\b",
     re.I,
 )
 TEXT_DATE_DAY_FIRST_RE = re.compile(
-    rf"\b(?P<day>\d{{1,2}})(?:st|nd|rd|th)?(?:\s+de)?\s+(?P<month>{_MONTH_TOKEN})[,]?\s+(?P<year>19\d{{2}}|20\d{{2}})\b",
+    rf"\b(?P<day>\d{{1,2}})(?:st|nd|rd|th)?(?:\s+de\s+|[-\s]+)(?P<month>{_MONTH_TOKEN})\.?(?:\s+de\s+|[-,\s]+)(?P<year>19\d{{2}}|20\d{{2}})\b",
     re.I,
 )
 PERIOD_CONNECTOR_RE = re.compile(r"(?:[-–—]|\b(?:to|through|al|hasta|bis|desde)\b)", re.I)
+SPLIT_PERIOD_START_RE = re.compile(r"\b(?:desde|from)\b", re.I)
+SPLIT_PERIOD_END_RE = re.compile(r"\b(?:hasta|through)\b", re.I)
+SPLIT_PERIOD_MAX_LINE_DISTANCE = 2
 
 # A prior-year date belongs in evidence when the statement labels it as an
 # opening/prior balance. It must not silently become a second statement period.
@@ -742,7 +767,7 @@ def file_profile(
 # hard copyright marker to its year across an intervening month ("© May 2019"),
 # never to rescue a year next to a dual-use marker.
 ISO_DATE_TAIL_RE = re.compile(r"[-/.]\d{1,2}[-/.]\d{1,2}")
-MONTH_ADJ_RE = re.compile(r"\b(?:" + "|".join(MONTH_NAMES) + r")\b", re.I)
+MONTH_ADJ_RE = MONTH_TOKEN_RE
 MONTH_YEAR_WINDOW = 5
 
 
@@ -841,7 +866,7 @@ def detect_periods(lines: Iterable[str]) -> list[str]:
     for line in lines:
         low = line.casefold()
         has_period_term = any(term in low for term in ("period", "periodo", "from", "to", "desde", "hasta", "statement date"))
-        has_month = any(month in low for month in MONTH_NAMES)
+        has_month = bool(MONTH_TOKEN_RE.search(low))
         has_year = bool(YEAR_RE.search(line))
         if (has_period_term and has_year) or (has_month and has_year) or NUMERIC_PERIOD_RE.search(line):
             periods.append(line)
@@ -885,7 +910,7 @@ def line_dates(line: str) -> list[tuple[date, tuple[int, int], str]]:
             found.append((parsed[0], match.span(), parsed[1]))
     for pattern in (TEXT_DATE_MONTH_FIRST_RE, TEXT_DATE_DAY_FIRST_RE):
         for match in pattern.finditer(line):
-            month = MONTH_NUMBERS[match.group("month").casefold()]
+            month = MONTH_NUMBERS[match.group("month").casefold().rstrip(".")]
             day = int(match.group("day"))
             parsed = _calendar_date(int(match.group("year")), month, day)
             if parsed:
@@ -905,12 +930,41 @@ def line_dates(line: str) -> list[tuple[date, tuple[int, int], str]]:
 def detect_period_intervals(page_lines: Iterable[object]) -> list[dict[str, object]]:
     """Return complete, source-referenced statement-period intervals.
 
-    This intentionally requires two complete dates joined in one extracted line.
-    Month-only labels remain in ``detected_periods`` for human review, but are
-    not upgraded into calendar coverage claims.
+    Prefer two complete dates joined in one extracted line. Some columnar PDFs
+    instead put a labelled ``Desde`` date immediately before a labelled
+    ``Hasta`` date; accept that narrow same-page pair while retaining both
+    source references. Month-only labels remain in ``detected_periods`` for
+    human review, but are not upgraded into calendar coverage claims.
     """
     intervals: list[dict[str, object]] = []
-    seen: set[tuple[str, str, int, int]] = set()
+    seen: set[tuple[str, str, int, int, int]] = set()
+
+    def add_interval(
+        start: date,
+        end: date,
+        start_confidence: str,
+        end_confidence: str,
+        page: int,
+        start_line: int,
+        end_line: int | None = None,
+    ) -> None:
+        if end < start:
+            return
+        actual_end_line = end_line if end_line is not None else start_line
+        key = (start.isoformat(), end.isoformat(), page, start_line, actual_end_line)
+        if key in seen:
+            return
+        seen.add(key)
+        item: dict[str, object] = {
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "confidence": "high" if start_confidence == end_confidence == "high" else "medium",
+            "source_ref": {"page": page, "line": start_line},
+        }
+        if end_line is not None:
+            item["end_source_ref"] = {"page": page, "line": end_line}
+        intervals.append(item)
+
     for raw_page in page_lines:
         if not isinstance(raw_page, dict):
             continue
@@ -918,28 +972,28 @@ def detect_period_intervals(page_lines: Iterable[object]) -> list[dict[str, obje
         raw_lines = raw_page.get("lines")
         if not isinstance(raw_lines, list):
             continue
+        pending_start: tuple[date, int, str] | None = None
         for line_number, raw_line in enumerate(raw_lines, start=1):
             line = str(raw_line)
             dates = line_dates(line)
-            if len(dates) < 2:
+            if len(dates) >= 2:
+                start, start_span, start_confidence = dates[0]
+                end, end_span, end_confidence = dates[-1]
+                connector = line[start_span[1]:end_span[0]]
+                if PERIOD_CONNECTOR_RE.search(connector):
+                    add_interval(start, end, start_confidence, end_confidence, page, line_number)
+
+            if len(dates) != 1:
                 continue
-            start, start_span, start_confidence = dates[0]
-            end, end_span, end_confidence = dates[-1]
-            connector = line[start_span[1]:end_span[0]]
-            if end < start or not PERIOD_CONNECTOR_RE.search(connector):
+            endpoint, _span, confidence = dates[0]
+            if SPLIT_PERIOD_START_RE.search(line):
+                pending_start = (endpoint, line_number, confidence)
                 continue
-            key = (start.isoformat(), end.isoformat(), page, line_number)
-            if key in seen:
-                continue
-            seen.add(key)
-            intervals.append(
-                {
-                    "start": start.isoformat(),
-                    "end": end.isoformat(),
-                    "confidence": "high" if start_confidence == end_confidence == "high" else "medium",
-                    "source_ref": {"page": page, "line": line_number},
-                }
-            )
+            if SPLIT_PERIOD_END_RE.search(line) and pending_start is not None:
+                start, start_line, start_confidence = pending_start
+                if line_number - start_line <= SPLIT_PERIOD_MAX_LINE_DISTANCE:
+                    add_interval(start, endpoint, start_confidence, confidence, page, start_line, line_number)
+                pending_start = None
     return intervals
 
 
@@ -947,11 +1001,14 @@ def detect_contextual_date_evidence(
     page_lines: Iterable[object], period_intervals: Iterable[dict[str, object]]
 ) -> list[dict[str, object]]:
     """Keep labelled opening/prior dates without promoting them to periods."""
-    period_refs = {
-        (int(interval.get("source_ref", {}).get("page", 0)), int(interval.get("source_ref", {}).get("line", 0)))
-        for interval in period_intervals
-        if isinstance(interval.get("source_ref"), dict)
-    }
+    period_refs: set[tuple[int, int]] = set()
+    for interval in period_intervals:
+        if not isinstance(interval, dict):
+            continue
+        for key in ("source_ref", "end_source_ref"):
+            source_ref = interval.get(key)
+            if isinstance(source_ref, dict):
+                period_refs.add((int(source_ref.get("page", 0)), int(source_ref.get("line", 0))))
     evidence: list[dict[str, object]] = []
     seen: set[tuple[int, int, int, str | None]] = set()
     for raw_page in page_lines:
@@ -2989,6 +3046,45 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("numeric-period: a dd/mm/yyyy 'al' range must be detected as a period")
         if detect_periods(["Ref 12/34 amount 56.00"]):
             failures.append("numeric-period: a lone fraction-like token must not read as a period range")
+
+        # Spanish abbreviated months with hyphenated day-month-year labels are
+        # common in LATAM statements. They must become source-bound intervals,
+        # not merely display-only period hints, so missing quarters can gate.
+        spanish_period_lines = [
+            "DESDE: 01-Ene-2025",
+            "HASTA: 31-Mar-2025",
+            "DESDE: 01-Abr-2025",
+            "HASTA: 30-Jun-2025",
+            "DESDE: 01-Jul-2025",
+            "HASTA: 30-Sep-2025",
+            "DESDE: 01-Oct-2025",
+            "HASTA: 31-Dic-2025",
+        ]
+        if not detect_periods(spanish_period_lines):
+            failures.append("spanish-abbrev-period: abbreviated Spanish dates must be detected as periods")
+        spanish_intervals = detect_period_intervals([{"page": 1, "lines": spanish_period_lines}])
+        expected_spanish_intervals = [
+            ("2025-01-01", "2025-03-31"),
+            ("2025-04-01", "2025-06-30"),
+            ("2025-07-01", "2025-09-30"),
+            ("2025-10-01", "2025-12-31"),
+        ]
+        if [(item["start"], item["end"]) for item in spanish_intervals] != expected_spanish_intervals:
+            failures.append(f"spanish-abbrev-period: unexpected source-bound intervals {spanish_intervals}")
+        if not all(
+            isinstance(item.get("end_source_ref"), dict) and item["end_source_ref"].get("page") == 1
+            for item in spanish_intervals
+        ):
+            failures.append(f"spanish-abbrev-period: split ranges must retain end source references {spanish_intervals}")
+        if len(spanish_intervals) == 4:
+            spanish_missing_q2 = period_coverage_review(
+                [spanish_intervals[0], spanish_intervals[2], spanish_intervals[3]], 2025
+            )
+            spanish_missing_q4 = period_coverage_review(spanish_intervals[:3], 2025)
+            if not spanish_missing_q2.get("calendar_gaps"):
+                failures.append("spanish-abbrev-period: omitted Q2 must produce a coverage gap")
+            if not spanish_missing_q4.get("calendar_gaps"):
+                failures.append("spanish-abbrev-period: omitted Q4 must produce a coverage gap")
 
         # Source-aware period evidence keeps an opening balance's prior-year
         # date visible, but does not mistake it for a second statement period.

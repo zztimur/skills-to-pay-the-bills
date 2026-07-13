@@ -540,6 +540,35 @@ proc, d = run("period-missing-q4", [str(q1), str(q2), str(q3)])
 check("PER-5 omitted Q4 trips possible-missing-statement-period",
       d and "possible-missing-statement-period" in gates_of(d), f"gates={gates_of(d)}")
 
+# COP-style statements use Spanish abbreviated months and hyphenated dates.
+# Keep the fixture synthetic while exercising the real PDF text-extraction path.
+def spanish_abbrev_quarterly_pdf(name: str, start: str, end: str) -> Path:
+    return make_pdf(name, [
+        "Banco Ejemplo S.A.",
+        "Cuenta 55556666",  # privacy-gate: allow (synthetic account fixture)
+        f"DESDE: {start}",
+        f"HASTA: {end}",
+        "Moneda COP",
+    ])
+
+spanish_q1 = spanish_abbrev_quarterly_pdf("spanish-period-q1.pdf", "01-Ene-2025", "31-Mar-2025")
+spanish_q2 = spanish_abbrev_quarterly_pdf("spanish-period-q2.pdf", "01-Abr-2025", "30-Jun-2025")
+spanish_q3 = spanish_abbrev_quarterly_pdf("spanish-period-q3.pdf", "01-Jul-2025", "30-Sep-2025")
+spanish_q4 = spanish_abbrev_quarterly_pdf("spanish-period-q4.pdf", "01-Oct-2025", "31-Dic-2025")
+proc, d = run("spanish-period-complete", [str(spanish_q1), str(spanish_q2), str(spanish_q3), str(spanish_q4)])
+check("PER-6 Spanish abbreviated quarterly dates produce 2025 period coverage",
+      d and d["coverage_hints"].get("statement_period_years") == [2025]
+      and not d["coverage_hints"].get("period_coverage_review", {}).get("calendar_gaps"),
+      f"coverage={d['coverage_hints'] if d else '?'}")
+
+proc, d = run("spanish-period-missing-q2", [str(spanish_q1), str(spanish_q3), str(spanish_q4)])
+check("PER-7 Spanish abbreviated omitted Q2 trips possible-missing-statement-period",
+      d and "possible-missing-statement-period" in gates_of(d), f"gates={gates_of(d)}")
+
+proc, d = run("spanish-period-missing-q4", [str(spanish_q1), str(spanish_q2), str(spanish_q3)])
+check("PER-8 Spanish abbreviated omitted Q4 trips possible-missing-statement-period",
+      d and "possible-missing-statement-period" in gates_of(d), f"gates={gates_of(d)}")
+
 institution_noise = make_pdf("institution-noise.pdf", [
     "Marca66 S.A.",
     "Extracto de cuenta",
