@@ -203,6 +203,16 @@ MONTH_DATE_PATTERNS = (
     re.compile(rf"\b(\d{{1,2}})(?:\s+de\s+|[-\s]+)({MONTH_RE})\.?(?:\s+de\s+|[-,\s]+)(20\d{{2}})\b", re.I),
 )
 
+# A period-end summary is not a transaction row.  Only accept the tightly
+# labelled form below after the source-bound preflight period on the same page
+# has been re-verified.  This deliberately excludes generic "final balance"
+# language, transaction descriptions, and unanchored totals.
+PERIOD_END_SUMMARY_RE = re.compile(
+    r"\b(?:al\s+)?(?:final|cierre)\s+(?:del?|de\s+la)\s+per[ií]odo\b"
+    r"|\b(?:period|statement)\s+(?:end|ending|closing)\b",
+    re.I,
+)
+
 # One monetary token. Whitespace bridges digit groups only in the explicit
 # space-grouped form (French/NBSP thousands like "500 000" or "1 234,56"). A
 # decimal point breaks the run of 3-digit groups, so decimal-bearing columns
@@ -249,6 +259,9 @@ class BalanceCandidate:
     confidence: str
     source: SourceRef
     notes: tuple[str, ...] = ()
+    candidate_type: str = "transaction-row"
+    period_end: date | None = None
+    period_end_source: SourceRef | None = None
 
 
 @dataclass(frozen=True)
@@ -257,7 +270,8 @@ class PagePeriodContext:
 
     start: date
     end: date
-    source_line: int
+    source: SourceRef
+    end_source: SourceRef
 
 
 @dataclass(frozen=True)
@@ -767,6 +781,52 @@ def extract_balance_candidates(
                 )
             )
 
+    # A statement's labelled closing summary can provide an exact period-end
+    # observation even when transaction rows stop earlier.  It must remain
+    # distinct from a transaction-row candidate: require one re-verified page
+    # period, one amount-bearing summary line, no line date, and an exact
+    # statement-period end inside the requested year.  Do not use it to infer
+    # intervening daily balances.
+    for ref, line in lines:
+        page_key = (normalize_preflight_path(ref.file), ref.page)
+        contexts_for_page = period_contexts.get(page_key, ())
+        if len(contexts_for_page) != 1:
+            continue
+        context = contexts_for_page[0]
+        if context.end.year != tax_year or not PERIOD_END_SUMMARY_RE.search(line):
+            continue
+        if parse_line_dates(line):
+            continue
+        money_values = parse_money_values(mask_date_spans(line))
+        if len(money_values) != 1:
+            continue
+        amount, token, _pos, parse_notes = money_values[0]
+        notes = [
+            f"Period-end summary amount: {token}",
+            (
+                "Source-bound period-end summary matched the verified statement period end "
+                f"{context.end.isoformat()}; it does not evidence intervening days."
+            ),
+        ]
+        if parse_notes:
+            ambiguous_amount_lines += 1
+            notes.extend(parse_notes)
+        candidates.append(
+            BalanceCandidate(
+                balance_date=context.end,
+                amount=amount,
+                currency=currency,
+                # Keep summaries reviewable even when their period/date source
+                # binding is exact: they are not transaction-row balances.
+                confidence="medium",
+                source=ref,
+                notes=tuple(notes),
+                candidate_type="period-end-summary",
+                period_end=context.end,
+                period_end_source=context.end_source,
+            )
+        )
+
     if outside_year:
         warnings.append(f"Ignored {outside_year} balance candidate date(s) outside the requested tax year.")
     if low_confidence:
@@ -818,6 +878,17 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
             confidence = selected.confidence
             notes = list(selected.notes)
             review_flags: list[dict[str, object]] = []
+            for summary_candidate in day_candidates:
+                if summary_candidate.candidate_type != "period-end-summary":
+                    continue
+                review_flags.append(
+                    {
+                        "code": "period-end-summary",
+                        "matched_period_end": iso_day(summary_candidate.period_end or day),
+                        "summary_source_ref": source_ref_to_string(summary_candidate.source),
+                        "period_end_source_ref": source_ref_to_string(summary_candidate.period_end_source),
+                    }
+                )
             amounts = sorted({item.amount for item in day_candidates})
             if len(amounts) > 1:
                 low_amount, high_amount = amounts[0], amounts[-1]
@@ -843,6 +914,7 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                                 {
                                     "native_balance": fmt_native(item.amount),
                                     "source_ref": source_ref_to_string(item.source),
+                                    "candidate_type": item.candidate_type,
                                 }
                                 for item in sorted(
                                     day_candidates,
@@ -859,6 +931,11 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
             observed_days += 1
             if confidence == "low":
                 low_confidence_days += 1
+            source_refs = [source_ref_to_string(selected.source)]
+            if selected.candidate_type == "period-end-summary":
+                end_source_ref = source_ref_to_string(selected.period_end_source)
+                if end_source_ref and end_source_ref not in source_refs:
+                    source_refs.append(end_source_ref)
             rows.append(
                 {
                     "date": iso_day(day),
@@ -866,9 +943,9 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                     "native_balance": fmt_native(selected.amount),
                     "usd_balance": None,
                     "threshold_usd_value": None,
-                    "balance_source": "observed",
+                    "balance_source": "period-end-summary" if selected.candidate_type == "period-end-summary" else "observed",
                     "confidence": confidence,
-                    "source_refs": [source_ref_to_string(selected.source)],
+                    "source_refs": source_refs,
                     "notes": notes,
                     "review_flags": review_flags,
                 }
@@ -961,23 +1038,33 @@ def source_ref_to_string(ref: SourceRef | None) -> str:
 
 def build_review_summary(rows: list[dict[str, object]]) -> dict[str, object]:
     """Return a compact, deterministic card for rows that need human review."""
-    flagged_dates: list[dict[str, object]] = []
+    same_day_items: list[dict[str, object]] = []
+    period_end_items: list[dict[str, object]] = []
     for row in rows:
         flags = row.get("review_flags")
         if not isinstance(flags, list) or not flags:
             continue
-        flagged_dates.append(
-            {
-                "date": row.get("date"),
-                "flags": [flag for flag in flags if isinstance(flag, dict)],
-            }
-        )
+        same_day_flags = [
+            flag
+            for flag in flags
+            if isinstance(flag, dict) and flag.get("code") == "material-same-day-balance-candidates"
+        ]
+        if same_day_flags:
+            same_day_items.append({"date": row.get("date"), "flags": same_day_flags})
+        for flag in flags:
+            if isinstance(flag, dict) and flag.get("code") == "period-end-summary":
+                period_end_items.append({"date": row.get("date"), "flag": flag})
     return {
         "same_day_balance_candidates": {
-            "count": len(flagged_dates),
-            "requires_user_review": bool(flagged_dates),
-            "items": flagged_dates,
-        }
+            "count": len(same_day_items),
+            "requires_user_review": bool(same_day_items),
+            "items": same_day_items,
+        },
+        "period_end_summaries": {
+            "count": len(period_end_items),
+            "requires_user_review": bool(period_end_items),
+            "items": period_end_items,
+        },
     }
 
 
@@ -995,6 +1082,13 @@ def format_review_flags(flags: object) -> str:
                 f"selected={flag.get('selected_native_balance')}; "
                 f"range={flag.get('minimum_native_balance')}..{flag.get('maximum_native_balance')}; "
                 f"source={flag.get('selected_source_ref')})"
+            )
+        elif flag.get("code") == "period-end-summary":
+            summaries.append(
+                "period-end summary "
+                f"(period_end={flag.get('matched_period_end')}; "
+                f"source={flag.get('summary_source_ref')}; "
+                f"period_end_source={flag.get('period_end_source_ref')})"
             )
         else:
             summaries.append(str(flag.get("code") or "review flag"))
@@ -1014,6 +1108,22 @@ def print_same_day_candidate_review_card(account_data: dict[str, object]) -> Non
     print(
         f"Same-day candidate review: {len(items)} date(s) need user review. "
         "Detailed values and source references are in review_summary and the review CSV."
+    )
+
+
+def print_period_end_summary_review_card(account_data: dict[str, object]) -> None:
+    summary = account_data.get("review_summary")
+    if not isinstance(summary, dict):
+        return
+    period_end = summary.get("period_end_summaries")
+    if not isinstance(period_end, dict):
+        return
+    items = period_end.get("items")
+    if not isinstance(items, list) or not items:
+        return
+    print(
+        f"Period-end summary review: {len(items)} source-bound summary observation(s) need user review. "
+        "Exact period ends and source references are in review_summary and the review CSV."
     )
 
 
@@ -1109,7 +1219,7 @@ def preflight_page_period_contexts(
     to contain its recorded date after the extraction-time fingerprint check.
     """
     source_lines = {
-        (normalize_preflight_path(ref.file), ref.page, ref.line): text for ref, text in lines
+        (normalize_preflight_path(ref.file), ref.page, ref.line): (ref, text) for ref, text in lines
     }
     raw_files = preflight.get("statement_files")
     if not isinstance(raw_files, list):
@@ -1141,14 +1251,16 @@ def preflight_page_period_contexts(
                 continue
             if end < start or page <= 0 or line_number <= 0:
                 continue
-            source_line = source_lines.get((normalized_path, page, line_number))
-            if not source_line:
+            source_item = source_lines.get((normalized_path, page, line_number))
+            if not source_item:
                 continue
+            source_ref, source_line = source_item
             end_source_ref = raw_period.get("end_source_ref")
             if end_source_ref is None:
                 verified_dates = {parsed_date for parsed_date, _confidence, _note in parse_line_dates(source_line)}
                 if start not in verified_dates or end not in verified_dates:
                     continue
+                end_ref = source_ref
             elif isinstance(end_source_ref, dict):
                 try:
                     end_page = int(end_source_ref.get("page"))
@@ -1157,9 +1269,10 @@ def preflight_page_period_contexts(
                     continue
                 if end_page != page or end_line_number <= 0:
                     continue
-                end_source_line = source_lines.get((normalized_path, end_page, end_line_number))
-                if not end_source_line:
+                end_source_item = source_lines.get((normalized_path, end_page, end_line_number))
+                if not end_source_item:
                     continue
+                end_ref, end_source_line = end_source_item
                 start_dates = {parsed_date for parsed_date, _confidence, _note in parse_line_dates(source_line)}
                 end_dates = {parsed_date for parsed_date, _confidence, _note in parse_line_dates(end_source_line)}
                 if start not in start_dates or end not in end_dates:
@@ -1167,7 +1280,7 @@ def preflight_page_period_contexts(
             else:
                 continue
             key = (normalized_path, page)
-            context = PagePeriodContext(start=start, end=end, source_line=line_number)
+            context = PagePeriodContext(start=start, end=end, source=source_ref, end_source=end_ref)
             if context not in contexts[key]:
                 contexts[key].append(context)
     return {key: tuple(value) for key, value in contexts.items()}
@@ -1684,6 +1797,7 @@ def command_extract_account(args: argparse.Namespace) -> int:
     print(f"Wrote account JSON: {out_path}")
     print(f"Wrote review CSV: {csv_path}")
     print_same_day_candidate_review_card(data)
+    print_period_end_summary_review_card(data)
     if warnings:
         print("Review warnings:")
         for warning in sorted(set(warnings)):
@@ -2280,6 +2394,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         test_sign_formats()
         test_line_extraction()
         test_source_bound_short_dates(root)
+        test_source_bound_period_end_summaries(root)
         test_account_hint_selection()
         test_build_daily_rows()
         test_native_balance_precision()
@@ -2648,6 +2763,71 @@ def test_source_bound_short_dates(root: Path) -> None:
     candidates, warnings = extract_balance_candidates(mismatched_lines, 2025, "COP", page_period_contexts=contexts)
     assert not candidates, candidates
     assert any("No balance candidates" in warning for warning in warnings), warnings
+
+
+def test_source_bound_period_end_summaries(root: Path) -> None:
+    """Keep period-end summaries source-bound and distinct from daily rows."""
+    pdf = root / "period-end-statement.pdf"
+    pdf.write_bytes(b"synthetic period-end statement")
+    preflight_path = write_preflight_fixture(root, "period-end-preflight", 2025, "one-account", [pdf])
+    preflight = load_json(preflight_path)
+    statement_files = preflight.get("statement_files")
+    assert isinstance(statement_files, list) and isinstance(statement_files[0], dict)
+    statement_files[0]["period_intervals"] = [
+        {
+            "start": "2025-10-01",
+            "end": "2025-12-31",
+            "confidence": "high",
+            "source_ref": {"page": 1, "line": 1},
+        }
+    ]
+    header = "DESDE: 2025/10/01 HASTA: 2025/12/31"
+    summary_line = "Saldo al final del período 8,905,317"
+    lines = [
+        (SourceRef(str(pdf), 1, 1, header), header),
+        (SourceRef(str(pdf), 1, 2, summary_line), summary_line),
+    ]
+    contexts = preflight_page_period_contexts(preflight, lines)
+    candidates, warnings = extract_balance_candidates(lines, 2025, "COP", page_period_contexts=contexts)
+    assert not warnings, warnings
+    assert len(candidates) == 1, candidates
+    candidate = candidates[0]
+    assert candidate.balance_date == date(2025, 12, 31), candidate
+    assert candidate.amount == Decimal("8905317"), candidate
+    assert candidate.candidate_type == "period-end-summary", candidate
+    assert candidate.period_end == date(2025, 12, 31), candidate
+    assert candidate.period_end_source is not None and candidate.period_end_source.line == 1, candidate
+
+    rows, coverage, _warnings = build_daily_rows(2025, "COP", candidates)
+    assert rows[-1]["balance_source"] == "period-end-summary", rows[-1]
+    assert rows[-1]["source_refs"] == ["period-end-statement.pdf:p1:l2", "period-end-statement.pdf:p1:l1"], rows[-1]
+    assert rows[-2]["balance_source"] == "missing-opening-coverage", rows[-2]
+    assert coverage["observed_days"] == 1 and coverage["carried_forward_days"] == 0, coverage
+    assert coverage["trailing_carry_days"] == 0, coverage
+    flags = rows[-1]["review_flags"]
+    assert isinstance(flags, list) and flags == [
+        {
+            "code": "period-end-summary",
+            "matched_period_end": "2025-12-31",
+            "summary_source_ref": "period-end-statement.pdf:p1:l2",
+            "period_end_source_ref": "period-end-statement.pdf:p1:l1",
+        }
+    ], flags
+    review_summary = build_review_summary(rows)
+    assert review_summary["same_day_balance_candidates"]["count"] == 0, review_summary
+    assert review_summary["period_end_summaries"]["count"] == 1, review_summary
+    assert "period-end summary (period_end=2025-12-31;" in format_review_flags(flags)
+
+    unbound_candidates, _warnings = extract_balance_candidates(lines, 2025, "COP")
+    assert not unbound_candidates, unbound_candidates
+    other_page_lines = [
+        lines[0],
+        (SourceRef(str(pdf), 2, 1, summary_line), summary_line),
+    ]
+    other_page_candidates, _warnings = extract_balance_candidates(
+        other_page_lines, 2025, "COP", page_period_contexts=contexts
+    )
+    assert not other_page_candidates, other_page_candidates
 
 
 def test_account_hint_selection() -> None:

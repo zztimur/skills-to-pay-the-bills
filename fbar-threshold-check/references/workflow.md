@@ -104,7 +104,7 @@ The script writes:
 - Account JSON at `--out`.
 - Review CSV beside the JSON unless `--csv` is supplied.
 
-The review CSV has one row per day with native balance, USD balance placeholder, confidence, source references, notes, and a compact `review_flags` field. The account JSON also has `review_summary.same_day_balance_candidates`, which groups every materially different same-day candidate set with its date, candidate count/range, selected value, and source references. The extraction console reports only the number of flagged dates; inspect values only in the retained review artifacts.
+The review CSV has one row per day with native balance, USD balance placeholder, confidence, source references, notes, and a compact `review_flags` field. The account JSON also has `review_summary.same_day_balance_candidates`, which groups every materially different same-day candidate set with its date, candidate count/range, selected value, and source references. When a labelled closing amount is on a page with exactly one re-verified statement period, `review_summary.period_end_summaries` records the summary and exact period-end source references. A period-end summary is an exact-date observation only: it never backfills intervening days or clears carry-gap review. The extraction console reports only the number of flagged dates; inspect values only in the retained review artifacts.
 
 ## 6. Review Gate
 
@@ -126,6 +126,7 @@ Present this as a concise review card before asking for confirmation; do not ask
 - Coverage: observed days, carried-forward days, and any missing days or carry-forward gaps.
 - Flagged dates or rows, summarized in plain language, plus each review artifact path.
 - When `review_summary.same_day_balance_candidates.requires_user_review` is true, list its count and each flagged date's selected candidate/range and source references; do not ask the user to infer this from the raw ledger.
+- When `review_summary.period_end_summaries.requires_user_review` is true, list each exact period end plus its summary and period-end source references, and state that intervening carry gaps remain unobserved.
 - The exact next step: upload missing statements, correct an assumption, or confirm the ledger.
 
 Use a direct confirmation prompt such as:
