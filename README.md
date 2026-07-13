@@ -143,7 +143,7 @@ The command requires a clean `main` branch that is not behind `origin/main`. It 
 
 ## CI
 
-The root GitHub Actions workflow runs the checks that are stable on a clean runner:
+GitHub Actions runs these deterministic checks on pull requests and `main`; the release workflow runs the same checks against the tagged commit before creating its GitHub Release. Both workflows initialize the linked `skill-forge` submodule first:
 
 - strict `skill-forge` inspection for every skill package;
 - a strict `privacy-gate` scan of the repo tree, so a stray secret or private file fails the build the same way the pre-commit hook fails a commit;
