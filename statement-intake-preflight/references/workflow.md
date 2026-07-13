@@ -49,8 +49,8 @@ Open the JSON and CSV before continuing. Confirm:
 - `statement_files` are the exact PDFs expected for the downstream run, in that order. Each carries `content_bytes` and `content_sha256`, so a downstream run can reject substituted, reordered, or duplicated files.
 - `tax_year` and `scope` match the intended downstream workflow.
 - The files have enough machine-readable text.
-- `coverage_hints.statement_period_years`, source-referenced `period_intervals`, and any `contextual_date_evidence` support the requested year. A labelled prior-year opening balance, or an exact prior December 31 opening boundary ending in the requested year, is contextual evidence rather than a second statement period.
-- `coverage_hints.period_coverage_review` has no possible internal, leading, or trailing statement-period gap. Its period labels are intake hints only; they do not prove complete transaction or balance coverage.
+- `coverage_hints.statement_period_years`, source-referenced `period_intervals`, and any `contextual_date_evidence` support the requested year. Each aggregated period interval has independently traceable `source_ref` and `end_source_ref` objects with its source file, page, and extracted line; the CSV shows both as `start=` and `end=`. A labelled prior-year opening balance, or an exact prior December 31 opening boundary ending in the requested year, is contextual evidence rather than a second statement period.
+- `coverage_hints.period_coverage_review` has no possible internal, leading, or trailing statement-period gap. Its period labels are intake hints only, limited to source-labelled dates, connected date ranges, and compact month/year headings rather than transaction narratives; they do not prove complete transaction or balance coverage.
 - `currency.code` is usable, or weak/unknown currency received the specific ISO confirmation below.
 - `account_hints` describe one account when scope is `one-account`, or the user confirmed one-account scope without supplying an account number.
 - `institution_hints` describe one institution when scope is `one-institution` or when an FBAR one-account preflight explicitly used `--require-institution`.
@@ -72,6 +72,7 @@ the corroborated result and proceed.
 - Bare `$` or other weak/unknown currency evidence (`ambiguous-dollar` or `unknown-currency`): ask: “We could not corroborate the account currency from the statement text. Please confirm the ISO currency code (for example, `COP`).” Do not infer USD from `$`.
 - Contextual prior-year date: if the statement period is clearly inside the requested year and its coverage is otherwise clear, explain it without asking: “We found `2024-12-31` as a prior-year opening boundary. The detected statement period is 2025, so this date is contextual and does not change the statement year.” This includes a period that begins exactly on the prior December 31 and ends in the requested year. If coverage is unclear, ask: “We found `2024-12-31` in the Q1 statement. It appears to be a prior-year opening balance, while the statement period appears to be 2025. Please confirm that all supplied statements cover 2025 and that this date is contextual.”
 - Missing account identity in `one-account` scope (`unknown-account`): ask: “We could not extract a reliable account identifier from these statements. Please confirm that the supplied PDFs represent one account. You do not need to provide the account number.”
+- Incomplete account linkage in `one-account` scope (`incomplete-account-linkage`): ask: “We found one account identifier, but it is not present or equivalent in every supplied statement PDF. Please confirm that the supplied PDFs represent one account. You do not need to provide the account number.”
 - Missing issuer identity in `one-institution` scope, or opt-in FBAR `one-account --require-institution` scope (`unknown-institution`): ask: “We could not extract a reliable institution name from the statement text. If the statement visibly shows a logo or name, please confirm that institution name.” A graphic logo, PDF metadata, or filename can inform the user's review but is never automatic issuer evidence; do not OCR or infer an institution from it. For opt-in FBAR mixed issuer evidence (`possible-mixed-institutions`), ask: “The statements contain more than one institution hint. Please confirm the one institution these PDFs represent.”
 
 Do not use a user response to override `mixed-years`, a structural `stop` gate,
@@ -97,6 +98,7 @@ Complete gate catalog:
 | `mixed-currencies` | review | More than one currency was confirmed. |
 | `possible-mixed-accounts` | review (`one-account`) | More than one account identifier was found. |
 | `unknown-account` | review (`one-account`) | No account identifier was found. |
+| `incomplete-account-linkage` | review (`one-account`) | One canonical account identifier was found, but one or more supplied PDFs did not contain an equivalent source hint. |
 | `possible-mixed-institutions` | review (`one-institution` or opt-in FBAR `one-account --require-institution`) | More than one institution was found. |
 | `unknown-institution` | review (`one-institution` or opt-in FBAR `one-account --require-institution`) | No institution was found in early statement text. |
 
@@ -137,7 +139,7 @@ python3 "<package-root>/scripts/statement_intake_preflight.py" review-handoff \
 Repeat `--accept-gate` for every listed review code. Add only the resolution flags required by the source gates:
 
 - `--confirm-currency COP` accepts one supported ISO 4217 code only when preflight could not corroborate a currency (`ambiguous-dollar` or `unknown-currency`). It cannot override a confirmed or mixed currency set.
-- `--confirm-one-account` records a one-account assertion without collecting an account number. It is required for `unknown-account` or `possible-mixed-accounts` review gates.
+- `--confirm-one-account` records a one-account assertion without collecting an account number. It is required for `unknown-account`, `possible-mixed-accounts`, or `incomplete-account-linkage` review gates.
 - `--confirm-institution "Example Bank"` records a one-institution issuer name for an `unknown-institution` review gate. In opt-in FBAR `one-account --require-institution` intake, it also records the typed selection for `possible-mixed-institutions`; it never removes the source hints or accepted review gate.
 - `--confirm-statement-year 2025` records the requested tax year when year coverage is unknown or needs review. Pair it with `--classify-contextual-year 2024` only for extracted contextual/unresolved prior-year evidence. A genuine `mixed-years` statement-period gate cannot be overridden; correct the year or statement set and rerun preflight.
 

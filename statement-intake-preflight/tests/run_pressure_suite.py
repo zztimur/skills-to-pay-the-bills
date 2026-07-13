@@ -486,6 +486,18 @@ check("PER-1 numeric period '01.01.2025 - 31.01.2025' is detected",
       d and len(d["coverage_hints"]["detected_periods"]) > 0,
       f"periods={d['coverage_hints']['detected_periods'] if d else '?'}")
 
+p = make_pdf("per-narrative-noise.pdf", [
+    "Example Bank Monthly Statement", "Account 55556666",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to January 31 2025", "Currency USD",
+    "Movimiento 654321 publicado en Enero 2025 importe COP 10,000",
+    "Payment reference 765432 issued in March 2025 amount USD 125.00",
+])
+proc, d = run("per-narrative-noise", [str(p)])
+detected_periods = d["coverage_hints"].get("detected_periods", []) if d else []
+check("PER-1A transaction month/year narratives stay out of detected_periods",
+      detected_periods == ["Statement period January 1 2025 to January 31 2025"],
+      f"periods={detected_periods}")
+
 # --------------------------------------------------------------------------- #
 # Source-aware period evidence and statement-set coverage
 # --------------------------------------------------------------------------- #

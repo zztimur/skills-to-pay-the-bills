@@ -532,6 +532,41 @@ PERIOD_CONNECTOR_RE = re.compile(r"(?:[-–—]|\b(?:to|through|al|hasta|bis|des
 SPLIT_PERIOD_START_RE = re.compile(r"\b(?:desde|from)\b", re.I)
 SPLIT_PERIOD_END_RE = re.compile(r"\b(?:hasta|through)\b", re.I)
 SPLIT_PERIOD_MAX_LINE_DISTANCE = 2
+# ``detected_periods`` is a compact review aid, not a general date search.
+# Keep only labels that look like a statement-period heading; transaction
+# narratives frequently mention a month and year plus their own identifiers.
+PERIOD_HEADING_PREFIX_RE = re.compile(
+    r"^\s*(?:statement\s+(?:period|date)|period(?:o)?|desde|from|hasta|through)\b",
+    re.I,
+)
+MONTH_YEAR_HEADING_WORDS = {
+    "account",
+    "bancario",
+    "bank",
+    "banco",
+    "cuenta",
+    "de",
+    "del",
+    "el",
+    "estado",
+    "extracto",
+    "extractos",
+    "for",
+    "la",
+    "mes",
+    "month",
+    "monthly",
+    "mensual",
+    "movimientos",
+    "of",
+    "period",
+    "periodo",
+    "resumen",
+    "statement",
+    "statements",
+    "summary",
+    "the",
+}
 
 # A prior-year date belongs in evidence when the statement labels it as an
 # opening/prior balance. It must not silently become a second statement period.
@@ -875,14 +910,63 @@ def detect_statement_titles(lines: Iterable[str]) -> list[str]:
     return stable_unique(titles, limit=12)
 
 
+def is_month_year_period_heading(line: str) -> bool:
+    """Whether a compact line is a month/year statement heading.
+
+    A bare ``January 2025`` or ``Extracto Bancario de Enero de 2025`` helps a
+    reviewer when a PDF has no complete date range. A sentence that happens to
+    mention a month/year, especially with transaction identifiers or amounts,
+    does not. Keep the accepted vocabulary deliberately small and reject extra
+    digits after removing the month and year.
+    """
+    cleaned = clean_line(line)
+    if len(cleaned) > 80:
+        return False
+    month_matches = list(MONTH_TOKEN_RE.finditer(cleaned))
+    year_matches = list(YEAR_RE.finditer(cleaned))
+    if len(month_matches) != 1 or len(year_matches) != 1:
+        return False
+    # A full day-month-year date is handled only by a connected range or a
+    # labelled endpoint, never by this display-only month/year fallback.
+    if line_dates(cleaned):
+        return False
+    retained = list(cleaned)
+    for match in month_matches + year_matches:
+        for index in range(match.start(), match.end()):
+            retained[index] = " "
+    remainder = "".join(retained)
+    if re.search(r"\d", remainder):
+        return False
+    words = re.findall(r"[a-z]+", fold_accents(remainder).casefold())
+    return all(word in MONTH_YEAR_HEADING_WORDS for word in words)
+
+
+def has_connected_period_dates(line: str) -> bool:
+    """Whether one line contains two complete dates joined as a period."""
+    dates = line_dates(line)
+    if len(dates) < 2:
+        return False
+    _start, start_span, _start_confidence = dates[0]
+    _end, end_span, _end_confidence = dates[-1]
+    return bool(PERIOD_CONNECTOR_RE.search(line[start_span[1]:end_span[0]]))
+
+
 def detect_periods(lines: Iterable[str]) -> list[str]:
+    """Return reviewable statement-period labels without transaction narratives."""
     periods: list[str] = []
-    for line in lines:
-        low = line.casefold()
-        has_period_term = any(term in low for term in ("period", "periodo", "from", "to", "desde", "hasta", "statement date"))
-        has_month = bool(MONTH_TOKEN_RE.search(low))
+    for raw_line in lines:
+        line = clean_line(str(raw_line))
+        if not line:
+            continue
         has_year = bool(YEAR_RE.search(line))
-        if (has_period_term and has_year) or (has_month and has_year) or NUMERIC_PERIOD_RE.search(line):
+        labelled_endpoint = bool(SPLIT_PERIOD_START_RE.search(line) or SPLIT_PERIOD_END_RE.search(line))
+        if (
+            NUMERIC_PERIOD_RE.search(line)
+            or has_connected_period_dates(line)
+            or (labelled_endpoint and bool(line_dates(line)))
+            or (PERIOD_HEADING_PREFIX_RE.search(line) and has_year)
+            or is_month_year_period_heading(line)
+        ):
             periods.append(line)
     return stable_unique(periods, limit=20)
 
@@ -969,14 +1053,14 @@ def detect_period_intervals(page_lines: Iterable[object]) -> list[dict[str, obje
         if key in seen:
             return
         seen.add(key)
+        actual_end_line = end_line if end_line is not None else start_line
         item: dict[str, object] = {
             "start": start.isoformat(),
             "end": end.isoformat(),
             "confidence": "high" if start_confidence == end_confidence == "high" else "medium",
             "source_ref": {"page": page, "line": start_line},
+            "end_source_ref": {"page": page, "line": actual_end_line},
         }
-        if end_line is not None:
-            item["end_source_ref"] = {"page": page, "line": end_line}
         intervals.append(item)
 
     for raw_page in page_lines:
@@ -1253,7 +1337,7 @@ def _same_account(a: str, a_partial: bool, b: str, b_partial: bool) -> bool:
     return ta.endswith(tb) or tb.endswith(ta)
 
 
-def _dedupe_accounts(raw: list[tuple[str, str, bool]], limit: int = 20) -> list[str]:
+def _dedupe_account_records(raw: list[tuple[str, str, bool]], limit: int = 20) -> list[tuple[str, str, bool]]:
     """Collapse hints that are the same account printed in different forms.
 
     Each raw entry is (display, compact, is_partial). Full (non-partial) hints
@@ -1278,21 +1362,27 @@ def _dedupe_accounts(raw: list[tuple[str, str, bool]], limit: int = 20) -> list[
         if not merged:
             kept.append((display, compact, partial))
 
-    out: list[str] = []
+    out: list[tuple[str, str, bool]] = []
     seen: set[str] = set()
-    for display, _compact, _partial in kept:
+    for display, compact, partial in kept:
         cleaned = clean_line(display)
         key = cleaned.casefold()
         if not cleaned or key in seen:
             continue
         seen.add(key)
-        out.append(cleaned)
+        out.append((cleaned, compact, partial))
         if len(out) >= limit:
             break
     return out
 
 
-def detect_account_hints(lines: Iterable[str]) -> list[str]:
+def _collect_account_hint_records(lines: Iterable[str]) -> list[tuple[str, str, bool]]:
+    """Return normalized account hints plus comparison metadata.
+
+    The display form is retained for review artifacts, while the compact and
+    partial values preserve the cautious alias rules used to decide whether a
+    masked/footer hint belongs to a fully printed account identifier.
+    """
     raw: list[tuple[str, str, bool]] = []
     cleaned_lines = [clean_line(line) for line in lines]
     for line in cleaned_lines:
@@ -1332,7 +1422,57 @@ def detect_account_hints(lines: Iterable[str]) -> list[str]:
         if token:
             compact = _account_compact(token)
             raw.append((token, compact, "*" in compact or "X" in compact))
-    return _dedupe_accounts(raw)
+    return _dedupe_account_records(raw)
+
+
+def detect_account_hints(lines: Iterable[str]) -> list[str]:
+    """Return human-reviewable account hints without exposing comparison metadata."""
+    return [display for display, _compact, _partial in _collect_account_hint_records(lines)]
+
+
+def account_linkage_review(
+    statement_files: Iterable[dict[str, object]], canonical_records: list[tuple[str, str, bool]]
+) -> dict[str, object]:
+    """Summarize whether every supplied PDF is linked to one detected account.
+
+    A single account hint somewhere in a set is not enough to prove that every
+    PDF belongs to that account.  When exactly one canonical account is known,
+    require each non-structural statement to carry an equivalent source hint;
+    otherwise a reviewer must explicitly confirm one-account scope.
+    """
+    files = list(statement_files)
+    if len(canonical_records) != 1:
+        return {
+            "status": "not-applicable",
+            "canonical_account_hint_count": len(canonical_records),
+            "matched_file_count": 0,
+            "unlinked_files": [],
+        }
+
+    _display, canonical_compact, canonical_partial = canonical_records[0]
+    matched_files: list[str] = []
+    unlinked_files: list[str] = []
+    for item in files:
+        file_name = str(item.get("file") or item.get("resolved_file") or "statement.pdf")
+        raw_records = item.get("_account_hint_records")
+        records = raw_records if isinstance(raw_records, list) else []
+        linked = any(
+            isinstance(record, tuple)
+            and len(record) == 3
+            and _same_account(canonical_compact, canonical_partial, str(record[1]), bool(record[2]))
+            for record in records
+        )
+        if linked:
+            matched_files.append(file_name)
+        else:
+            unlinked_files.append(file_name)
+
+    return {
+        "status": "linked-by-source-hint" if not unlinked_files else "incomplete",
+        "canonical_account_hint_count": 1,
+        "matched_file_count": len(matched_files),
+        "unlinked_files": unlinked_files,
+    }
 
 
 INSTITUTION_HEADER_LINE_LIMIT = 24
@@ -1548,6 +1688,7 @@ def build_preflight(
         # month/year label, retain the legacy non-contextual year detector as the
         # safe fallback rather than inventing an interval.
         coverage_years = statement_period_years or sorted(set(years) - set(contextual_years))
+        account_hint_records = _collect_account_hint_records(lines)
         statement_files.append(
             {
                 "file": item.get("file"),
@@ -1567,7 +1708,8 @@ def build_preflight(
                 "coverage_years": coverage_years,
                 "statement_titles": detect_statement_titles(lines),
                 "currency": detect_currency(lines),
-                "account_hints": detect_account_hints(lines),
+                "account_hints": [display for display, _compact, _partial in account_hint_records],
+                "_account_hint_records": account_hint_records,
                 "institution_hints": detect_institution_hints(
                     page_lines if isinstance(page_lines, list) else lines
                 ),
@@ -1618,6 +1760,8 @@ def build_preflight(
             copied = dict(interval)
             source_ref = interval.get("source_ref") if isinstance(interval.get("source_ref"), dict) else {}
             copied["source_ref"] = {"file": source_file, **source_ref}
+            end_source_ref = interval.get("end_source_ref") if isinstance(interval.get("end_source_ref"), dict) else source_ref
+            copied["end_source_ref"] = {"file": source_file, **end_source_ref}
             period_intervals.append(copied)
         for evidence in item.get("contextual_date_evidence", []):
             if not isinstance(evidence, dict):
@@ -1672,7 +1816,8 @@ def build_preflight(
         warnings.append(message)
         add_gate(gates, "mixed-currencies", message)
 
-    account_hints = detect_account_hints(all_lines)
+    account_records = _collect_account_hint_records(all_lines)
+    account_hints = [display for display, _compact, _partial in account_records]
     if scope == "one-account" and len(account_hints) > 1:
         message = f"Multiple account hints found; verify this is one account: {', '.join(account_hints[:8])}."
         warnings.append(message)
@@ -1681,6 +1826,31 @@ def build_preflight(
         message = "No account number/designation hint was found; verify this is one account."
         warnings.append(message)
         add_gate(gates, "unknown-account", message)
+
+    account_linkage = (
+        account_linkage_review(statement_files, account_records)
+        if scope == "one-account"
+        else {
+            "status": "not-applicable",
+            "canonical_account_hint_count": len(account_records),
+            "matched_file_count": 0,
+            "unlinked_files": [],
+        }
+    )
+    if (
+        scope == "one-account"
+        and account_linkage["status"] == "incomplete"
+        and not any(gate.get("severity") == "stop" for gate in gates)
+    ):
+        unlinked_files = account_linkage["unlinked_files"]
+        assert isinstance(unlinked_files, list)
+        names = ", ".join(Path(str(path)).name for path in unlinked_files)
+        message = (
+            "A single account hint was found, but it could not be linked from every statement PDF: "
+            f"{names}. Confirm the supplied PDFs represent one account."
+        )
+        warnings.append(message)
+        add_gate(gates, "incomplete-account-linkage", message)
 
     # Compare institutions from the union of per-file hints, not a re-scan of the
     # first 80 lines of every file concatenated: a long first statement used to
@@ -1716,6 +1886,9 @@ def build_preflight(
     primary_institution = most_common_hint(institution_hints)
     status = REVIEW_REQUIRED_STATUS if gates else READY_STATUS
 
+    for item in statement_files:
+        item.pop("_account_hint_records", None)
+
     return {
         "schema_version": SCHEMA_VERSION,
         "skill": PREFLIGHT_SKILL,
@@ -1734,6 +1907,7 @@ def build_preflight(
         "statement_files": statement_files,
         "currency": currency,
         "account_hints": account_hints,
+        "account_linkage": account_linkage,
         "institution_hints": institution_hints,
         "coverage_hints": {
             "requested_tax_year": tax_year,
@@ -1841,13 +2015,23 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
             intervals = item.get("period_intervals") if isinstance(item.get("period_intervals"), list) else []
             contextual = item.get("contextual_date_evidence") if isinstance(item.get("contextual_date_evidence"), list) else []
 
-            def compact_source_ref(value: object) -> str:
-                source_ref = value.get("source_ref") if isinstance(value, dict) else None
+            def compact_source_ref(value: object, key: str = "source_ref") -> str:
+                source_ref = value.get(key) if isinstance(value, dict) else None
                 if not isinstance(source_ref, dict):
                     return ""
                 page = source_ref.get("page")
                 line = source_ref.get("line")
                 return f"p{page}/l{line}" if page and line else ""
+
+            def compact_period_endpoint_refs(value: object) -> str:
+                start_ref = compact_source_ref(value)
+                end_ref = compact_source_ref(value, "end_source_ref") or start_ref
+                parts = []
+                if start_ref:
+                    parts.append(f"start={start_ref}")
+                if end_ref:
+                    parts.append(f"end={end_ref}")
+                return "; ".join(parts)
 
             row = {
                 "file": item.get("file"),
@@ -1865,7 +2049,7 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
                         for part in (
                             f"{interval.get('start')}..{interval.get('end')}" if isinstance(interval, dict) else "",
                             str(interval.get("confidence")) if isinstance(interval, dict) else "",
-                            compact_source_ref(interval),
+                            compact_period_endpoint_refs(interval),
                         )
                         if part
                     )
@@ -2074,7 +2258,7 @@ def build_user_resolutions(
     elif confirmed_currency:
         raise PreflightError("--confirm-currency is only allowed when preflight reports ambiguous-dollar or unknown-currency.")
 
-    account_gate_codes = {"unknown-account", "possible-mixed-accounts"} & gate_codes
+    account_gate_codes = {"unknown-account", "possible-mixed-accounts", "incomplete-account-linkage"} & gate_codes
     confirmed_one_account = bool(getattr(args, "confirm_one_account", False))
     if account_gate_codes:
         if source.get("scope") != "one-account":
@@ -2082,7 +2266,9 @@ def build_user_resolutions(
         if not confirmed_one_account:
             raise PreflightError("Pass --confirm-one-account after reviewing the supplied statement set.")
     elif confirmed_one_account:
-        raise PreflightError("--confirm-one-account is only allowed when preflight reports unknown-account or possible-mixed-accounts.")
+        raise PreflightError(
+            "--confirm-one-account is only allowed when preflight reports unknown-account, possible-mixed-accounts, or incomplete-account-linkage."
+        )
 
     institution_gate_codes = {"unknown-institution", "possible-mixed-institutions"} & gate_codes
     confirmed_institution = clean_line(str(getattr(args, "confirm_institution", "") or ""))
@@ -2209,6 +2395,7 @@ def command_review_handoff(args: argparse.Namespace) -> int:
         "profile": source.get("profile"),
         "coverage_hints": source.get("coverage_hints"),
         "account_hints": source.get("account_hints", []),
+        "account_linkage": source.get("account_linkage"),
         "institution_hints": source.get("institution_hints", []),
         "warnings": source.get("warnings", []),
         "review_gates": gates,
@@ -2349,6 +2536,30 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append(f"clean-currency: expected USD, got {clean['currency']}")
         if clean["account_hints"] != ["12345678"]:  # type: ignore[index]
             failures.append(f"clean-account: expected account hint 12345678, got {clean['account_hints']}")
+        clean_coverage = clean.get("coverage_hints") if isinstance(clean, dict) else None
+        clean_intervals = clean_coverage.get("period_intervals") if isinstance(clean_coverage, dict) else []
+        expected_clean_endpoint = {"file": "clean.pdf", "page": 1, "line": 3}
+        if (
+            not isinstance(clean_intervals, list)
+            or len(clean_intervals) != 1
+            or not isinstance(clean_intervals[0], dict)
+            or clean_intervals[0].get("source_ref") != expected_clean_endpoint
+            or clean_intervals[0].get("end_source_ref") != expected_clean_endpoint
+        ):
+            failures.append(
+                f"period-endpoints: expected independent, file-bound start/end references, got {clean_intervals}"
+            )
+        clean_csv = root / "clean-review.csv"
+        write_review_csv(clean_csv, clean)
+        try:
+            clean_csv_rows = list(csv.DictReader(clean_csv.read_text(encoding="utf-8").splitlines()))
+        except (OSError, csv.Error):
+            clean_csv_rows = []
+        clean_csv_intervals = clean_csv_rows[0].get("period_intervals", "") if clean_csv_rows else ""
+        if "start=p1/l3" not in clean_csv_intervals or "end=p1/l3" not in clean_csv_intervals:
+            failures.append(
+                f"period-endpoints: CSV must show both endpoints independently, got {clean_csv_intervals!r}"
+            )
 
         mixed_year = build_preflight(
             [synthetic_file("mixed-year.pdf", "Example Bank\nAccount 12345678\nStatement period December 2024 to January 2025\nCurrency USD")],
@@ -2615,6 +2826,95 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append(f"one-account: expected only ['12345678'], got {one_account['account_hints']}")
         if any(gate.get("code") == "possible-mixed-accounts" for gate in one_account["review_gates"]):  # type: ignore[index]
             failures.append("one-account: a single account must not trip possible-mixed-accounts")
+
+        # A full identifier in one PDF and an equivalent masked suffix in the
+        # next are source-linked. This should not add friction to normal
+        # recurring statements that redact their account number differently.
+        linked_account = build_preflight(
+            [
+                synthetic_file(
+                    "linked-full.pdf",
+                    "Example Bank\nAccount 12345678\nStatement period January 1 2025 to January 31 2025\nCurrency USD",
+                ),
+                synthetic_file(
+                    "linked-masked.pdf",
+                    "Example Bank\nAccount ending in 5678\nStatement period February 1 2025 to February 28 2025\nCurrency USD",
+                ),
+            ],
+            2025,
+            "one-account",
+            root / "linked-account.json",
+            root / "linked-account-review.csv",
+        )
+        linked_summary = linked_account.get("account_linkage")
+        if not isinstance(linked_summary, dict) or linked_summary.get("status") != "linked-by-source-hint":
+            failures.append(f"account-linkage: expected linked source hints, got {linked_summary}")
+        if any(gate.get("code") == "incomplete-account-linkage" for gate in linked_account["review_gates"]):  # type: ignore[index]
+            failures.append("account-linkage: equivalent masked account hint must not trip incomplete linkage")
+
+        # A single hint somewhere in the set is not proof that every PDF is the
+        # same account. The reviewer can resolve this without providing an
+        # account number, but it must be visible before downstream extraction.
+        incomplete_account_linkage = build_preflight(
+            [
+                synthetic_file(
+                    "linked-account.pdf",
+                    "Example Bank\nAccount 12345678\nStatement period January 1 2025 to June 30 2025\nCurrency USD",
+                ),
+                synthetic_file(
+                    "unlinked-account.pdf",
+                    "Example Bank\nStatement period July 1 2025 to December 31 2025\nCurrency USD",
+                ),
+            ],
+            2025,
+            "one-account",
+            root / "incomplete-account-linkage.json",
+            root / "incomplete-account-linkage-review.csv",
+        )
+        incomplete_summary = incomplete_account_linkage.get("account_linkage")
+        if not isinstance(incomplete_summary, dict) or incomplete_summary.get("status") != "incomplete":
+            failures.append(f"account-linkage: expected incomplete summary, got {incomplete_summary}")
+        if incomplete_summary.get("matched_file_count") != 1 or incomplete_summary.get("unlinked_files") != ["unlinked-account.pdf"]:
+            failures.append(f"account-linkage: expected one unlinked source PDF, got {incomplete_summary}")
+        incomplete_codes = {gate.get("code") for gate in incomplete_account_linkage["review_gates"]}  # type: ignore[index]
+        if "incomplete-account-linkage" not in incomplete_codes:
+            failures.append("account-linkage: expected incomplete-account-linkage review gate")
+        linkage_resolution_args = argparse.Namespace(
+            confirm_statement_year=[],
+            classify_contextual_year=[],
+            confirm_currency=None,
+            confirm_one_account=True,
+            confirm_institution=None,
+        )
+        linkage_resolutions = build_user_resolutions(
+            incomplete_account_linkage, incomplete_account_linkage["review_gates"], linkage_resolution_args  # type: ignore[arg-type]
+        )
+        one_account_resolution = linkage_resolutions.get("one_account")
+        if not isinstance(one_account_resolution, dict) or one_account_resolution.get("resolved_gate_codes") != [
+            "incomplete-account-linkage"
+        ]:
+            failures.append(f"account-linkage: expected identifier-free reviewed resolution, got {one_account_resolution}")
+        linkage_source = root / "incomplete-account-linkage-source.json"
+        linkage_handoff = root / "incomplete-account-linkage-handoff.json"
+        write_json(linkage_source, incomplete_account_linkage)
+        linkage_handoff_args = argparse.Namespace(
+            input=str(linkage_source),
+            out=str(linkage_handoff),
+            accept_gate=["incomplete-account-linkage"],
+            user_review_confirmed=True,
+            confirm_statement_year=[],
+            classify_contextual_year=[],
+            confirm_currency=None,
+            confirm_one_account=True,
+            confirm_institution=None,
+        )
+        if command_review_handoff(linkage_handoff_args) != 0:
+            failures.append("account-linkage: expected reviewed handoff to accept an explicit one-account confirmation")
+        else:
+            linkage_handoff_data = load_json_artifact(linkage_handoff, "account-linkage handoff")
+            handoff_resolution = linkage_handoff_data.get("user_resolutions")
+            if not isinstance(handoff_resolution, dict) or handoff_resolution.get("one_account") != one_account_resolution:
+                failures.append(f"account-linkage: handoff lost the reviewed resolution, got {handoff_resolution}")
 
         low_text = build_preflight(
             [synthetic_file("scan.pdf", "", [], is_pdf=True)],
@@ -3103,6 +3403,34 @@ def command_self_test(_args: argparse.Namespace) -> int:
             failures.append("numeric-period: a dd/mm/yyyy 'al' range must be detected as a period")
         if detect_periods(["Ref 12/34 amount 56.00"]):
             failures.append("numeric-period: a lone fraction-like token must not read as a period range")
+
+        # ``detected_periods`` is a human review aid. It retains compact
+        # statement headings and source-labelled period dates, but must not
+        # retain transaction narratives merely because they mention a month and
+        # year. These fixtures are synthetic and cover both English and Spanish
+        # shapes seen in statement text layers.
+        display_periods = detect_periods(
+            [
+                "January 2025",
+                "Extracto Bancario de Octubre de 2025",
+                "Statement period January 1 2025 to March 31 2025",
+                "DESDE: 01-Ene-2025",
+            ]
+        )
+        if display_periods != [
+            "January 2025",
+            "Extracto Bancario de Octubre de 2025",
+            "Statement period January 1 2025 to March 31 2025",
+            "DESDE: 01-Ene-2025",
+        ]:
+            failures.append(f"display-periods: expected compact headings and labelled periods, got {display_periods}")
+        transaction_narratives = [
+            "Movimiento 654321 publicado en Enero 2025 importe COP 10,000",
+            "Payment reference 765432 issued in March 2025 amount USD 125.00",
+            "Customer since April 2025",
+        ]
+        if detect_periods(transaction_narratives):
+            failures.append("display-periods: transaction/month narratives must not become statement-period labels")
 
         # Spanish abbreviated months with hyphenated day-month-year labels are
         # common in LATAM statements. They must become source-bound intervals,

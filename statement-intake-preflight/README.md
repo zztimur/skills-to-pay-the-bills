@@ -32,7 +32,7 @@ human answer is needed, it uses these prompts:
 
 - Weak currency evidence: “We could not corroborate the account currency from the statement text. Please confirm the ISO currency code (for example, `COP`).”
 - Contextual prior-year date with unclear period coverage: “We found `2024-12-31` in the Q1 statement. It appears to be a prior-year opening balance, while the statement period appears to be 2025. Please confirm that all supplied statements cover 2025 and that this date is contextual.”
-- No extractable account identity for an FBAR account set: “We could not extract a reliable account identifier from these statements. Please confirm that the supplied PDFs represent one account. You do not need to provide the account number.”
+- Missing or incompletely linked account identity for an FBAR account set: “We could not extract a reliable account identifier from every supplied PDF. Please confirm that the supplied PDFs represent one account. You do not need to provide the account number.”
 - No extractable issuer for an interest set, or an FBAR `one-account --require-institution` run: “We could not extract a reliable institution name from these statements. Please confirm the institution name shown on the statements.”
 
 If a currency is corroborated, it proceeds without asking. If a prior-year date
@@ -53,10 +53,10 @@ The preflight command writes:
 The JSON includes:
 
 - statement files, resolved paths, byte sizes, SHA-256 fingerprints, page counts, and text counts;
-- detected statement titles and periods;
+- detected statement titles and period labels (excluding transaction narratives), with source references for both period endpoints;
 - detected years and out-of-year hints;
 - currency candidates it could back up with a nearby amount or name, the weaker ones it could not, and ambiguous `$` warnings;
-- account hints and institution hints;
+- account hints, source-linkage coverage across the supplied PDFs, and institution hints;
 - review gates such as low text, duplicate inputs, mixed years, mixed currencies, possible mixed accounts, and possible mixed institutions.
 
 The JSON is for machines. The CSV is for review. The chat answer should not treat either one as a finished tax or FBAR artifact.
@@ -118,7 +118,7 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-
 
 Repeat `--accept-gate` for each gate. Structural `stop` gates cannot be accepted: correct the inputs and rerun preflight. For a reviewed handoff, use the new JSON path below:
 
-Add only the resolution flags required by the source gates: `--confirm-currency COP` for weak or unknown currency evidence, `--confirm-one-account` when no account identifier can be extracted, `--confirm-institution "Example Bank"` for an unknown one-institution issuer or an opt-in FBAR `one-account --require-institution` issuer gate, and `--confirm-statement-year 2025` (plus `--classify-contextual-year 2024` when applicable) for unresolved year coverage. Do not provide a full account number by default. A genuine mixed statement year cannot be accepted. Conflicting issuer evidence can be resolved only for opt-in FBAR `one-account --require-institution` intake after explicit user review; the handoff preserves the original evidence and accepted gate. <!-- privacy-gate: allow -->
+Add only the resolution flags required by the source gates: `--confirm-currency COP` for weak or unknown currency evidence, `--confirm-one-account` when no account identifier can be extracted or the identifier is not source-linked across every supplied PDF, `--confirm-institution "Example Bank"` for an unknown one-institution issuer or an opt-in FBAR `one-account --require-institution` issuer gate, and `--confirm-statement-year 2025` (plus `--classify-contextual-year 2024` when applicable) for unresolved year coverage. Do not provide a full account number by default. A genuine mixed statement year cannot be accepted. Conflicting issuer evidence can be resolved only for opt-in FBAR `one-account --require-institution` intake after explicit user review; the handoff preserves the original evidence and accepted gate. <!-- privacy-gate: allow -->
 
 ```bash
 python3 fbar-threshold-check/scripts/fbar_threshold_check.py extract-account \
@@ -148,7 +148,7 @@ The skill should stop or ask for review when:
 - statement years do not line up with the requested year;
 - `$` appears without enough context to know the currency;
 - multiple currencies appear in one supposed currency bucket;
-- multiple account hints appear before an FBAR account run;
+- multiple account hints appear, or one account hint cannot be source-linked across every supplied PDF, before an FBAR account run;
 - multiple institution hints appear before an interest run or an FBAR run that opted into `--require-institution`;
 - the user wants a final FBAR or tax-support result without running the downstream skill.
 

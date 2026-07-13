@@ -26,7 +26,7 @@ Use `--scope one-account` before `fbar-threshold-check`. FBAR adds `--require-in
 The command writes:
 
 - JSON handoff at `--out`.
-- Review CSV beside the JSON unless `--csv` is supplied.
+- Review CSV beside the JSON unless `--csv` is supplied. Period intervals preserve both start and end source references; the aggregated JSON binds each endpoint to its source file, page, and extracted line.
 
 Review the JSON and CSV before passing the JSON to downstream tools. Stop for user review when the output reports non-PDF files, missing files, scanned/image-only or low-text PDFs, duplicate inputs, mixed statement periods, unresolved out-of-period year evidence, possible missing statement periods, mixed currencies, ambiguous `$`, possible mixed accounts, or issuer evidence required by the requested downstream workflow. A graphic logo or a filename can support a user's visual review, but is never automatic issuer evidence: do not OCR, infer, or treat it as a resolved institution. Ask only the gate-specific question in `references/workflow.md`: do not ask about a corroborated currency, a clearly contextual prior-year date, or an extracted account identifier. Never ask for a full account number by default. `references/workflow.md` has the full gate catalog, severities, and ready-to-use wording.
 
@@ -44,7 +44,7 @@ python3 "<package-root>/scripts/statement_intake_preflight.py" review-handoff \
   --out work/statement-preflight-reviewed.json
 ```
 
-Repeat `--accept-gate` for every code shown in `review_gates`. Add resolution flags only when the corresponding gate requires them: `--confirm-currency ISO` for ambiguous/unknown currency, `--confirm-one-account` without supplying an account number, `--confirm-institution "Name"` for an unknown one-institution issuer or an issuer gate from opt-in FBAR `one-account --require-institution` intake, and `--confirm-statement-year TAX_YEAR` with any `--classify-contextual-year PRIOR_YEAR` values. The handoff records these separately from the raw preflight evidence. Never create a handoff for a structural `stop` gate or use reviewer input to override a genuine mixed statement period or conflicting currency/account evidence. The opt-in FBAR issuer confirmation can select one typed institution when issuer evidence is absent or conflicting; the original evidence and review gate remain visible.
+Repeat `--accept-gate` for every code shown in `review_gates`. Add resolution flags only when the corresponding gate requires them: `--confirm-currency ISO` for ambiguous/unknown currency, `--confirm-one-account` without supplying an account number when account identity is unknown, conflicting, or not source-linked across every supplied PDF, `--confirm-institution "Name"` for an unknown one-institution issuer or an issuer gate from opt-in FBAR `one-account --require-institution` intake, and `--confirm-statement-year TAX_YEAR` with any `--classify-contextual-year PRIOR_YEAR` values. The handoff records these separately from the raw preflight evidence. Never create a handoff for a structural `stop` gate or use reviewer input to override a genuine mixed statement period or conflicting currency/account evidence. The opt-in FBAR issuer confirmation can select one typed institution when issuer evidence is absent or conflicting; the original evidence and review gate remain visible.
 
 ```bash
 python3 "<fbar-root>/scripts/fbar_threshold_check.py" extract-account \
