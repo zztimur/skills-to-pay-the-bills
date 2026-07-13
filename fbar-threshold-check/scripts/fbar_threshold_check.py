@@ -199,8 +199,8 @@ MONTHS = {
 
 MONTH_RE = "|".join(re.escape(k) for k in sorted(MONTHS, key=len, reverse=True))
 MONTH_DATE_PATTERNS = (
-    re.compile(rf"\b({MONTH_RE})\.?\s+(\d{{1,2}}),?\s+(20\d{{2}})\b", re.I),
-    re.compile(rf"\b(\d{{1,2}})\s+({MONTH_RE})\.?,?\s+(20\d{{2}})\b", re.I),
+    re.compile(rf"\b({MONTH_RE})\.?(?:[\s-]+)(\d{{1,2}})(?:\s*,\s*|[\s-]+)(20\d{{2}})\b", re.I),
+    re.compile(rf"\b(\d{{1,2}})(?:\s+de\s+|[-\s]+)({MONTH_RE})\.?(?:\s+de\s+|[-,\s]+)(20\d{{2}})\b", re.I),
 )
 
 # One monetary token. Whitespace bridges digit groups only in the explicit
@@ -1103,9 +1103,10 @@ def preflight_page_period_contexts(
     """Return only preflight periods whose source line still matches the PDF.
 
     Period hints are useful for restoring a missing transaction-row year, but
-    they must not become an independent source of truth.  Require the exact
-    preflight source line to still contain both recorded full dates after the
-    extraction-time PDF fingerprint check.
+    they must not become an independent source of truth. Require the exact
+    preflight source line to still contain both recorded dates, or for a
+    narrow split-range handoff, require each endpoint's retained source line
+    to contain its recorded date after the extraction-time fingerprint check.
     """
     source_lines = {
         (normalize_preflight_path(ref.file), ref.page, ref.line): text for ref, text in lines
@@ -1143,8 +1144,27 @@ def preflight_page_period_contexts(
             source_line = source_lines.get((normalized_path, page, line_number))
             if not source_line:
                 continue
-            verified_dates = {parsed_date for parsed_date, _confidence, _note in parse_line_dates(source_line)}
-            if start not in verified_dates or end not in verified_dates:
+            end_source_ref = raw_period.get("end_source_ref")
+            if end_source_ref is None:
+                verified_dates = {parsed_date for parsed_date, _confidence, _note in parse_line_dates(source_line)}
+                if start not in verified_dates or end not in verified_dates:
+                    continue
+            elif isinstance(end_source_ref, dict):
+                try:
+                    end_page = int(end_source_ref.get("page"))
+                    end_line_number = int(end_source_ref.get("line"))
+                except (TypeError, ValueError):
+                    continue
+                if end_page != page or end_line_number <= 0:
+                    continue
+                end_source_line = source_lines.get((normalized_path, end_page, end_line_number))
+                if not end_source_line:
+                    continue
+                start_dates = {parsed_date for parsed_date, _confidence, _note in parse_line_dates(source_line)}
+                end_dates = {parsed_date for parsed_date, _confidence, _note in parse_line_dates(end_source_line)}
+                if start not in start_dates or end not in end_dates:
+                    continue
+            else:
                 continue
             key = (normalized_path, page)
             context = PagePeriodContext(start=start, end=end, source_line=line_number)
@@ -2544,15 +2564,18 @@ def test_source_bound_short_dates(root: Path) -> None:
     statement_files = preflight.get("statement_files")
     assert isinstance(statement_files, list) and isinstance(statement_files[0], dict)
 
-    def with_period(start: str, end: str, line_number: int = 1) -> dict[str, object]:
-        statement_files[0]["period_intervals"] = [
-            {
-                "start": start,
-                "end": end,
-                "confidence": "high",
-                "source_ref": {"page": 1, "line": line_number},
-            }
-        ]
+    def with_period(
+        start: str, end: str, line_number: int = 1, end_line_number: int | None = None
+    ) -> dict[str, object]:
+        period: dict[str, object] = {
+            "start": start,
+            "end": end,
+            "confidence": "high",
+            "source_ref": {"page": 1, "line": line_number},
+        }
+        if end_line_number is not None:
+            period["end_source_ref"] = {"page": 1, "line": end_line_number}
+        statement_files[0]["period_intervals"] = [period]
         return preflight
 
     header = "DESDE: 2024/12/31 HASTA: 2025/03/31"
@@ -2574,6 +2597,19 @@ def test_source_bound_short_dates(root: Path) -> None:
     assert candidate.confidence == "medium", candidate.confidence
     assert candidate.source.line == 3, candidate.source
     assert any("source-bound page statement period" in note for note in candidate.notes), candidate.notes
+
+    split_header_lines = [
+        (SourceRef(str(pdf), 1, 1, "DESDE: 01-Ene-2025"), "DESDE: 01-Ene-2025"),
+        (SourceRef(str(pdf), 1, 2, "HASTA: 31-Mar-2025"), "HASTA: 31-Mar-2025"),
+        (SourceRef(str(pdf), 1, 3, "FECHA VALOR SALDO"), "FECHA VALOR SALDO"),
+        (SourceRef(str(pdf), 1, 4, "4/01 COMPRA 100,000.00 9,876,543.21"), "4/01 COMPRA 100,000.00 9,876,543.21"),
+    ]
+    contexts = preflight_page_period_contexts(
+        with_period("2025-01-01", "2025-03-31", line_number=1, end_line_number=2), split_header_lines
+    )
+    candidates, warnings = extract_balance_candidates(split_header_lines, 2025, "COP", page_period_contexts=contexts)
+    assert not warnings, warnings
+    assert len(candidates) == 1 and candidates[0].balance_date == date(2025, 1, 4), candidates
 
     cross_year_lines = [
         (SourceRef(str(pdf), 1, 1, header), header),
