@@ -190,7 +190,6 @@ INSTITUTION_TERMS = (
     "financial",
     "fiduciary",
     "trust",
-    "cop",
     "wise",
     "revolut",
 )
@@ -203,13 +202,20 @@ INSTITUTION_TERM_RE = re.compile(
     re.I,
 )
 
-# "Banco"/"Bank" also head one-token brand names ("Marca66", "Bancomer",
-# "Bankia", "Bankinter") that a word-boundary match misses. Match them as a stem
-# -- but only "banco"/"bank" (not the bare "banc" stem, which would also catch
-# the Spanish adjective "bancario" and "bancarrota"), and reject the handful of
-# common words that share the stem, so marketing prose ("Mobile banking made
-# easy", "avoid bankruptcy") cannot become a header institution hint.
+# "Banco"/"Bank" also head one-token brand names that a word-boundary match
+# misses. Match them as a stem -- but only "banco"/"bank" (not the bare
+# "banc" stem, which would also catch the Spanish adjective "bancario" and
+# "bancarrota"), and reject the handful of common words that share the stem, so
+# marketing prose ("Mobile banking made easy", "avoid bankruptcy") cannot
+# become a header institution hint.
 INSTITUTION_STEM_RE = re.compile(r"\b(?:banco|bank)\w+", re.I)
+# A one-token alphanumeric brand like "Marca66" can also be a masthead. Keep
+# the rule narrow: it must contain both letters and digits and stay within the
+# header window, where transaction rows and footer links are already filtered.
+INSTITUTION_ALNUM_BRAND_RE = re.compile(
+    r"\b(?=[A-Za-z]*\d)(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z][A-Za-z0-9]{2,}\b",
+    re.I,
+)
 # A stem stopword like "banking" is excluded on its own (marketing prose), but
 # a corporate entity name built on it IS a real institution ("Lloyds Banking
 # Group", "First Banking Corporation", "Meridian Bank Holdings"). Match a
@@ -285,6 +291,8 @@ def line_names_institution(line: str) -> bool:
     stopword like "banking" heads a corporate entity name led by a proper noun.
     """
     if INSTITUTION_TERM_RE.search(line):
+        return True
+    if INSTITUTION_ALNUM_BRAND_RE.search(line):
         return True
     for match in INSTITUTION_BANKING_ENTITY_RE.finditer(line):
         # Require the lead word to be a proper noun (capitalized/all-caps), so
@@ -2786,9 +2794,10 @@ def command_self_test(_args: argparse.Namespace) -> int:
         if address_hints != ["Example Bank N.A."]:
             failures.append(f"address: a street address must not be an institution hint, got {address_hints}")
 
-        # A one-token brand ("Marca66") heads a name the word-boundary match
-        # misses; the stem catches it, but a marketing line sharing the stem
-        # ("Personal banking made easy") must not become an institution hint.
+        # A one-token alphanumeric brand ("Marca66") heads a name the
+        # word-boundary match misses; the stem catches it, but a marketing line
+        # sharing the stem ("Personal banking made easy") must not become an
+        # institution hint.
         if not detect_institution_hints(["Marca66 S.A."]):
             failures.append("institution-stem: 'Marca66 S.A.' must be recognized as an institution")
         if not line_names_institution("Bankinter"):

@@ -390,7 +390,7 @@ p = make_pdf("inst-brand66.pdf", ["Marca66 S.A.", "Extracto de cuenta",
              "Cuenta Nro. 55556666",  # privacy-gate: allow (synthetic account fixture)
              "Periodo: 1 de enero 2025 al 31 de enero 2025", "Moneda: COP", "Saldo final 1.234.567,89 COP"])
 proc, d = run("inst-brand66", [str(p)], scope="one-institution")
-check("INST-7 one-token brand 'Marca66' is recognized as an institution",
+check("INST-7 one-token alphanumeric brand 'Marca66' is recognized as an institution",
       d and d["institution_hints"] and "unknown-institution" not in gates_of(d),
       f"hints={d['institution_hints'] if d else '?'}")
 
@@ -540,7 +540,7 @@ proc, d = run("period-missing-q4", [str(q1), str(q2), str(q3)])
 check("PER-5 omitted Q4 trips possible-missing-statement-period",
       d and "possible-missing-statement-period" in gates_of(d), f"gates={gates_of(d)}")
 
-# COP-style statements use Spanish abbreviated months and hyphenated dates.
+# COP statements use Spanish abbreviated months and hyphenated dates.
 # Keep the fixture synthetic while exercising the real PDF text-extraction path.
 def spanish_abbrev_quarterly_pdf(name: str, start: str, end: str) -> Path:
     return make_pdf(name, [

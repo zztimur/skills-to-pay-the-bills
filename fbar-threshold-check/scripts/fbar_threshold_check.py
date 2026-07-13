@@ -213,10 +213,10 @@ PERIOD_END_SUMMARY_RE = re.compile(
     re.I,
 )
 
-# confirmed COP transaction table has this exact header.
+# Confirmed COP transaction tables can have this exact header.
 # It is a narrow, source-bound parsing context - never infer it from a filename,
 # institution name, a partial header, or an unconfirmed currency.
-GLOBAL66_COP_TABLE_HEADER_RE = re.compile(
+COP_TRANSACTION_TABLE_HEADER_RE = re.compile(
     r"^fecha\s+descripci[oó]n\s+movimiento\s+tarjeta\s+d[eé]bito\s+abono\s+saldo$", re.I
 )
 ISO_TIMESTAMP_RE = re.compile(r"\b20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\b")
@@ -573,9 +573,9 @@ def parse_money_values(line: str) -> list[tuple[Decimal, str, int, tuple[str, ..
     return values
 
 
-def is_cop_cop_table_header(line: str) -> bool:
-    """Recognize only the exact text-layer header used by COP rows."""
-    return bool(GLOBAL66_COP_TABLE_HEADER_RE.fullmatch(clean_text(line)))
+def is_confirmed_cop_table_header(line: str) -> bool:
+    """Recognize only the exact text-layer header used by confirmed COP rows."""
+    return bool(COP_TRANSACTION_TABLE_HEADER_RE.fullmatch(clean_text(line)))
 
 
 def is_whole_cop_comma_grouped_token(token: str) -> bool:
@@ -723,11 +723,11 @@ def extract_balance_candidates(
     warnings: list[str] = []
     candidates: list[BalanceCandidate] = []
     page_text: dict[tuple[str, int], str] = defaultdict(str)
-    cop_cop_table_pages: set[tuple[str, int]] = set()
+    cop_table_pages: set[tuple[str, int]] = set()
     for ref, line in lines:
         page_text[(ref.file, ref.page)] += " " + line.lower()
-        if is_cop_cop_table_header(line):
-            cop_cop_table_pages.add((normalize_preflight_path(ref.file), ref.page))
+        if is_confirmed_cop_table_header(line):
+            cop_table_pages.add((normalize_preflight_path(ref.file), ref.page))
 
     outside_year = 0
     ambiguous_numeric_date_candidates = 0
@@ -753,10 +753,10 @@ def extract_balance_candidates(
         if not money_values:
             continue
 
-        cop_cop_table_row = (
+        confirmed_cop_table_row = (
             currency == "COP"
             and currency_confirmed
-            and page_key in cop_cop_table_pages
+            and page_key in cop_table_pages
             and len(period_contexts.get(page_key, ())) == 1
             and ISO_TIMESTAMP_RE.search(line) is not None
         )
@@ -776,7 +776,7 @@ def extract_balance_candidates(
         selected_values = [item for item in money_values if item[2] >= term_pos] if term_pos >= 0 else money_values
         if not selected_values:
             selected_values = money_values
-        if cop_cop_table_row:
+        if confirmed_cop_table_row:
             # This exact table has currency-marked Abono and Saldo columns;
             # selecting the last marked token protects against numeric movement
             # identifiers before those columns.
@@ -784,24 +784,24 @@ def extract_balance_candidates(
             if len(currency_marked_values) >= 2:
                 selected_values = currency_marked_values
         amount, token, _pos, raw_parse_notes = selected_values[-1]
-        contextual_cop_grouping = cop_cop_table_row and is_whole_cop_comma_grouped_token(token)
+        contextual_cop_grouping = confirmed_cop_table_row and is_whole_cop_comma_grouped_token(token)
         parse_notes = () if contextual_cop_grouping else raw_parse_notes
-        bare_small_int = re.fullmatch(r"[-−]?\d{1,2}[-−]?", token) is not None and not cop_cop_table_row
+        bare_small_int = re.fullmatch(r"[-−]?\d{1,2}[-−]?", token) is not None and not confirmed_cop_table_row
         if parse_notes:
             ambiguous_amount_lines += 1
         for parsed_date, date_confidence, date_note in date_hits:
             if parsed_date.year != tax_year:
                 outside_year += 1
                 continue
-            confidence = "high" if (has_balance_term or cop_cop_table_row) and date_confidence == "high" else "medium"
+            confidence = "high" if (has_balance_term or confirmed_cop_table_row) and date_confidence == "high" else "medium"
             notes = [f"Selected last monetary value on line: {token}", date_note]
             if date_confidence == "low":
                 confidence = "low"
                 ambiguous_numeric_date_candidates += 1
-            if not has_balance_term and not cop_cop_table_row:
+            if not has_balance_term and not confirmed_cop_table_row:
                 confidence = "medium" if confidence == "high" else confidence
                 notes.append("Line inferred from a page/table containing balance language.")
-            if cop_cop_table_row:
+            if confirmed_cop_table_row:
                 notes.append(
                     "Recognized source-bound COP Fecha Descripción Movimiento Tarjeta Débito Abono Saldo table; "
                     "selected the final currency-marked Saldo value."
@@ -2455,7 +2455,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         test_line_extraction()
         test_source_bound_short_dates(root)
         test_source_bound_period_end_summaries(root)
-        test_cop_cop_table_context(root)
+        test_confirmed_cop_table_context(root)
         test_account_hint_selection()
         test_build_daily_rows()
         test_native_balance_precision()
@@ -2891,11 +2891,11 @@ def test_source_bound_period_end_summaries(root: Path) -> None:
     assert not other_page_candidates, other_page_candidates
 
 
-def test_cop_cop_table_context(root: Path) -> None:
+def test_confirmed_cop_table_context(root: Path) -> None:
     """Permit a COP grouping rule only in the exact verified COP table."""
-    pdf = root / "cop-cop-table.pdf"
+    pdf = root / "cop-table.pdf"
     pdf.write_bytes(b"synthetic COP table")
-    preflight_path = write_preflight_fixture(root, "cop-cop-preflight", 2025, "one-account", [pdf])
+    preflight_path = write_preflight_fixture(root, "cop-table-preflight", 2025, "one-account", [pdf])
     preflight = load_json(preflight_path)
     statement_files = preflight.get("statement_files")
     assert isinstance(statement_files, list) and isinstance(statement_files[0], dict)
