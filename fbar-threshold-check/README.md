@@ -8,7 +8,7 @@ Did my foreign accounts cross the FBAR threshold, and can we show the work?
 
 The point is not to file FinCEN Form 114 or give legal advice. The point is to turn statement PDFs and confirmed account ledgers into a support packet that separates what the records show from what still needs review.
 
-Current package version: 1.8.5.
+Current package version: 1.8.6.
 
 ## The Rule
 
@@ -47,7 +47,7 @@ Ask for the skill directly:
 Use $fbar-threshold-check to check my 2025 foreign-account statements against the $10,000 FBAR threshold; start with one account and tell me exactly what you need.
 ```
 
-Codex should read the root `SKILL.md`, then `references/workflow.md`, run `statement-intake-preflight` for shared intake, and use this script for extraction, confirmation, and aggregation. It must stop on preflight review gates, create a reviewed handoff only after explicit user confirmation, and pause again for FBAR ledger review when the script reports coverage gaps, ambiguous balance amounts, conflicting balance candidates, or low-confidence balance rows.
+Codex should read the root `SKILL.md`, then `references/workflow.md`, run `statement-intake-preflight` for shared intake, and use this script for extraction, confirmation, and aggregation. It must stop on preflight review gates, create a reviewed handoff only after explicit user confirmation, and pause again for FBAR ledger review when the script reports coverage gaps, ambiguous balance amounts, conflicting balance candidates, or low-confidence balance rows. An out-of-period generated-on date remains source-bound document metadata in that handoff; it is never used as statement-period coverage.
 
 Have the PDFs for one account ready. Codex asks only for the calendar year and files that are still missing, then summarizes coverage and any flags in plain language before asking you to confirm a ledger.
 
@@ -102,7 +102,7 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-
   --out work/statement-preflight-reviewed.json
 ```
 
-Repeat `--accept-gate` for every listed gate. If the opt-in issuer gate is present, also pass `--confirm-institution "Example Bank"`. Then replace the extraction command’s `--preflight-json` value with `work/statement-preflight-reviewed.json`.
+Repeat `--accept-gate` for every listed gate. If the opt-in issuer gate is present, also pass `--confirm-institution "Example Bank"`; if an `out-of-period-generated-date` gate is present, pass `--confirm-generated-on-date YYYY-MM-DD` once for every extracted source-labelled date. Then replace the extraction command’s `--preflight-json` value with `work/statement-preflight-reviewed.json`.
 
 Extraction rejects a missing, duplicated, reordered, or modified statement PDF, as well as an incomplete or source-mismatched reviewed resolution. If any PDF changed since preflight, rerun preflight and recreate the reviewed handoff when one is required.
 
