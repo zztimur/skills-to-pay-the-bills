@@ -229,6 +229,7 @@ ISO_TIMESTAMP_RE = re.compile(r"\b20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{2
 MONEY_NUMBER = (
     r"(?:\d{1,2}(?:,\d{2})+,\d{3}(?:\.\d{1,2})?"  # lakh grouping: 1,23,456
     r"|\d{1,3}(?:[.,'’]\d{3})+(?:[.,]\d{1,6})?"  # punct-grouped thousands: 1.234,56
+    r"|[.,]\d{1,6}"  # unpadded decimal: .42 or ,42
     r"|\d{1,3}(?:[ \u00a0]\d{3})+(?:[.,]\d{1,2})?"  # space-grouped: 1 234,56 or bare 500 000
     r"|\d+(?:[.,]\d{1,6})?)"  # plain: 1234.56
 )
