@@ -9,6 +9,15 @@ changelogs, or GitHub Releases.
 The current repository version lives in [`VERSION`](VERSION), is tagged
 `vX.Y.Z`, and has one matching GitHub Release.
 
+## [1.3.6] - 2026-07-13
+
+### Changed
+
+- `statement-intake-preflight`: classify source-labelled generated-on dates as document metadata, require source-bound review for an out-of-period date, and preserve them outside statement-period coverage.
+- `fbar-threshold-check`: validate exact generated-on reviewed resolutions before account extraction.
+- `statements-to-interest`: validate the same generated-on reviewed-resolution contract and reject missing or tampered date anchors.
+- `repository`: add real-PDF regression coverage and align reviewed-handoff workflow documentation and package metadata.
+
 ## [1.3.5] - 2026-07-13
 
 ### Changed
