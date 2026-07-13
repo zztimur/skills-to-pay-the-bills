@@ -41,6 +41,7 @@ REVIEW_REQUIRED_STATUS = "review-required"
 REVIEWED_HANDOFF_STATUS = "reviewed-for-domain-extraction"
 REVIEWED_HANDOFF_TYPE = "reviewed-handoff"
 OUT_OF_PERIOD_GENERATED_DATE_GATE = "out-of-period-generated-date"
+UNRESOLVED_PERIOD_YEAR_GATE = "unresolved-period-year"
 MIN_TEXT_CHARS = 40
 MIN_TAX_YEAR = 1970
 MAX_TAX_YEAR = 2100
@@ -84,6 +85,22 @@ CURRENCY_CODES = {
     "UYU",
     "ZAR",
 }
+
+MONTH_DISPLAY_NAMES = (
+    "",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
 
 CURRENCY_ALIASES = {
     "colombian peso": "COP",
@@ -1659,6 +1676,123 @@ def resolve_header_period_years(statement_files: list[dict[str, object]], tax_ye
             intervals.sort(key=_interval_sort_key)
 
 
+def _displayed_period_endpoint(value: object) -> dict[str, int] | None:
+    """Return a compact period endpoint only when its calendar day is valid."""
+    if not isinstance(value, dict):
+        return None
+    try:
+        month = int(value.get("month"))
+        day = int(value.get("day"))
+    except (TypeError, ValueError):
+        return None
+    if _calendar_date(2000, month, day) is None:
+        return None
+    endpoint = {"month": month, "day": day}
+    if isinstance(value.get("year"), int):
+        endpoint["year"] = int(value["year"])
+    return endpoint
+
+
+def _period_header_is_resolved(header: dict[str, object], intervals: Iterable[object]) -> bool:
+    """Whether a Chunk 3 interval carries this incomplete header's reference."""
+    header_ref = _copy_source_ref(header.get("source_ref"))
+    if not header_ref:
+        return False
+    for interval in intervals:
+        if not isinstance(interval, dict):
+            continue
+        interval_ref = _copy_source_ref(interval.get("period_header_source_ref"))
+        if interval_ref == header_ref:
+            return True
+    return False
+
+
+def _unresolved_period_identifier(
+    item: dict[str, object],
+    displayed_start: dict[str, int],
+    displayed_end: dict[str, int],
+    source_ref: dict[str, int],
+) -> str:
+    """Return a stable opaque ID tied to source bytes and header coordinates."""
+    source_identity = str(item.get("content_sha256") or item.get("resolved_file") or item.get("file") or "")
+    payload = json.dumps(
+        {
+            "source_identity": source_identity,
+            "displayed_start": displayed_start,
+            "displayed_end": displayed_end,
+            "source_ref": source_ref,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "period-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _unresolved_period_display(record: dict[str, object]) -> str:
+    """Render a compact month/day range for a review prompt without source text."""
+    start = _displayed_period_endpoint(record.get("displayed_start"))
+    end = _displayed_period_endpoint(record.get("displayed_end"))
+    if not start or not end:
+        return "the displayed statement period"
+    start_month = MONTH_DISPLAY_NAMES[start["month"]]
+    end_month = MONTH_DISPLAY_NAMES[end["month"]]
+    if start_month == end_month:
+        return f"{start_month} {start['day']}–{end['day']}"
+    return f"{start_month} {start['day']}–{end_month} {end['day']}"
+
+
+def collect_unresolved_periods(statement_files: Iterable[dict[str, object]]) -> list[dict[str, object]]:
+    """Expose every source-labelled period whose year remains unresolved.
+
+    The per-file records retain only display endpoints and compact coordinates.
+    The aggregate list adds a file path for review and de-duplicates identical
+    source bytes deterministically, so its opaque IDs are stable across input
+    order and fresh preflight runs.
+    """
+    aggregate: list[dict[str, object]] = []
+    for item in statement_files:
+        intervals = item.get("period_intervals")
+        source_intervals = intervals if isinstance(intervals, list) else []
+        records: list[dict[str, object]] = []
+        for header in item.get("period_headers", []):
+            if not isinstance(header, dict) or not _header_needs_period_year_resolution(header):
+                continue
+            if _period_header_is_resolved(header, source_intervals):
+                continue
+            displayed_start = _displayed_period_endpoint(header.get("displayed_start"))
+            displayed_end = _displayed_period_endpoint(header.get("displayed_end"))
+            source_ref = _copy_source_ref(header.get("source_ref"))
+            if not displayed_start or not displayed_end or not source_ref:
+                continue
+            record = {
+                "id": _unresolved_period_identifier(item, displayed_start, displayed_end, source_ref),
+                "displayed_start": displayed_start,
+                "displayed_end": displayed_end,
+                "source_ref": source_ref,
+            }
+            records.append(record)
+            aggregate.append(
+                {
+                    **record,
+                    "source_ref": {"file": str(item.get("file") or ""), **source_ref},
+                }
+            )
+        records.sort(key=lambda record: (str(record["id"]), _source_ref_sort_key(record.get("source_ref"))))
+        item["unresolved_periods"] = records
+
+    unique: dict[str, dict[str, object]] = {}
+    for record in sorted(
+        aggregate,
+        key=lambda record: (
+            str(record.get("id", "")),
+            str(record.get("source_ref", {}).get("file", "")),
+            _source_ref_sort_key(record.get("source_ref")),
+        ),
+    ):
+        unique.setdefault(str(record["id"]), record)
+    return [unique[identifier] for identifier in sorted(unique)]
+
+
 def detect_contextual_date_evidence(
     page_lines: Iterable[object], period_intervals: Iterable[dict[str, object]]
 ) -> list[dict[str, object]]:
@@ -2384,6 +2518,7 @@ def build_preflight(
         )
 
     resolve_header_period_years(statement_files, tax_year)
+    unresolved_periods = collect_unresolved_periods(statement_files)
     for item in statement_files:
         parsed_page_lines = item.pop("_page_lines", [])
         intervals = item.get("period_intervals")
@@ -2407,9 +2542,15 @@ def build_preflight(
         item["contextual_date_evidence"] = contextual_date_evidence
         item["contextual_years"] = contextual_years
         item["unresolved_years"] = sorted(set(years) - set(statement_period_years) - set(contextual_years))
-        # Prefer source-bound statement-period ranges. A plain detected year is
-        # only the conservative fallback when no interval is available.
-        item["coverage_years"] = statement_period_years or sorted(set(years) - set(contextual_years))
+        # Dated movement rows with no labelled statement period cannot create
+        # coverage. Keep legacy non-table year fallback for material such as a
+        # source-labelled narrative year, but force table rows without a period
+        # heading through review instead of manufacturing coverage.
+        has_unheaded_table_dates = bool(item.get("year_anchors")) and not bool(item.get("period_headers"))
+        item["coverage_years"] = (
+            statement_period_years
+            or ([] if has_unheaded_table_dates else sorted(set(years) - set(contextual_years)))
+        )
 
     resolved_counts: Counter[str] = Counter(
         str(item.get("resolved_file") or item.get("file") or "") for item in statement_files
@@ -2537,8 +2678,24 @@ def build_preflight(
         warnings.append(message)
         add_gate(gates, "unresolved-year-evidence", message)
     if all_lines and not coverage_years:
-        warnings.append("No statement years were detected; verify the PDFs belong to the requested tax year.")
-        add_gate(gates, "unknown-year-coverage", "No statement years were detected; verify statement periods manually.")
+        warnings.append("No source-bound statement period year was detected; verify the PDFs belong to the requested tax year.")
+        add_gate(
+            gates,
+            "unknown-year-coverage",
+            "No source-bound statement period year was detected; verify statement periods manually.",
+        )
+
+    if unresolved_periods:
+        prompts = "; ".join(
+            (
+                f"This statement displays a {_unresolved_period_display(record)} period but no usable year. "
+                f"Please confirm whether this displayed period is {tax_year}. "
+                f"Confirm it with --confirm-period-year {record.get('id')}={tax_year}."
+            )
+            for record in unresolved_periods
+        )
+        warnings.append(prompts)
+        add_gate(gates, UNRESOLVED_PERIOD_YEAR_GATE, prompts)
 
     inferred_period_intervals = [
         interval for interval in period_intervals
@@ -2700,6 +2857,7 @@ def build_preflight(
             "period_headers": period_headers,
             "year_anchors": year_anchors,
             "period_intervals": period_intervals,
+            "unresolved_periods": unresolved_periods,
             "document_metadata_dates": document_metadata_dates,
             "contextual_date_evidence": contextual_date_evidence,
             "period_coverage_review": coverage_review,
@@ -2774,6 +2932,7 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
         "period_headers",
         "year_anchors",
         "period_intervals",
+        "unresolved_periods",
         "document_metadata_dates",
         "contextual_years",
         "contextual_date_evidence",
@@ -2799,6 +2958,7 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
                 continue
             currency = item.get("currency") if isinstance(item.get("currency"), dict) else {}
             intervals = item.get("period_intervals") if isinstance(item.get("period_intervals"), list) else []
+            unresolved_periods = item.get("unresolved_periods") if isinstance(item.get("unresolved_periods"), list) else []
             headers = item.get("period_headers") if isinstance(item.get("period_headers"), list) else []
             anchors = item.get("year_anchors") if isinstance(item.get("year_anchors"), list) else []
             metadata_dates = item.get("document_metadata_dates") if isinstance(item.get("document_metadata_dates"), list) else []
@@ -2883,6 +3043,22 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
                     )
                     for interval in intervals
                     if isinstance(interval, dict)
+                ),
+                "unresolved_periods": "; ".join(
+                    " ".join(
+                        part
+                        for part in (
+                            str(period.get("id") or "") if isinstance(period, dict) else "",
+                            (
+                                f"{compact_displayed_endpoint(period, 'displayed_start')}..{compact_displayed_endpoint(period, 'displayed_end')}"
+                                if isinstance(period, dict) else ""
+                            ),
+                            compact_source_ref(period),
+                        )
+                        if part
+                    )
+                    for period in unresolved_periods
+                    if isinstance(period, dict)
                 ),
                 "document_metadata_dates": "; ".join(
                     " ".join(
@@ -3100,6 +3276,110 @@ def source_out_of_period_generated_date_evidence(source: dict[str, object], tax_
     )
 
 
+def source_unresolved_period_evidence(source: dict[str, object]) -> list[dict[str, object]]:
+    """Return validated unresolved source period records from immutable preflight."""
+    coverage = source.get("coverage_hints")
+    if not isinstance(coverage, dict):
+        return []
+    raw_periods = coverage.get("unresolved_periods")
+    if not isinstance(raw_periods, list):
+        return []
+    normalized: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for raw_period in raw_periods:
+        if not isinstance(raw_period, dict):
+            continue
+        period_id = str(raw_period.get("id") or "")
+        if not re.fullmatch(r"period-[0-9a-f]{16}", period_id) or period_id in seen:
+            return []
+        displayed_start = _displayed_period_endpoint(raw_period.get("displayed_start"))
+        displayed_end = _displayed_period_endpoint(raw_period.get("displayed_end"))
+        source_ref = raw_period.get("source_ref")
+        if not displayed_start or not displayed_end or not isinstance(source_ref, dict):
+            return []
+        source_file = str(source_ref.get("file") or "").strip()
+        source_location = _copy_source_ref(source_ref)
+        if not source_file or not source_location:
+            return []
+        seen.add(period_id)
+        normalized.append(
+            {
+                "id": period_id,
+                "displayed_start": displayed_start,
+                "displayed_end": displayed_end,
+                "source_ref": {"file": source_file, **source_location},
+            }
+        )
+    return sorted(normalized, key=lambda period: str(period["id"]))
+
+
+def _confirm_period_year_arguments(args: argparse.Namespace) -> dict[str, int]:
+    """Parse exact opaque-period confirmations without accepting free-form dates."""
+    confirmations: dict[str, int] = {}
+    for raw_value in getattr(args, "confirm_period_year", None) or []:
+        raw = str(raw_value or "").strip()
+        if raw.count("=") != 1:
+            raise PreflightError("Use --confirm-period-year as PERIOD_ID=YEAR.")
+        period_id, raw_year = raw.split("=", 1)
+        if not re.fullmatch(r"period-[0-9a-f]{16}", period_id):
+            raise PreflightError("--confirm-period-year must use an unresolved period ID from the source preflight.")
+        try:
+            year = int(raw_year)
+        except ValueError as exc:
+            raise PreflightError("--confirm-period-year YEAR must be a four-digit calendar year.") from exc
+        if not (MIN_TAX_YEAR <= year <= MAX_TAX_YEAR) or str(year) != raw_year:
+            raise PreflightError("--confirm-period-year YEAR must be a supported four-digit calendar year.")
+        if period_id in confirmations:
+            raise PreflightError("Pass each --confirm-period-year period ID exactly once.")
+        confirmations[period_id] = year
+    return confirmations
+
+
+def resolve_confirmed_period_years(
+    unresolved_periods: list[dict[str, object]], confirmations: dict[str, int], tax_year: int
+) -> list[dict[str, object]]:
+    """Resolve only the exact source records that a reviewer selected."""
+    expected_ids = {str(period["id"]) for period in unresolved_periods}
+    if set(confirmations) != expected_ids:
+        missing = sorted(expected_ids - set(confirmations))
+        unexpected = sorted(set(confirmations) - expected_ids)
+        details: list[str] = []
+        if missing:
+            details.append("missing confirmation for " + ", ".join(missing))
+        if unexpected:
+            details.append("unknown unresolved period ID(s) " + ", ".join(unexpected))
+        raise PreflightError("--confirm-period-year must exactly match unresolved source periods: " + "; ".join(details))
+
+    resolved: list[dict[str, object]] = []
+    for period in unresolved_periods:
+        period_id = str(period["id"])
+        confirmed_year = confirmations[period_id]
+        if confirmed_year != tax_year:
+            raise PreflightError(
+                f"{period_id} must be confirmed as the requested tax year {tax_year}; rerun preflight for another statement year."
+            )
+        header = {
+            "displayed_start": period["displayed_start"],
+            "displayed_end": period["displayed_end"],
+        }
+        placements = _header_calendar_placements(header, {confirmed_year})
+        if len(placements) != 1:
+            raise PreflightError(f"{period_id} could not be resolved to one valid calendar interval; rerun preflight.")
+        start, end = placements[0]
+        resolved.append(
+            {
+                "period_id": period_id,
+                "confirmed_year": confirmed_year,
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "displayed_start": period["displayed_start"],
+                "displayed_end": period["displayed_end"],
+                "source_ref": period["source_ref"],
+            }
+        )
+    return resolved
+
+
 def build_user_resolutions(
     source: dict[str, object], gates: list[dict[str, str]], args: argparse.Namespace
 ) -> dict[str, object]:
@@ -3116,6 +3396,23 @@ def build_user_resolutions(
     contextual_years = _coverage_years(coverage, "contextual_years")
     unresolved_years = _coverage_years(coverage, "unresolved_years")
     outside_period_years = _coverage_years(coverage, "outside_requested_years")
+    unresolved_periods = source_unresolved_period_evidence(source)
+    period_confirmations = _confirm_period_year_arguments(args)
+    period_gate_codes = {UNRESOLVED_PERIOD_YEAR_GATE} & gate_codes
+    if period_gate_codes:
+        if not unresolved_periods:
+            raise PreflightError(
+                "unresolved-period-year requires stable source-labelled period evidence; rerun preflight."
+            )
+        confirmed_periods = resolve_confirmed_period_years(
+            unresolved_periods, period_confirmations, tax_year
+        )
+    elif period_confirmations:
+        raise PreflightError(
+            "--confirm-period-year is only allowed when preflight reports unresolved-period-year."
+        )
+    else:
+        confirmed_periods = []
 
     confirmed_years = _unique_year_arguments(args, "confirm_statement_year")
     classified_contextual_years = _unique_year_arguments(args, "classify_contextual_year")
@@ -3127,13 +3424,31 @@ def build_user_resolutions(
         raise PreflightError(
             "mixed-years cannot be resolved by reviewed input; rerun preflight with the corrected tax year or statement set."
         )
+    if (
+        period_gate_codes
+        and confirmed_years
+        and "unresolved-year-evidence" not in year_gate_codes
+    ):
+        raise PreflightError(
+            "--confirm-statement-year cannot resolve a source-labelled period; use the exact --confirm-period-year value shown in preflight."
+        )
+    if "unknown-year-coverage" in year_gate_codes and not period_gate_codes:
+        year_anchors = coverage.get("year_anchors") if isinstance(coverage.get("year_anchors"), list) else []
+        if year_anchors:
+            raise PreflightError(
+                "We found dated movements but no explicit statement-period heading. Please provide another issuer document that identifies the statement period."
+            )
+        raise PreflightError(
+            "No explicit statement-period heading is available to confirm. Please provide another issuer document that identifies the statement period."
+        )
     if confirmed_years and confirmed_years != [tax_year]:
         raise PreflightError(
             f"Confirmed statement years must be exactly the requested tax year {tax_year}; rerun preflight to use another year."
         )
-    if year_gate_codes and not confirmed_years:
+    broad_year_gate_codes = year_gate_codes - ({"unknown-year-coverage"} if period_gate_codes else set())
+    if broad_year_gate_codes and not confirmed_years:
         raise PreflightError(
-            f"Pass --confirm-statement-year {tax_year} after reviewing {', '.join(sorted(year_gate_codes))}."
+            f"Pass --confirm-statement-year {tax_year} after reviewing {', '.join(sorted(broad_year_gate_codes))}."
         )
     if classified_contextual_years and not confirmed_years:
         raise PreflightError("--classify-contextual-year requires --confirm-statement-year for the requested tax year.")
@@ -3239,6 +3554,15 @@ def build_user_resolutions(
             if confirmed_years or classified_contextual_years
             else {"status": "not-required"}
         ),
+        "period_years": (
+            {
+                "status": "user-confirmed",
+                "confirmed_periods": confirmed_periods,
+                "resolved_gate_codes": sorted(period_gate_codes),
+            }
+            if period_gate_codes
+            else {"status": "not-required"}
+        ),
         "generated_on_dates": (
             {
                 "status": "user-confirmed",
@@ -3311,6 +3635,13 @@ def command_review_handoff(args: argparse.Namespace) -> int:
     source_sha256 = file_sha256(input_path)
     if not source_sha256:
         raise PreflightError(f"Could not hash source preflight JSON {input_path}.")
+    period_years = user_resolutions.get("period_years")
+    if isinstance(period_years, dict):
+        confirmed_periods = period_years.get("confirmed_periods")
+        if isinstance(confirmed_periods, list):
+            for period in confirmed_periods:
+                if isinstance(period, dict):
+                    period["source_preflight_sha256"] = source_sha256
     statement_files = source.get("statement_files")
     if not isinstance(statement_files, list):
         raise PreflightError("Preflight JSON has no statement_files list; rerun preflight.")
@@ -4340,25 +4671,11 @@ def command_self_test(_args: argparse.Namespace) -> int:
                     confirm_institution=None,
                 )
             )
-        except PreflightError:
-            failures.append("generated-date-metadata: expected exact source-bound reviewed resolution to be accepted")
+        except PreflightError as exc:
+            if "No explicit statement-period heading" not in str(exc):
+                failures.append(f"generated-date-metadata: expected missing-heading refusal, got {exc}")
         else:
-            generated_date_handoff_data = load_json_artifact(generated_date_handoff, "generated date handoff")
-            generated_date_resolutions = generated_date_handoff_data.get("user_resolutions")
-            generated_date_resolution = (
-                generated_date_resolutions.get("generated_on_dates")
-                if isinstance(generated_date_resolutions, dict)
-                else None
-            )
-            if not isinstance(generated_date_resolution, dict) or generated_date_resolution != {
-                "status": "user-confirmed",
-                "confirmed_dates": ["2026-12-31"],
-                "source_date_evidence": generated_date_records,
-                "resolved_gate_codes": [OUT_OF_PERIOD_GENERATED_DATE_GATE],
-            }:
-                failures.append(
-                    f"generated-date-metadata: expected immutable generated-on resolution, got {generated_date_resolution}"
-                )
+            failures.append("generated-date-metadata: broad year confirmation must not create coverage without a period heading")
         for label, confirmed_dates in (
             ("missing generated date", []),
             ("unexpected generated date", ["2026-12-30"]),
@@ -4388,6 +4705,89 @@ def command_self_test(_args: argparse.Namespace) -> int:
             or generated_date_rows[0].get("document_metadata_dates") != "2026-12-31 generated-on high p1/l5"
         ):
             failures.append(f"generated-date-metadata: expected compact CSV source reference, got {generated_date_rows}")
+
+        # A quiet source-labelled range gets an immutable opaque record. A
+        # reviewer may resolve only that record, never the whole statement set.
+        unresolved_period_preflight = build_preflight(
+            [
+                synthetic_file(
+                    "unresolved-period.pdf",
+                    "Example Bank Monthly Statement\nAccount 12345678\n"
+                    "Statement period December 1 to December 31\nCurrency USD",
+                )
+            ],
+            2025,
+            "one-account",
+            root / "unresolved-period.json",
+            root / "unresolved-period-review.csv",
+        )
+        unresolved_coverage = unresolved_period_preflight.get("coverage_hints", {})
+        unresolved_records = (
+            unresolved_coverage.get("unresolved_periods", [])
+            if isinstance(unresolved_coverage, dict)
+            else []
+        )
+        unresolved_codes = [
+            str(gate.get("code")) for gate in unresolved_period_preflight["review_gates"]
+            if isinstance(gate, dict)
+        ]
+        if not (
+            UNRESOLVED_PERIOD_YEAR_GATE in unresolved_codes
+            and len(unresolved_records) == 1
+            and isinstance(unresolved_records[0], dict)
+            and re.fullmatch(r"period-[0-9a-f]{16}", str(unresolved_records[0].get("id") or ""))
+        ):
+            failures.append(f"unresolved-period: expected one stable source record, got {unresolved_period_preflight}")
+        else:
+            unresolved_source = root / "unresolved-period-source.json"
+            write_json(unresolved_source, unresolved_period_preflight)
+            unresolved_before = load_json_artifact(unresolved_source, "unresolved period source")
+            unresolved_id = str(unresolved_records[0]["id"])
+            unresolved_handoff = root / "unresolved-period-handoff.json"
+            try:
+                command_review_handoff(
+                    argparse.Namespace(
+                        input=str(unresolved_source),
+                        out=str(unresolved_handoff),
+                        accept_gate=unresolved_codes,
+                        user_review_confirmed=True,
+                        confirm_period_year=[f"{unresolved_id}=2025"],
+                    )
+                )
+            except PreflightError as exc:
+                failures.append(f"unresolved-period: expected exact period confirmation to succeed ({exc})")
+            else:
+                unresolved_handoff_data = load_json_artifact(unresolved_handoff, "unresolved period handoff")
+                period_resolution = unresolved_handoff_data.get("user_resolutions", {}).get("period_years")
+                expected_period = {
+                    "period_id": unresolved_id,
+                    "confirmed_year": 2025,
+                    "start": "2025-12-01",
+                    "end": "2025-12-31",
+                    "displayed_start": {"month": 12, "day": 1},
+                    "displayed_end": {"month": 12, "day": 31},
+                    "source_ref": {"file": "unresolved-period.pdf", "page": 1, "line": 3},
+                    "source_preflight_sha256": file_sha256(unresolved_source),
+                }
+                if not (
+                    load_json_artifact(unresolved_source, "unresolved period source") == unresolved_before
+                    and isinstance(period_resolution, dict)
+                    and period_resolution.get("confirmed_periods") == [expected_period]
+                ):
+                    failures.append(f"unresolved-period: expected immutable source-bound resolution, got {period_resolution}")
+            try:
+                command_review_handoff(
+                    argparse.Namespace(
+                        input=str(unresolved_source),
+                        out=str(root / "unresolved-period-broad-handoff.json"),
+                        accept_gate=unresolved_codes,
+                        user_review_confirmed=True,
+                        confirm_statement_year=[2025],
+                    )
+                )
+                failures.append("unresolved-period: expected broad year confirmation to be rejected")
+            except PreflightError:
+                pass
 
         # A real 2025 period remains coverage evidence even when a document
         # carries an out-of-period generated-on date.
@@ -5049,6 +5449,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         type=_year_arg,
         help="Confirm the requested statement year after review; repeat only if the handoff requests it.",
+    )
+    handoff.add_argument(
+        "--confirm-period-year",
+        action="append",
+        metavar="PERIOD_ID=YEAR",
+        help="Confirm one unresolved source-labelled period at the requested tax year; repeat once per displayed period ID.",
     )
     handoff.add_argument(
         "--classify-contextual-year",

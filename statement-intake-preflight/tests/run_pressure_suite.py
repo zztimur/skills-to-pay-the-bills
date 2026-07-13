@@ -138,6 +138,12 @@ def interval_summary(data) -> list[tuple[str, str, str, str]]:
     ]
 
 
+def unresolved_periods_of(data) -> list[dict]:
+    coverage = data.get("coverage_hints", {}) if isinstance(data, dict) else {}
+    periods = coverage.get("unresolved_periods", []) if isinstance(coverage, dict) else []
+    return periods if isinstance(periods, list) else []
+
+
 def calendar_gaps_of(data) -> list:
     gaps = coverage_review_of(data).get("calendar_gaps", [])
     return gaps if isinstance(gaps, list) else []
@@ -564,22 +570,19 @@ proc, handoff = run_handoff(
     gates_of(d),
     ["--confirm-statement-year", "2025", "--confirm-generated-on-date", "2026-12-31"],
 )
-handoff_resolutions = handoff.get("user_resolutions", {}) if isinstance(handoff, dict) else {}
-generated_resolution = handoff_resolutions.get("generated_on_dates") if isinstance(handoff_resolutions, dict) else {}
-check("YR-5A generated-on date needs an exact source-bound reviewed resolution",
-      proc.returncode == 0 and isinstance(generated_resolution, dict)
-      and generated_resolution.get("confirmed_dates") == ["2026-12-31"]
-      and generated_resolution.get("source_date_evidence") == metadata_dates
-      and generated_resolution.get("resolved_gate_codes") == ["out-of-period-generated-date"],
-      f"exit={proc.returncode} stderr={proc.stderr.strip()} resolution={generated_resolution}")
+check("YR-5A generated-on metadata cannot manufacture statement coverage without a period heading",
+      proc.returncode != 0 and handoff is None
+      and "No explicit statement-period heading" in proc.stderr,
+      f"exit={proc.returncode} stderr={proc.stderr.strip()}")
 proc, rejected_handoff = run_handoff(
     "yr-generated-date-reviewed-missing-date",
     WORK / "yr-generated-date-metadata.json",
     gates_of(d),
     ["--confirm-statement-year", "2025"],
 )
-check("YR-5B generated-on date cannot be accepted without its extracted date",
-      proc.returncode != 0 and rejected_handoff is None and "confirm-generated-on-date" in proc.stderr,
+check("YR-5B exact generated-on input cannot bypass the missing-period-heading refusal",
+      proc.returncode != 0 and rejected_handoff is None
+      and "No explicit statement-period heading" in proc.stderr,
       f"exit={proc.returncode} stderr={proc.stderr.strip()}")
 
 p = make_pdf("yr-generated-date-with-period.pdf", [
@@ -1273,11 +1276,14 @@ check("BAS-1B Spanish Periodo header resolves from its in-range table anchor",
       and interval_summary(d) == [("2025-03-01", "2025-03-31", "high", "direct-anchor")],
       f"coverage={d['coverage_hints'] if d else '?'}")
 
-# A quiet statement is deliberately not treated as malformed source evidence.
-# It remains unresolved rather than borrowing a year from the requested scope.
+# A quiet source-labelled statement receives an opaque unresolved-period record;
+# it never borrows the requested year until the user confirms that exact record.
 p = month_range_fixture("baseline-labelled-range-quiet.pdf", "April 1", "April 30")
 proc, d = run("baseline-labelled-range-quiet", [str(p)])
-check("BAS-2 quiet labelled month range remains without calendar coverage",
+unresolved_periods = unresolved_periods_of(d)
+quiet_period = unresolved_periods[0] if len(unresolved_periods) == 1 and isinstance(unresolved_periods[0], dict) else {}
+quiet_period_id = str(quiet_period.get("id", ""))
+check("BAS-2 quiet labelled month range creates a stable unresolved source record",
       d and "unknown-year-coverage" in gates_of(d)
       and d["coverage_hints"]["period_intervals"] == []
       and d["coverage_hints"]["period_headers"] == [{
@@ -1286,8 +1292,74 @@ check("BAS-2 quiet labelled month range remains without calendar coverage",
           "displayed_end": {"month": 4, "day": 30},
           "source_ref": {"file": str(p), "page": 1, "line": 3},
       }]
-      and d["coverage_hints"]["year_anchors"] == [],
+      and d["coverage_hints"]["year_anchors"] == []
+      and "unresolved-period-year" in gates_of(d)
+      and re.fullmatch(r"period-[0-9a-f]{16}", quiet_period_id) is not None
+      and quiet_period.get("displayed_start") == {"month": 4, "day": 1}
+      and quiet_period.get("displayed_end") == {"month": 4, "day": 30}
+      and quiet_period.get("source_ref") == {"file": str(p), "page": 1, "line": 3},
       f"gates={gates_of(d)} coverage={d['coverage_hints'] if d else '?'}")
+proc, handoff = run_handoff(
+    "baseline-labelled-range-quiet-reviewed",
+    WORK / "baseline-labelled-range-quiet.json",
+    gates_of(d),
+    ["--confirm-period-year", f"{quiet_period_id}=2025"],
+)
+period_resolution = handoff.get("user_resolutions", {}).get("period_years", {}) if isinstance(handoff, dict) else {}
+confirmed_periods = period_resolution.get("confirmed_periods", []) if isinstance(period_resolution, dict) else []
+check("BAS-2A exact unresolved-period confirmation records immutable interval evidence",
+      proc.returncode == 0 and isinstance(handoff, dict)
+      and handoff.get("coverage_hints", {}).get("unresolved_periods") == unresolved_periods
+      and isinstance(confirmed_periods, list) and confirmed_periods == [{
+          "period_id": quiet_period_id,
+          "confirmed_year": 2025,
+          "start": "2025-04-01",
+          "end": "2025-04-30",
+          "displayed_start": {"month": 4, "day": 1},
+          "displayed_end": {"month": 4, "day": 30},
+          "source_ref": {"file": str(p), "page": 1, "line": 3},
+          "source_preflight_sha256": handoff.get("user_resolutions", {}).get("source_preflight_sha256"),
+      }],
+      f"exit={proc.returncode} stderr={proc.stderr.strip()} handoff={handoff}")
+proc, rejected_handoff = run_handoff(
+    "baseline-labelled-range-quiet-broad-year",
+    WORK / "baseline-labelled-range-quiet.json",
+    gates_of(d),
+    ["--confirm-statement-year", "2025"],
+)
+check("BAS-2B broad statement-year confirmation cannot replace an unresolved period ID",
+      proc.returncode != 0 and rejected_handoff is None and "confirm-period-year" in proc.stderr,
+      f"exit={proc.returncode} stderr={proc.stderr.strip()}")
+
+# Opaque IDs derive from source bytes and header coordinates, not input order.
+# Every unresolved record must be confirmed exactly once.
+quiet_november = month_range_fixture("baseline-unresolved-november.pdf", "November 1", "November 30")
+quiet_december = month_range_fixture("baseline-unresolved-december.pdf", "December 1", "December 31")
+proc, d = run("baseline-unresolved-order", [str(quiet_november), str(quiet_december)])
+ordered_unresolved = unresolved_periods_of(d)
+ordered_ids = {
+    (period.get("displayed_start", {}).get("month"), period.get("displayed_end", {}).get("month")): period.get("id")
+    for period in ordered_unresolved if isinstance(period, dict)
+}
+proc, reordered = run("baseline-unresolved-order-reversed", [str(quiet_december), str(quiet_november)])
+reordered_ids = {
+    (period.get("displayed_start", {}).get("month"), period.get("displayed_end", {}).get("month")): period.get("id")
+    for period in unresolved_periods_of(reordered) if isinstance(period, dict)
+}
+check("BAS-2C unresolved period IDs are stable across PDF input order",
+      d and reordered and ordered_ids == reordered_ids
+      and "This statement displays a December 1–31 period but no usable year. Please confirm whether this displayed period is 2025."
+      in gate_message_of(d, "unresolved-period-year"),
+      f"ordered={ordered_unresolved} reordered={unresolved_periods_of(reordered) if reordered else '?'} message={gate_message_of(d, 'unresolved-period-year') if d else '?'}")
+proc, rejected_handoff = run_handoff(
+    "baseline-unresolved-order-missing",
+    WORK / "baseline-unresolved-order.json",
+    gates_of(d),
+    ["--confirm-period-year", f"{ordered_ids.get((11, 11))}=2025"],
+)
+check("BAS-2D every immutable unresolved period must receive its own confirmation",
+      proc.returncode != 0 and rejected_handoff is None and "missing confirmation" in proc.stderr,
+      f"exit={proc.returncode} stderr={proc.stderr.strip()}")
 
 # Only January carries a dated row. February and March are quiet adjacent
 # headers that must resolve through a gap-free, input-order-independent chain.
@@ -1438,8 +1510,20 @@ check("BAS-7 dated rows without a statement header do not manufacture a period",
       and d["coverage_hints"]["detected_periods"] == []
       and d["coverage_hints"]["period_intervals"] == []
       and d["coverage_hints"]["period_headers"] == []
-      and d["coverage_hints"]["year_anchors"][0].get("date") == "2025-05-20",
+      and d["coverage_hints"]["year_anchors"][0].get("date") == "2025-05-20"
+      and d["coverage_hints"]["unresolved_periods"] == []
+      and "unknown-year-coverage" in gates_of(d),
       f"coverage={d['coverage_hints'] if d else '?'}")
+proc, rejected_handoff = run_handoff(
+    "baseline-dated-rows-no-header-reviewed",
+    WORK / "baseline-dated-rows-no-header.json",
+    gates_of(d),
+    ["--confirm-statement-year", "2025"],
+)
+check("BAS-7A dated rows without a period header require another issuer document",
+      proc.returncode != 0 and rejected_handoff is None
+      and "We found dated movements but no explicit statement-period heading." in proc.stderr,
+      f"exit={proc.returncode} stderr={proc.stderr.strip()}")
 
 # Identical-looking adjacent PDFs with distinct source-linked accounts remain a
 # hard conflict, regardless of their contiguous statement periods.
