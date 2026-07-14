@@ -114,6 +114,7 @@ Before shipping or reinstalling the skill:
 ```bash
 "$PYTHON" -S skill-forge/scripts/inspect_skill_package.py statements-to-interest --json --strict
 claude plugin validate --strict statements-to-interest
+"$PYTHON" statements-to-interest/scripts/statements_to_interest.py dependency-check
 "$PYTHON" statements-to-interest/scripts/statements_to_interest.py self-test
 "$PYTHON" statements-to-interest/scripts/statements_to_interest.py smoke-test
 "$PYTHON" statements-to-interest/tests/run_preflight_integration.py

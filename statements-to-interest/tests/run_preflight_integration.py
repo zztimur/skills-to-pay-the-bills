@@ -9,8 +9,8 @@ Run with the bundled Codex Python when available:
 
     "$PYTHON" statements-to-interest/tests/run_preflight_integration.py
 
-Exit 0 when every scenario passes or the required PDF dependencies are absent;
-exit 1 on a regression. All PDFs and JSON artifacts are temporary.
+Exit 0 only when every scenario passes; exit 2 when the required PDF runtime
+is unavailable; exit 1 on a regression. All PDFs and JSON artifacts are temporary.
 """
 
 from __future__ import annotations
@@ -30,8 +30,11 @@ try:  # Test-only dependencies; skip cleanly when a compatible PDF runtime is un
 except BaseException as exc:  # noqa: BLE001 - a broken native dependency can raise more than ImportError.
     if isinstance(exc, (KeyboardInterrupt, SystemExit)):
         raise
-    print(f"SKIP: preflight integration needs reportlab, pdfplumber, and pypdf ({type(exc).__name__}); not run.")
-    raise SystemExit(0)
+    print(
+        f"ERROR: preflight integration needs reportlab, pdfplumber, and pypdf ({type(exc).__name__}); not run.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parent
