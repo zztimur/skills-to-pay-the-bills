@@ -9,6 +9,26 @@ changelogs, or GitHub Releases.
 The current repository version lives in [`VERSION`](VERSION), is tagged
 `vX.Y.Z`, and has one matching GitHub Release.
 
+## [1.4.1] - 2026-07-14
+
+### Changed
+
+- `repository`: docs: refresh root README
+- `fbar-threshold-check`: docs: update fbar-threshold-check README
+- `get-yearly-fx-rate`: docs: update get-yearly-fx-rate README
+- `privacy-gate`: docs: update privacy-gate README
+- `statement-intake-preflight`: docs: update statement-intake-preflight README
+- `statements-to-interest`: docs: update statements-to-interest README
+- `workpaper-kit`: docs: update workpaper-kit README
+- `repository`: chore: bump skill-forge submodule pointer
+- `fbar-threshold-check`: fix(fbar): reject colliding artifact paths
+- `fbar-threshold-check`: fix(fbar): verify FX packet integrity
+- `statements-to-interest`: fix(interest): protect output artifacts and FX values
+- `statements-to-interest`: test(interest): gate final PDF integration
+- `repository`: ci: gate releases on PDF workflows
+- `get-yearly-fx-rate`: fix(yearly-fx): reject Treasury reporting rates
+- `get-yearly-fx-rate`: fix(yearly-fx): reject incomplete calendar years
+
 ## [1.4.0] - 2026-07-14
 
 ### Changed
