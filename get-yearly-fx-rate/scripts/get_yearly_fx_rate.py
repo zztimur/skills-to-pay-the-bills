@@ -551,6 +551,18 @@ def resolve_retrieval_date(retrieved: str | None, today: _dt.date | None = None)
     return value
 
 
+def validate_completed_year(year: int, today: _dt.date | None = None) -> int:
+    """Reject a calendar year that cannot yet have a complete annual average."""
+    current_year = (today or _dt.date.today()).year
+    if year >= current_year:
+        raise RateError(
+            f"Year {year} is not a completed calendar year. A published yearly average can be "
+            f"documented only for a completed year before {current_year}.",
+            2,
+        )
+    return year
+
+
 def create_workpaper(
     *,
     output_root: str,
@@ -601,6 +613,7 @@ def create_workpaper(
 
 
 def command_lookup(args: argparse.Namespace) -> int:
+    validate_completed_year(args.year)
     code = normalize_currency(args.currency)
     if code not in IRS_ROWS_BY_CODE:
         raise RateError(
@@ -675,6 +688,7 @@ def command_lookup(args: argparse.Namespace) -> int:
 
 
 def command_manual(args: argparse.Namespace) -> int:
+    validate_completed_year(args.year)
     code = normalize_currency(args.currency)
     if code not in KNOWN_CURRENCY_CODES and not args.allow_unknown_code:
         raise RateError(
@@ -864,6 +878,16 @@ def command_self_test(_args: argparse.Namespace) -> int:
     else:
         raise AssertionError("future retrieval dates should fail")
 
+    assert validate_completed_year(2025, _dt.date(2026, 1, 1)) == 2025
+    for incomplete_year in (2026, 2099):
+        try:
+            validate_completed_year(incomplete_year, _dt.date(2026, 1, 1))
+        except RateError as exc:
+            assert exc.code == 2
+            assert "not a completed calendar year" in str(exc)
+        else:
+            raise AssertionError(f"incomplete year {incomplete_year} should fail")
+
     try:
         find_irs_rate("COP", 2024, sample_html, IRS_YEARLY_URL)
     except RateError as exc:
@@ -914,6 +938,19 @@ def command_self_test(_args: argparse.Namespace) -> int:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(rerun_err):
             command_lookup(lookup_args)
         assert "replacing existing workpaper packet" in rerun_err.getvalue()
+
+        future_lookup_args = argparse.Namespace(**vars(lookup_args))
+        future_lookup_root = Path(tmp) / "incomplete-year-lookup"
+        future_lookup_args.year = _dt.date.today().year
+        future_lookup_args.output_root = str(future_lookup_root)
+        try:
+            command_lookup(future_lookup_args)
+        except RateError as exc:
+            assert exc.code == 2
+            assert "not a completed calendar year" in str(exc)
+        else:
+            raise AssertionError("incomplete lookup year should be rejected")
+        assert not future_lookup_root.exists(), "incomplete lookup year must not create a packet"
 
         proof_file = Path(tmp) / "proof-source.html"
         proof_file.write_text("<p>published annual average</p>", encoding="utf-8")
@@ -981,6 +1018,11 @@ def command_self_test(_args: argparse.Namespace) -> int:
                     "source_category": "central bank published annual average",
                 },
                 "yearly or annual average",
+            ),
+            (
+                "incomplete-year",
+                {"year": _dt.date.today().year},
+                "not a completed calendar year",
             ),
             ("future-retrieval", {"retrieved": "2099-01-01"}, "cannot be later than today"),
         )
@@ -1172,7 +1214,12 @@ def _iso_date_arg(raw: str) -> str:
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--currency", required=True, help="Currency code or unambiguous currency name.")
-    parser.add_argument("--year", required=True, type=_year_arg, help="Calendar/tax year (1970-2100).")
+    parser.add_argument(
+        "--year",
+        required=True,
+        type=_year_arg,
+        help="Completed calendar/tax year (1970-2100; current/future year rejected).",
+    )
     parser.add_argument("--output-root", default="work/fx-rate-proof", help="Proof output root.")
     parser.add_argument("--retrieved", type=_iso_date_arg, help="Retrieval date YYYY-MM-DD; defaults to today.")
 
