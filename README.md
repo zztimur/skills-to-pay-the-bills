@@ -2,7 +2,7 @@
 
 [![Skill CI](https://img.shields.io/badge/Skill%20CI-configured-16a34a)](https://github.com/zztimur/skills-to-pay-the-bills/actions/workflows/skill-ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python 3.x](https://img.shields.io/badge/python-3.x-3776AB)](https://www.python.org/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB)](https://www.python.org/)
 [![Codex/OpenAI Agent Skills](https://img.shields.io/badge/Codex-Agent%20Skills-111827)](https://github.com/zztimur/skills-to-pay-the-bills)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-compatible-5A3E2B)](https://github.com/zztimur/skills-to-pay-the-bills)
 
@@ -30,13 +30,13 @@ The pattern is boring on purpose: one clear `SKILL.md`, thin platform adapters, 
 | --- | --- | --- |
 | [`get-yearly-fx-rate/`](get-yearly-fx-rate/) | You need a published yearly average FX rate for one currency and one year. | Cited rate, reciprocal, saved source proof, `workpaper.json`, Markdown, and PDF. |
 | [`get-year-end-fx-rate/`](get-year-end-fx-rate/) | You need a year-end or `YYYY-12-31` FX rate for FBAR-style conversion proof. | Treasury/Fiscal Data first for completed year-ends, then a verified manual fallback: retained source JSON/provenance or an explicit no-proof caveat, plus `workpaper.json`, Markdown, and PDF. |
-| [`statement-intake-preflight/`](statement-intake-preflight/) | You need to preflight machine-readable statement PDFs before FBAR or interest extraction. | Shared intake JSON/CSV with text-layer, scope, currency, account, institution, and review-gate checks. |
+| [`statement-intake-preflight/`](statement-intake-preflight/) | You need to preflight machine-readable statement PDFs before FBAR or interest extraction. | Shared intake JSON/CSV with text-layer, scope, source-bound period evidence, currency, account, institution, and review-gate checks. |
 | [`fbar-threshold-check/`](fbar-threshold-check/) | You need to check whether foreign accounts crossed the FBAR threshold for a calendar year. | Account ledgers, daily aggregate threshold view, FinCEN maximum-value view, CSV, JSON, and PDF summary. |
 | [`statements-to-interest/`](statements-to-interest/) | You need to extract interest income from one institution's text PDF statements for one tax year. | IRS-oriented interest support packet with JSON/CSV review artifacts and FX confirmation gates. |
 
 ### Shared Internals
 
-The two FX skills share their workpaper/proof-packet engine — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — through [`workpaper-kit/`](workpaper-kit/). `statements-to-interest` also uses the kit's optional shared ReportLab packet layout. It is internal plumbing, not a skill: no `SKILL.md`, no command, nothing an agent invokes. Its `.claude-plugin/plugin.json` is package metadata, not a separate release line. You edit one canonical file, `workpaper-kit/workpaper.py`; each participating skill carries a vendored, auto-synced copy (`scripts/_workpaper.py`) so it still installs standalone. Details in [`workpaper-kit/README.md`](workpaper-kit/README.md).
+The two FX skills share their workpaper/proof-packet engine — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — through [`workpaper-kit/`](workpaper-kit/). `statements-to-interest` also uses the kit's optional shared ReportLab packet layout. It is internal plumbing, not a skill: no `SKILL.md`, no agent command or trigger, nothing an agent invokes. Its shell commands are maintainer tools for syncing and testing the kit. Its `.claude-plugin/plugin.json` is package metadata, not a separate release line. You edit one canonical file, `workpaper-kit/workpaper.py`; each participating skill carries a vendored, auto-synced copy (`scripts/_workpaper.py`) so it still installs standalone. Details in [`workpaper-kit/README.md`](workpaper-kit/README.md).
 
 The FX skills deliberately do different jobs. `get-yearly-fx-rate` documents a published yearly average for income-tax support. `get-year-end-fx-rate` documents a `YYYY-12-31` rate for FBAR-style conversion. They share proof mechanics; they do not swap sources or quietly relabel one rate as the other.
 
@@ -56,11 +56,13 @@ The FX skills deliberately do different jobs. `get-yearly-fx-rate` documents a p
 
 For statement-based work, begin with `statement-intake-preflight`. It records
 the statement scope, source-bound period evidence, and any reviewer decisions
-in a handoff the downstream skills can verify. Then choose the outcome you
-need: pass the reviewed handoff to `fbar-threshold-check` for FBAR threshold
-analysis, or to `statements-to-interest` for interest-income support. Both
-downstream skills validate the reviewed handoff and the bound statement files
-before extracting results.
+in a handoff the downstream skills can verify. A ready preflight can go straight
+to the next skill. A review-required preflight needs a separate reviewed
+handoff with every non-structural gate accepted and every required typed
+resolution recorded. Then choose the outcome you need: pass that ready JSON or
+reviewed handoff to `fbar-threshold-check` for FBAR threshold analysis, or to
+`statements-to-interest` for interest-income support. Both downstream skills
+validate the handoff and the bound statement files before extracting results.
 
 ## What This Is Not
 
@@ -84,7 +86,7 @@ The pre-commit hook runs the `privacy-gate` scan and auto-syncs the vendored `wo
 
 ## Using A Skill
 
-Each top-level skill folder is its own agent package. Install or copy the package you need into your agent's skill location, then invoke it by name. `workpaper-kit/` is the one internal-library exception; use its README only when changing shared workpaper code.
+Each top-level skill folder is its own agent package. Install or copy the package you need into your agent's skill location, then invoke it by name. `workpaper-kit/` is the internal-library exception; use its README only when changing shared workpaper code. `skill-forge/` is the linked-package exception: it is a git submodule with its own upstream release history, so package it from a release archive or a clean initialized submodule rather than copying the submodule's `.git` control file into an install.
 
 Codex/OpenAI-style prompts look like:
 
@@ -116,10 +118,14 @@ Use `skill-forge` before shipping any skill change. Validate the changed package
 python3 -S skill-forge/scripts/inspect_skill_package.py <skill-folder> --json --strict
 ```
 
-Run the package self-test when one exists:
+Run the package's own self-test or regression entrypoint when one exists. Most
+behavioral skill scripts expose `self-test`; the two repo-tooling packages use
+dedicated runners:
 
 ```bash
 python3 <skill-folder>/scripts/<script-name>.py self-test
+python3 privacy-gate/scripts/test_privacy_gate.py
+python3 -S skill-forge/scripts/run_self_tests.py
 ```
 
 If the package has a Claude plugin manifest and Claude Code is available locally, also run:
@@ -130,9 +136,9 @@ claude plugin validate --strict <skill-folder>
 
 ## Releasing The Repository
 
-This collection has one public release stream. A change to one skill becomes a release only when you explicitly release the repository; normal edits and commits do not bump [`VERSION`](VERSION), create tags, or publish GitHub Releases.
+This collection repository has one public release stream. A change to one skill becomes a collection release only when you explicitly release the repository; normal edits and commits do not bump [`VERSION`](VERSION), create tags, or publish GitHub Releases.
 
-`VERSION` and [`CHANGELOG.md`](CHANGELOG.md) are the canonical record for every published release. Each release gets one `vX.Y.Z` tag and one GitHub Release. The release version is independent of the package metadata in individual `.claude-plugin/plugin.json` files: those files have no matching tags, changelogs, or GitHub Releases.
+`VERSION` and [`CHANGELOG.md`](CHANGELOG.md) are the canonical record for every published collection release. Each release gets one `vX.Y.Z` tag and one GitHub Release. The release version is independent of the package metadata in individual `.claude-plugin/plugin.json` files. The linked `skill-forge` submodule is the deliberate exception: it has its own upstream tags and releases; this repository records and releases only the pinned submodule commit.
 
 Review the next global release before publishing:
 
@@ -153,7 +159,7 @@ The command requires a clean `main` branch that is not behind `origin/main`. It 
 
 ## CI
 
-GitHub Actions runs these deterministic checks on pull requests and `main`; the release workflow runs the same checks against the tagged commit before creating its GitHub Release. Both workflows initialize the linked `skill-forge` submodule first:
+GitHub Actions runs these deterministic core checks on pull requests and `main`; the release workflow runs the same checks against the tagged commit before creating its GitHub Release. Both workflows initialize the linked `skill-forge` submodule first:
 
 - strict `skill-forge` inspection for every skill package;
 - a strict `privacy-gate` scan of the repo tree, so a stray secret or private file fails the build the same way the pre-commit hook fails a commit;
@@ -161,7 +167,17 @@ GitHub Actions runs these deterministic checks on pull requests and `main`; the 
 - deterministic self-tests and regression runners for the scripts that carry behavior, including the `workpaper-kit` golden test;
 - no live IRS/Treasury lookups and no local-only Claude validator assumptions.
 
-Live source checks still belong in release review when the task needs them. A green badge should mean "the package still holds together," not "the internet behaved today."
+The default CI job does not install `pdfplumber`, `reportlab`, or `pypdf`, so it does not run the generated-PDF smoke, pressure, and cross-skill integration suites. Before shipping parser or statement-handoff changes, run the full local PDF pass with a Python 3.11+ environment that has those dependencies:
+
+```bash
+python3 statement-intake-preflight/scripts/statement_intake_preflight.py smoke-test
+python3 statement-intake-preflight/tests/run_pressure_suite.py
+python3 fbar-threshold-check/tests/run_preflight_integration.py
+python3 statements-to-interest/scripts/statements_to_interest.py smoke-test
+python3 statements-to-interest/tests/run_preflight_integration.py
+```
+
+Live source checks still belong in release review when the task needs them. A green badge should mean "the deterministic core still holds together," not "every optional PDF suite ran" or "the internet behaved today."
 
 ## License
 
