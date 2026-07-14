@@ -18,6 +18,10 @@ Raw evidence stays in local JSON/CSV artifacts. The PDF packet redacts emails, I
 
 Ambiguous excluded interest-like candidates block a packet even when other interest rows were counted. Review them, then either correct the source and rerun extraction or create a digest-bound `resolve-exclusions` artifact that records the reviewer decision. Clear non-interest exclusions such as withholding remain visible but do not block reporting.
 
+Zero extracted rows are not proof of zero interest. After resolving any ambiguous exclusions, a zero-interest packet requires explicit preparer confirmation with `--zero-interest-confirmed` and a non-empty `--zero-interest-confirmation-note`; the packet retains that note.
+
+Reporting rechecks the analysis schema, preflight digest, original statement paths and hashes, any exclusion-resolution digest, and retained FX proof hashes before it writes the PDF. A packet should not stay green after its evidence changes underneath it.
+
 ## Package Map
 
 - `SKILL.md` is the control plane for Codex/OpenAI Agent Skills.
@@ -39,7 +43,7 @@ If no published annual workpaper is available, ask for a confirmed user/preparer
 
 ## Runtime
 
-This package needs Python with `pdfplumber`, `reportlab`, and `pypdf`.
+This package needs Python 3.11 or newer with `pdfplumber`, `reportlab`, and `pypdf`.
 
 In Codex desktop, call `load_workspace_dependencies` and set `PYTHON` to the Python executable it returns before running any commands:
 
@@ -102,6 +106,16 @@ Resolve ambiguous excluded candidates before reporting:
 ```
 
 Pass the resulting file to `report` with `--excluded-candidates-resolution-json`. The command rejects it if the analysis or excluded-candidate list changes.
+
+For a reviewed true-zero result, report it explicitly:
+
+```bash
+"$PYTHON" statements-to-interest/scripts/statements_to_interest.py report \
+  --input "work/example-bank-2025-interest-analysis.json" \
+  --zero-interest-confirmed \
+  --zero-interest-confirmation-note "Preparer reviewed all supplied statements and confirmed no interest was credited." \
+  --out "outputs/example-bank-2025-zero-interest-support-packet.pdf"
+```
 
 For non-USD rows, follow the detailed FX workflow in `references/workflow.md`: generate or collect the FX decision, ask for confirmation, then run `report` with `--fx-rate-confirmed`.
 
