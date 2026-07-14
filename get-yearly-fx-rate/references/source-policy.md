@@ -26,13 +26,13 @@ Use the strongest available published annual average:
 Do not use:
 
 - Agent-calculated averages from daily/monthly/quarterly data.
-- Treasury quarterly reporting rates as a silent annual average.
+- Treasury reporting rates; they are quarterly reporting data, not annual averages.
 - Spot rates; they are outside this yearly-average workflow.
 - Unsourced search snippets, LLM memory, or a page that does not expose the actual year/rate.
 
 For an IRS lookup, use the canonical IRS yearly-average page. A saved `--html-file` is only a local replay of that page: retain and hash it, but do not treat the file itself as independently IRS-verified. The final answer and workpaper must visibly identify it as a local HTML replay and say the retained snapshot needs verification. Do not substitute a different URL or label another table as IRS data.
 
-Treasury reporting rates are government data, but they are quarterly reporting rates for U.S. government agency reporting and are not annual averages. Use them only with an explicit caveat and only when the user or preparer accepts that source.
+Treasury reporting rates are quarterly reporting data for U.S. government agencies, not annual averages. Do not use them in this skill or relabel them as annual averages. If another workflow permits that source, ask the user or preparer for explicit direction there instead.
 
 ## Rate Direction
 
@@ -85,7 +85,7 @@ For non-IRS/manual sources, require both:
 
 Do not accept a bare URL as the only proof for a manual non-IRS source.
 
-The retrieval date must be the actual date the source was retrieved, never a future date. Stop when manual source metadata identifies a daily, weekly, monthly, quarterly, intraday, spot, year-end, or FBAR rate rather than a yearly/annual average.
+The retrieval date must be the actual date the source was retrieved, never a future date. Stop when manual source metadata identifies a daily, weekly, monthly, quarterly, intraday, spot, year-end, FBAR, or Treasury reporting rate rather than a yearly/annual average.
 
 ## IRS Map Refresh
 

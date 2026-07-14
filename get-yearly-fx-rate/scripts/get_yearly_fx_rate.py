@@ -152,6 +152,10 @@ NON_ANNUAL_LANGUAGE = re.compile(
     r"\b(?:daily|weekly|monthly|quarterly|intraday|spot|year[ -]?end|fbar)\b",
     re.IGNORECASE,
 )
+TREASURY_REPORTING_RATE_LANGUAGE = re.compile(
+    r"\b(?:u\.?\s*s\.?\s*)?treasury\s+reporting\s+rates?\b",
+    re.IGNORECASE,
+)
 
 KNOWN_CURRENCY_CODES = set(IRS_ROWS_BY_CODE) | set(ALIASES.values())
 
@@ -307,6 +311,12 @@ def validate_manual_annual_metadata(
 
     source_provenance = " ".join((source_title, source_note))
     combined = " ".join((source_provenance, source_category))
+    if TREASURY_REPORTING_RATE_LANGUAGE.search(combined):
+        raise RateError(
+            "Treasury reporting rates are quarterly reporting data, not published yearly averages; "
+            "do not use them in this skill.",
+            2,
+        )
     if NON_ANNUAL_LANGUAGE.search(combined):
         raise RateError(
             "This skill is for published yearly-average rates only; daily, monthly, quarterly, "
@@ -953,6 +963,15 @@ def command_self_test(_args: argparse.Namespace) -> int:
                     "source_category": "daily spot rate",
                 },
                 "yearly-average rates only",
+            ),
+            (
+                "treasury-reporting-rate",
+                {
+                    "source_title": "U.S. Treasury Reporting Rates of Exchange",
+                    "source_note": "Source labels this as a published annual average.",
+                    "source_category": "government published annual average",
+                },
+                "Treasury reporting rates are quarterly reporting data",
             ),
             (
                 "missing-annual-language",

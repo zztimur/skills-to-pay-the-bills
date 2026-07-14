@@ -57,7 +57,7 @@ python3 "<package-root>/scripts/get_yearly_fx_rate.py" manual \
 
 Use `foreign-per-usd` when the rate means one U.S. dollar equals the foreign-currency amount. Use `usd-per-foreign` only when the published rate means one unit of foreign currency equals the U.S. dollar amount.
 
-For manual non-IRS workpapers, do not run the script until there is a local, regular non-symlink proof file and the source explicitly labels the rate as a yearly/annual average. The proof file can be a screenshot, PDF save/print, HTML snapshot, downloaded source data file, or another retained source artifact. `--source-url` must be a nonempty absolute `http://` or `https://` URL, `--source-note` must explain annual-average support, and `--retrieved` must be today or earlier. The helper refuses metadata that identifies daily, weekly, monthly, quarterly, intraday, spot, year-end, or FBAR use.
+For manual non-IRS workpapers, do not run the script until there is a local, regular non-symlink proof file and the source explicitly labels the rate as a yearly/annual average. The proof file can be a screenshot, PDF save/print, HTML snapshot, downloaded source data file, or another retained source artifact. `--source-url` must be a nonempty absolute `http://` or `https://` URL, `--source-note` must explain annual-average support, and `--retrieved` must be today or earlier. The helper refuses metadata that identifies daily, weekly, monthly, quarterly, intraday, spot, year-end, FBAR, or Treasury reporting-rate use. Treasury reporting rates are quarterly reporting data, not annual averages.
 
 ## Proof Packet
 
