@@ -164,20 +164,16 @@ GitHub Actions runs these deterministic core checks on pull requests and `main`;
 - strict `skill-forge` inspection for every skill package;
 - a strict `privacy-gate` scan of the repo tree, so a stray secret or private file fails the build the same way the pre-commit hook fails a commit;
 - a `workpaper-kit/sync.sh --check` backstop, so a vendored `_workpaper.py` copy that drifted from the canonical source fails the build;
-- deterministic self-tests and regression runners for the scripts that carry behavior, including the `workpaper-kit` golden test;
+- deterministic self-tests, regression runners, and generated-PDF smoke, pressure, and cross-skill integration suites, including the `workpaper-kit` golden test;
 - no live IRS/Treasury lookups and no local-only Claude validator assumptions.
 
-The default CI job does not install `pdfplumber`, `reportlab`, or `pypdf`, so it does not run the generated-PDF smoke, pressure, and cross-skill integration suites. Before shipping parser or statement-handoff changes, run the full local PDF pass with a Python 3.11+ environment that has those dependencies:
+CI installs `pdfplumber`, `reportlab`, and `pypdf` before it runs `scripts/release-check.sh`, so a pull request or release cannot skip the generated-PDF suites. Locally, run the same gate with a Python 3.11+ environment that has those dependencies:
 
 ```bash
-python3 statement-intake-preflight/scripts/statement_intake_preflight.py smoke-test
-python3 statement-intake-preflight/tests/run_pressure_suite.py
-python3 fbar-threshold-check/tests/run_preflight_integration.py
-python3 statements-to-interest/scripts/statements_to_interest.py smoke-test
-python3 statements-to-interest/tests/run_preflight_integration.py
+bash scripts/release-check.sh
 ```
 
-Live source checks still belong in release review when the task needs them. A green badge should mean "the deterministic core still holds together," not "every optional PDF suite ran" or "the internet behaved today."
+Live source checks still belong in release review when the task needs them. A green badge means the deterministic core, including its generated-PDF workflows, holds together—not that the internet behaved today.
 
 ## License
 

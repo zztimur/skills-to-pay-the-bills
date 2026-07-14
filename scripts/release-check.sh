@@ -5,6 +5,11 @@ set -eu
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+if ! python3 -c 'import pdfplumber, pypdf, reportlab' >/dev/null 2>&1; then
+  echo "release-check: PDF integration requires pdfplumber, pypdf, and reportlab in the active python3 runtime." >&2
+  exit 2
+fi
+
 bash scripts/release-validate.sh
 python3 -S skill-forge/scripts/inspect_skill_package.py privacy-gate --json --strict
 python3 -S skill-forge/scripts/inspect_skill_package.py skill-forge --json --strict
@@ -24,3 +29,8 @@ python3 get-year-end-fx-rate/tests/run_regressions.py
 python3 statement-intake-preflight/scripts/statement_intake_preflight.py self-test
 python3 fbar-threshold-check/scripts/fbar_threshold_check.py self-test
 python3 statements-to-interest/scripts/statements_to_interest.py self-test
+python3 statement-intake-preflight/scripts/statement_intake_preflight.py smoke-test
+python3 statement-intake-preflight/tests/run_pressure_suite.py
+python3 fbar-threshold-check/tests/run_preflight_integration.py
+python3 statements-to-interest/scripts/statements_to_interest.py smoke-test
+python3 statements-to-interest/tests/run_preflight_integration.py
