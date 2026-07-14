@@ -63,7 +63,8 @@ The command file is only an adapter. The root `SKILL.md`, `references/`, and scr
 
 ## Run The Script Manually
 
-Before balance extraction, check the parser runtime:
+This workflow requires Python 3.11 or newer with `pdfplumber`. Before balance
+extraction, check the parser runtime:
 
 ```bash
 python3 fbar-threshold-check/scripts/fbar_threshold_check.py dependency-check
@@ -98,11 +99,12 @@ If preflight reports review gates, do not run extraction yet. After the user rev
 python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-handoff \
   --input work/statement-preflight.json \
   --accept-gate ambiguous-dollar \
+  --confirm-currency COP \
   --user-review-confirmed \
   --out work/statement-preflight-reviewed.json
 ```
 
-Repeat `--accept-gate` for every listed gate. If the opt-in issuer gate is present, also pass `--confirm-institution "Example Bank"`; if an `out-of-period-generated-date` gate is present, pass `--confirm-generated-on-date YYYY-MM-DD` once for every extracted source-labelled date. Then replace the extraction command’s `--preflight-json` value with `work/statement-preflight-reviewed.json`.
+Repeat `--accept-gate` for every listed gate, then add only the typed resolutions that those gates request: `--confirm-period-year PERIOD_ID=2025` once for every unresolved source-labelled period, `--confirm-currency COP` for ambiguous or unknown currency, `--confirm-one-account` when the PDFs cannot be source-linked as one account, `--confirm-institution "Example Bank"` for an allowed opt-in issuer gate, `--confirm-statement-year 2025` with any required `--classify-contextual-year 2024` values for separate year evidence, and `--confirm-generated-on-date YYYY-MM-DD` once for every extracted source-labelled date. An inferred-period-year gate takes only its exact `--accept-gate`; it does not accept a replacement year or interval. `--confirm-account-opened-on YYYY-MM-DD` is allowed only for the one continuous leading-gap case described by preflight; it cannot excuse a missing middle or year-end statement. Then replace the extraction command’s `--preflight-json` value with `work/statement-preflight-reviewed.json`.
 
 Extraction rejects a missing, duplicated, reordered, or modified statement PDF, as well as an incomplete or source-mismatched reviewed resolution. If any PDF changed since preflight, rerun preflight and recreate the reviewed handoff when one is required.
 
@@ -114,6 +116,12 @@ python3 fbar-threshold-check/scripts/fbar_threshold_check.py confirm-account \
   --balances-confirmed \
   --out work/account-1-confirmed.json
 ```
+
+If confirmation stops on a carry-forward gap longer than 40 days, review
+`coverage.carry_gaps` and ask for the missing statements first. Only after the
+user explicitly accepts those carried balances, rerun with
+`--accept-carry-forward`. That acceptance does not make the evidence complete:
+the final daily-threshold answer remains `insufficient-records`.
 
 Confirm a non-USD account with retained year-end FX proof:
 
