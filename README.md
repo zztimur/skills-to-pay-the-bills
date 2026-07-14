@@ -52,6 +52,16 @@ The FX skills deliberately do different jobs. `get-yearly-fx-rate` documents a p
 | "Did my foreign accounts exceed the FBAR threshold?" | `fbar-threshold-check` |
 | "How much interest income is in these statement PDFs?" | `statements-to-interest` |
 
+## Statement Workflow
+
+For statement-based work, begin with `statement-intake-preflight`. It records
+the statement scope, source-bound period evidence, and any reviewer decisions
+in a handoff the downstream skills can verify. Then choose the outcome you
+need: pass the reviewed handoff to `fbar-threshold-check` for FBAR threshold
+analysis, or to `statements-to-interest` for interest-income support. Both
+downstream skills validate the reviewed handoff and the bound statement files
+before extracting results.
+
 ## What This Is Not
 
 This repo does not prepare tax forms, file FinCEN Form 114, give legal advice, or turn a source into an official IRS, FinCEN, or Treasury blessing. The goal is support documentation: clear workflow, retained proof, reviewer-friendly artifacts, and honest caveats.
