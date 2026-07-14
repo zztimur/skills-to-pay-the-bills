@@ -7,6 +7,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import re
 import sys
 import tempfile
@@ -1474,6 +1475,49 @@ def write_json(path: Path, data: dict[str, object]) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def resolved_artifact_path(path: str | Path, label: str) -> Path:
+    """Normalize a user-supplied artifact path without requiring it to exist."""
+    candidate = Path(path).expanduser()
+    try:
+        return candidate.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise FbarError(f"Could not resolve {label} path {candidate}: {exc}", 2) from exc
+
+
+def validate_artifact_paths(
+    command: str,
+    outputs: list[tuple[str, str | Path]],
+    inputs: list[tuple[str, str | Path]],
+) -> None:
+    """Fail closed before a command can overwrite an input or sibling artifact."""
+    resolved_inputs = [(label, resolved_artifact_path(path, label)) for label, path in inputs]
+    resolved_outputs: list[tuple[str, Path, Path]] = []
+
+    for label, path in outputs:
+        candidate = Path(path).expanduser()
+        resolved = resolved_artifact_path(candidate, label)
+        for input_label, input_path in resolved_inputs:
+            if resolved == input_path:
+                raise FbarError(
+                    f"{command} output {label} collides with input {input_label} at {candidate}; choose a new output path.",
+                    2,
+                )
+        for prior_label, prior_candidate, prior_resolved in resolved_outputs:
+            if resolved == prior_resolved:
+                raise FbarError(
+                    f"{command} outputs {prior_label} ({prior_candidate}) and {label} ({candidate}) resolve to the same path; choose distinct output paths.",
+                    2,
+                )
+        # ``Path.exists`` returns false for a dangling symlink. Treat it as an
+        # occupied destination too, rather than allowing a write through it.
+        if os.path.lexists(candidate):
+            raise FbarError(
+                f"{command} output {label} already exists at {candidate}; choose a new output path.",
+                2,
+            )
+        resolved_outputs.append((label, candidate, resolved))
+
+
 def load_json(path: Path) -> dict[str, object]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -2407,6 +2451,12 @@ def command_extract_account(
     artifact writes.
     """
     out_path = Path(args.out)
+    csv_path = Path(args.csv) if args.csv else account_csv_path(out_path)
+    validate_artifact_paths(
+        "extract-account",
+        [("account JSON", out_path), ("review CSV", csv_path)],
+        [("statement PDF", path) for path in args.pdf] + [("preflight JSON", args.preflight_json)],
+    )
     warnings: list[str] = []
     preflight = load_preflight_json(args.preflight_json, "one-account", args.tax_year, args.pdf)
     warnings.extend(preflight_warning_lines(preflight))
@@ -2539,7 +2589,6 @@ def command_extract_account(
         "review_summary": build_review_summary(daily_rows),
         "artifacts": {},
     }
-    csv_path = Path(args.csv) if args.csv else account_csv_path(out_path)
     data["artifacts"] = {"review_csv": str(csv_path)}
     write_json(out_path, data)
     write_account_csv(csv_path, data)
@@ -2649,6 +2698,15 @@ def command_confirm_account(args: argparse.Namespace) -> int:
 
     input_path = Path(args.input)
     out_path = Path(args.out)
+    csv_path = Path(args.csv) if args.csv else account_csv_path(out_path, confirmed=True)
+    inputs: list[tuple[str, str | Path]] = [("account ledger", input_path)]
+    if args.fx_workpaper_json:
+        inputs.append(("FX workpaper", args.fx_workpaper_json))
+    validate_artifact_paths(
+        "confirm-account",
+        [("confirmed account JSON", out_path), ("confirmed CSV", csv_path)],
+        inputs,
+    )
     data = require_account_data(input_path)
     coverage = data.get("coverage", {})
     if not isinstance(coverage, dict):
@@ -2733,7 +2791,6 @@ def command_confirm_account(args: argparse.Namespace) -> int:
     else:
         data["fx"] = {"required": False, "workpaper_json": None, "workpaper": None}
 
-    csv_path = Path(args.csv) if args.csv else account_csv_path(out_path, confirmed=True)
     artifacts = data.get("artifacts", {})
     if not isinstance(artifacts, dict):
         artifacts = {}
@@ -2808,7 +2865,14 @@ def load_confirmed_account(path: Path) -> dict[str, object]:
 
 def command_aggregate(args: argparse.Namespace) -> int:
     out_path = Path(args.out)
-    resolved_paths = [Path(path).resolve() for path in args.account_ledger]
+    csv_path = Path(args.csv) if args.csv else combined_csv_path(out_path)
+    pdf_path = Path(args.pdf) if args.pdf else summary_pdf_path(out_path)
+    validate_artifact_paths(
+        "aggregate",
+        [("summary JSON", out_path), ("combined CSV", csv_path), ("summary PDF", pdf_path)],
+        [("confirmed account ledger", path) for path in args.account_ledger],
+    )
+    resolved_paths = [resolved_artifact_path(path, "confirmed account ledger") for path in args.account_ledger]
     if len(set(resolved_paths)) != len(resolved_paths):
         raise FbarError("Duplicate --account-ledger paths detected; pass each confirmed account exactly once.", 2)
     accounts = [load_confirmed_account(path) for path in resolved_paths]
@@ -2903,9 +2967,6 @@ def command_aggregate(args: argparse.Namespace) -> int:
         combined_rows.append(row)
 
     aggregate_max_whole = sum(int(item["max_usd_value_whole_dollars"]) for item in account_summaries)
-    csv_path = Path(args.csv) if args.csv else combined_csv_path(out_path)
-    pdf_path = Path(args.pdf) if args.pdf else summary_pdf_path(out_path)
-
     if over_limit_dates:
         daily_answer = "yes"
     elif records_complete:
@@ -3168,6 +3229,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         test_confirm_and_aggregate(root)
         test_maxima_disagreement(root)
         test_csv_naming()
+        test_output_path_guardrails(root)
         test_preflight_v12_period_contract(root)
         test_preflight_handoff(root)
     print("self-test ok")
@@ -4143,6 +4205,72 @@ def test_csv_naming() -> None:
     assert account_csv_path(Path("work/account-1.json")).name == "account-1-review.csv"
     assert account_csv_path(Path("work/account-1-confirmed.json"), confirmed=True).name == "account-1-confirmed.csv"
     assert account_csv_path(Path("work/account-1.json"), confirmed=True).name == "account-1-confirmed.csv"
+
+
+def test_output_path_guardrails(root: Path) -> None:
+    """Generated artifacts must never overwrite evidence or one another."""
+    ledger = synthetic_account(root, "artifact-input", 2025, "USD", Decimal("6000"), {})
+    ledger_bytes = ledger.read_bytes()
+
+    existing = root / "existing-summary.json"
+    existing.write_text("keep this evidence\n", encoding="utf-8")
+    try:
+        command_aggregate(argparse.Namespace(account_ledger=[str(ledger)], out=str(existing), csv=None, pdf=None))
+    except FbarError as exc:
+        assert "already exists" in str(exc), str(exc)
+    else:
+        raise AssertionError("aggregate must refuse an existing summary output")
+    assert existing.read_text(encoding="utf-8") == "keep this evidence\n"
+
+    try:
+        command_aggregate(argparse.Namespace(account_ledger=[str(ledger)], out=str(ledger), csv=None, pdf=None))
+    except FbarError as exc:
+        assert "collides with input" in str(exc), str(exc)
+    else:
+        raise AssertionError("aggregate must refuse an output path that targets a confirmed ledger")
+    assert ledger.read_bytes() == ledger_bytes
+
+    sibling = root / "same-summary-artifact.json"
+    try:
+        command_aggregate(
+            argparse.Namespace(account_ledger=[str(ledger)], out=str(sibling), csv=str(sibling), pdf=None)
+        )
+    except FbarError as exc:
+        assert "resolve to the same path" in str(exc), str(exc)
+    else:
+        raise AssertionError("aggregate must refuse colliding summary JSON and CSV paths")
+    assert not sibling.exists()
+
+    try:
+        command_confirm_account(
+            argparse.Namespace(
+                input=str(ledger),
+                out=str(ledger),
+                csv=None,
+                balances_confirmed=True,
+                fx_workpaper_json=None,
+                accept_carry_forward=False,
+            )
+        )
+    except FbarError as exc:
+        assert "collides with input" in str(exc), str(exc)
+    else:
+        raise AssertionError("confirm-account must refuse an output path that targets its input ledger")
+    assert ledger.read_bytes() == ledger_bytes
+
+    preflight = root / "preflight-input.json"
+    preflight.write_text("{}\n", encoding="utf-8")
+    try:
+        validate_artifact_paths(
+            "extract-account",
+            [("account JSON", preflight), ("review CSV", root / "review.csv")],
+            [("preflight JSON", preflight)],
+        )
+    except FbarError as exc:
+        assert "collides with input" in str(exc), str(exc)
+    else:
+        raise AssertionError("extract-account must refuse an output path that targets its preflight input")
+    assert preflight.read_text(encoding="utf-8") == "{}\n"
 
 
 def write_preflight_fixture(
