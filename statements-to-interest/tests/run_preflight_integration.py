@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Run real-PDF statement-intake-preflight handoff regressions for interest extraction.
+"""Run real-PDF preflight, extraction, and support-packet regressions.
 
 This suite generates synthetic PDFs, then invokes the sibling preflight CLI and
-this package's extraction CLI as independent subprocesses. It proves the
-ordered file-fingerprint handoff is enforced across the package boundary.
+this package's extraction and report CLIs as independent subprocesses. It
+proves the ordered file-fingerprint handoff and final PDF packet hold across
+the package boundary.
 
 Run with the bundled Codex Python when available:
 
@@ -111,6 +112,20 @@ def extract(
     )
 
 
+def report(input_json: Path, output: Path) -> subprocess.CompletedProcess[str]:
+    return command(
+        [
+            sys.executable,
+            str(INTEREST_SCRIPT),
+            "report",
+            "--input",
+            str(input_json),
+            "--out",
+            str(output),
+        ]
+    )
+
+
 def ready_statement_lines(interest: str = "1.25") -> list[str]:
     return [
         "Example Bank Monthly Statement",
@@ -170,6 +185,31 @@ def main() -> int:
                     and verified_fingerprints == expected_fingerprints
                 ),
                 command_output(ready_extract),
+            )
+
+            ready_packet_path = root / "ready-support-packet.pdf"
+            ready_report = report(ready_analysis_path, ready_packet_path)
+            ready_packet_text = ""
+            ready_packet_pages = 0
+            packet_error = ""
+            if ready_packet_path.is_file():
+                try:
+                    reader = PdfReader(ready_packet_path)
+                    ready_packet_pages = len(reader.pages)
+                    ready_packet_text = "\n".join(page.extract_text() or "" for page in reader.pages)
+                except Exception as exc:  # noqa: BLE001 - report all malformed-PDF failures as an assertion detail.
+                    packet_error = f"could not inspect generated PDF: {type(exc).__name__}: {exc}"
+            check(
+                "ready preflight workflow generates a redacted support PDF",
+                (
+                    ready_report.returncode == 0
+                    and ready_packet_pages >= 1
+                    and "Foreign Bank Interest Support Packet" in ready_packet_text
+                    and "USD 1.25" in ready_packet_text
+                    and str(root) not in ready_packet_text
+                    and "12345678" not in ready_packet_text
+                ),
+                packet_error or command_output(ready_report),
             )
 
             forged_fx_analysis = dict(analysis)
@@ -583,7 +623,10 @@ def main() -> int:
     if failures:
         print(f"Integration suite failed: {len(failures)} scenario(s).", file=sys.stderr)
         return 1
-    print("Preflight integration passed: ready workflow, fingerprints, reordered and changed PDFs, legacy handoff, and reviewed-handoff guardrails.")
+    print(
+        "Preflight integration passed: ready support PDF, fingerprints, reordered and changed PDFs, "
+        "legacy handoff, and reviewed-handoff guardrails."
+    )
     return 0
 
 

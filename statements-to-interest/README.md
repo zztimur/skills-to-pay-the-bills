@@ -30,7 +30,7 @@ Extraction and report outputs are write-once. `extract` refuses an existing JSON
 - `references/workflow.md` has the detailed operational checklist, FX gate, troubleshooting, verification, and final-response template.
 - `references/irs-interest-reporting.md` has IRS-oriented wording and source-link guidance.
 - `scripts/statements_to_interest.py` performs extraction, FX prompts, packet assembly, dependency checks, and self-tests.
-- `tests/run_preflight_integration.py` runs a synthetic real-PDF handoff regression through the sibling preflight and interest CLIs.
+- `tests/run_preflight_integration.py` runs a synthetic real-PDF workflow through the sibling preflight, extraction, and report CLIs, then checks the final packet has a page, expected text, and no raw source path or account identifier.
 - In the source repository only, `workpaper-kit/workpaper.py` is vendored as `scripts/_workpaper.py` and owns the shared ReportLab packet layout. Change the canonical kit there and run `workpaper-kit/sync.sh`; do not hand-edit the vendored copy. The installed package is a read-only consumer and does not include `workpaper-kit`.
 - `statement-intake-preflight` provides the shared PDF intake JSON/CSV used before extraction.
 - `.claude-plugin/` and `commands/` provide the Claude Code entrypoint while reusing the same root workflow.

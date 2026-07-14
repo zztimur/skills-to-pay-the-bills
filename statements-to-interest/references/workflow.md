@@ -370,6 +370,8 @@ python "<package-root>/scripts/statements_to_interest.py" self-test
 python "<package-root>/tests/run_preflight_integration.py"
 ```
 
+The integration runner invokes preflight, extract, and report as independent processes. Its ready-path assertion checks the final packet for a page, its expected title and USD total, and redaction of the source path and account identifier.
+
 The canonical `workpaper-kit` exists only in the source repository. An installed package treats `scripts/_workpaper.py` as a read-only vendored dependency; do not try to edit or regenerate it there.
 
 To verify the published-yearly-average FX dependency is discoverable:
