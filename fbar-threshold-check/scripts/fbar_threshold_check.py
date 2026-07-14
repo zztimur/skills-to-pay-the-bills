@@ -16,7 +16,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP, getcontext
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
 
 getcontext().prec = 28
@@ -33,6 +33,8 @@ MIN_TEXT_CHARS = 40
 # Anything longer means statement evidence is missing for part of the year and
 # must be reviewed by the user before confirmation.
 MAX_ROUTINE_CARRY_DAYS = 40
+MAX_FINITE_DECIMAL_EXPONENT = 18
+MAX_FX_RECIPROCAL_DRIFT = Decimal("0.000001")
 ACCEPTED_FX_SKILLS = ("get-year-end-fx-rate",)
 PREFLIGHT_SKILL = "statement-intake-preflight"
 PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0", "1.1", "1.2"}
@@ -2643,9 +2645,18 @@ def as_decimal(value: object, label: str) -> Decimal:
     if value is None or value == "":
         raise FbarError(f"Missing decimal value for {label}.", 2)
     try:
-        return Decimal(str(value))
+        parsed = Decimal(str(value))
     except InvalidOperation as exc:
         raise FbarError(f"Could not parse decimal value for {label}: {value}", 2) from exc
+    if not parsed.is_finite():
+        raise FbarError(f"Decimal value for {label} must be finite; got {value}.", 2)
+    if parsed != 0 and abs(parsed.adjusted()) > MAX_FINITE_DECIMAL_EXPONENT:
+        raise FbarError(
+            f"Decimal value for {label} has an exponent outside the supported range "
+            f"(-{MAX_FINITE_DECIMAL_EXPONENT} through {MAX_FINITE_DECIMAL_EXPONENT}); got {value}.",
+            2,
+        )
+    return parsed
 
 
 def as_int(value: object, label: str) -> int:
@@ -2655,14 +2666,91 @@ def as_int(value: object, label: str) -> int:
         raise FbarError(f"Could not parse integer value for {label}: {value!r}", 2) from exc
 
 
+def require_fx_regular_file(path_value: object, label: str) -> Path:
+    """Resolve one retained FX artifact without accepting links or directories."""
+    if not isinstance(path_value, str) or not path_value.strip():
+        raise FbarError(f"FX workpaper {label} must be a non-empty file path.", 2)
+    candidate = Path(path_value).expanduser()
+    try:
+        if candidate.is_symlink() or not candidate.is_file():
+            raise FbarError(f"FX workpaper {label} must be an existing regular file, not a symlink: {candidate}", 2)
+        return candidate.resolve()
+    except OSError as exc:
+        raise FbarError(f"Could not read FX workpaper {label} at {candidate}: {exc}", 2) from exc
+
+
+def require_fx_packet_file(packet_root: Path, path_value: object, filename: str, label: str) -> Path:
+    """Require a declared packet artifact to be the expected local file."""
+    expected = packet_root / filename
+    resolved = require_fx_regular_file(path_value, label)
+    if resolved != expected:
+        raise FbarError(
+            f"FX workpaper {label} must resolve to {expected} inside the retained packet; got {resolved}.",
+            2,
+        )
+    return resolved
+
+
+def validate_fx_file_hash(path: Path, expected_hash: object, label: str) -> None:
+    if not isinstance(expected_hash, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", expected_hash):
+        raise FbarError(f"FX workpaper {label} must include a SHA-256 hash.", 2)
+    try:
+        actual_hash = preflight_file_sha256(path)
+    except OSError as exc:
+        raise FbarError(f"Could not hash FX workpaper {label} at {path}: {exc}", 2) from exc
+    if actual_hash != expected_hash.lower():
+        raise FbarError(f"FX workpaper {label} SHA-256 does not match the retained file at {path}.", 2)
+
+
+def validate_fx_saved_files(packet_root: Path, saved_files: object, limitations: object) -> None:
+    if not isinstance(saved_files, list):
+        raise FbarError("FX workpaper proof.saved_files must be a list.", 2)
+    if not saved_files:
+        if not isinstance(limitations, list) or not any(isinstance(item, str) and item.strip() for item in limitations):
+            raise FbarError(
+                "FX workpaper without a retained source proof must record a non-empty proof limitation.",
+                2,
+            )
+        return
+
+    for index, item in enumerate(saved_files, start=1):
+        if not isinstance(item, dict):
+            raise FbarError(f"FX workpaper saved proof {index} must be an object.", 2)
+        relative_raw = item.get("packet_relative_path")
+        filename = item.get("filename")
+        if not isinstance(relative_raw, str) or not relative_raw.strip():
+            raise FbarError(f"FX workpaper saved proof {index} must include packet_relative_path.", 2)
+        relative = PurePosixPath(relative_raw)
+        if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+            raise FbarError(f"FX workpaper saved proof {index} has an unsafe packet_relative_path.", 2)
+        if not isinstance(filename, str) or filename != relative.name:
+            raise FbarError(f"FX workpaper saved proof {index} filename must match packet_relative_path.", 2)
+        expected = (packet_root / Path(*relative.parts)).resolve(strict=False)
+        try:
+            expected.relative_to(packet_root)
+        except ValueError as exc:
+            raise FbarError(f"FX workpaper saved proof {index} escapes the retained packet.", 2) from exc
+        resolved = require_fx_regular_file(item.get("path"), f"saved proof {index}")
+        if resolved != expected:
+            raise FbarError(
+                f"FX workpaper saved proof {index} path does not match its packet_relative_path inside the retained packet.",
+                2,
+            )
+        validate_fx_file_hash(resolved, item.get("sha256"), f"saved proof {index}")
+
+
 def validate_fx_workpaper(path: Path, currency: str, year: int) -> dict[str, object]:
-    workpaper = load_json(path)
+    workpaper_path = require_fx_regular_file(str(path), "JSON")
+    packet_root = workpaper_path.parent
+    workpaper = load_json(workpaper_path)
     fx_skill = workpaper.get("skill")
     if fx_skill not in ACCEPTED_FX_SKILLS:
         raise FbarError(
             "FX workpaper must come from get-year-end-fx-rate for FBAR year-end conversion.",
             2,
         )
+    if workpaper_path.name != "workpaper.json":
+        raise FbarError("FX workpaper JSON must be the packet's workpaper.json file.", 2)
     if str(workpaper.get("currency", "")).upper() != currency:
         raise FbarError(f"FX workpaper currency {workpaper.get('currency')} does not match account currency {currency}.", 2)
     if as_int(workpaper.get("year", 0), "FX workpaper year") != year:
@@ -2676,8 +2764,16 @@ def validate_fx_workpaper(path: Path, currency: str, year: int) -> dict[str, obj
         raise FbarError("FX workpaper is missing proof metadata.", 2)
     if not source.get("title") or not source.get("url") or not source.get("retrieved"):
         raise FbarError("FX workpaper source must include title, URL, and retrieval date.", 2)
-    if not proof.get("workpaper_json") and not proof.get("workpaper_pdf") and not proof.get("saved_files"):
-        raise FbarError("FX workpaper proof must include retained artifact paths.", 2)
+    if workpaper.get("year_end_date") != f"{year}-12-31":
+        raise FbarError("FX workpaper year_end_date must match the account tax year's December 31 date.", 2)
+    if source.get("year_end_confirmed") is not True:
+        raise FbarError("FX workpaper source must explicitly confirm year-end support.", 2)
+
+    require_fx_packet_file(packet_root, proof.get("workpaper_json"), "workpaper.json", "workpaper_json")
+    require_fx_packet_file(packet_root, proof.get("workpaper_md"), "workpaper.md", "workpaper_md")
+    workpaper_pdf = require_fx_packet_file(packet_root, proof.get("workpaper_pdf"), "workpaper.pdf", "workpaper_pdf")
+    validate_fx_file_hash(workpaper_pdf, proof.get("workpaper_pdf_sha256"), "workpaper_pdf")
+    validate_fx_saved_files(packet_root, proof.get("saved_files"), proof.get("limitations"))
 
     foreign_per_usd = workpaper.get("foreign_per_usd")
     usd_per_foreign = workpaper.get("usd_per_foreign")
@@ -2688,6 +2784,18 @@ def validate_fx_workpaper(path: Path, currency: str, year: int) -> dict[str, obj
             rate = as_decimal(rate_value, rate_key)
             if rate <= 0:
                 raise FbarError(f"FX workpaper {rate_key} must be a positive rate; got {rate_value}.", 2)
+
+    foreign_rate = as_decimal(foreign_per_usd, "foreign_per_usd")
+    usd_rate = as_decimal(usd_per_foreign, "usd_per_foreign")
+    if abs((foreign_rate * usd_rate) - Decimal("1")) > MAX_FX_RECIPROCAL_DRIFT:
+        raise FbarError("FX workpaper foreign_per_usd and usd_per_foreign rates are not reciprocal.", 2)
+    rate_direction = workpaper.get("rate_direction")
+    if rate_direction not in {"foreign-per-usd", "usd-per-foreign"}:
+        raise FbarError("FX workpaper rate_direction must be foreign-per-usd or usd-per-foreign.", 2)
+    declared_rate = as_decimal(workpaper.get("rate"), "rate")
+    expected_rate = foreign_rate if rate_direction == "foreign-per-usd" else usd_rate
+    if declared_rate != expected_rate:
+        raise FbarError("FX workpaper rate does not match its declared rate_direction.", 2)
 
     return workpaper
 
@@ -3219,6 +3327,7 @@ def command_self_test(_args: argparse.Namespace) -> int:
         test_mask_time_and_two_digit_year()
         test_fx_guardrails(root)
         test_fx_rate_guards(root)
+        test_fx_packet_integrity_guards(root)
         test_hostile_inputs_clean_errors(root)
         test_boundary_rounding(root)
         test_aggregate_rejects_pre_1_3(root)
@@ -3332,7 +3441,28 @@ def make_year_end_fx_workpaper(
     usd_per_foreign: str | None = "0.0002380952",
     name: str = "year-end-workpaper",
 ) -> Path:
-    path = root / f"{currency.lower()}-{year}-{name}.json"
+    def reciprocal_or_placeholder(raw: str | None) -> str:
+        if raw is None:
+            return "1"
+        try:
+            value = Decimal(raw)
+            if value.is_finite() and value != 0:
+                return fmt_native(Decimal("1") / value)
+        except InvalidOperation:
+            pass
+        return "1"
+
+    recorded_foreign_per_usd = foreign_per_usd if foreign_per_usd is not None else reciprocal_or_placeholder(usd_per_foreign)
+    recorded_usd_per_foreign = usd_per_foreign if usd_per_foreign is not None else reciprocal_or_placeholder(foreign_per_usd)
+    folder = root / f"{currency.lower()}-{year}-{name}"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "workpaper.json"
+    markdown = folder / "workpaper.md"
+    pdf = folder / "workpaper.pdf"
+    source_proof = folder / "source-proof-1.json"
+    markdown.write_text("# Synthetic year-end FX proof\n", encoding="utf-8")
+    pdf.write_bytes(b"%PDF-1.4\nsynthetic year-end FX proof\n")
+    source_proof.write_text('{"synthetic":"year-end-source-proof"}\n', encoding="utf-8")
     data = {
         "skill": "get-year-end-fx-rate",
         "purpose": "FBAR-style year-end USD exchange-rate support",
@@ -3341,19 +3471,30 @@ def make_year_end_fx_workpaper(
         "year_end_date": f"{year}-12-31",
         "rate": foreign_per_usd or usd_per_foreign,
         "rate_direction": "foreign-per-usd" if foreign_per_usd else "usd-per-foreign",
-        "foreign_per_usd": foreign_per_usd,
-        "usd_per_foreign": usd_per_foreign,
+        "foreign_per_usd": recorded_foreign_per_usd,
+        "usd_per_foreign": recorded_usd_per_foreign,
         "source": {
             # Deliberately neutral wording: the year-end skill itself is the
             # dependency proof, so source title keywords are not required.
             "title": "Example central bank closing table",
             "url": "https://example.test/closing-table",
             "retrieved": "2026-01-05",
+            "year_end_confirmed": True,
         },
         "proof": {
             "workpaper_json": str(path),
-            "workpaper_pdf": str(root / "year-end-proof.pdf"),
-            "saved_files": [{"path": str(root / "year-end-proof.json"), "sha256": "abc"}],
+            "workpaper_md": str(markdown),
+            "workpaper_pdf": str(pdf),
+            "workpaper_pdf_sha256": preflight_file_sha256(pdf),
+            "saved_files": [
+                {
+                    "filename": source_proof.name,
+                    "packet_relative_path": source_proof.name,
+                    "path": str(source_proof),
+                    "sha256": preflight_file_sha256(source_proof),
+                }
+            ],
+            "limitations": [],
         },
     }
     write_json(path, data)
@@ -3788,6 +3929,20 @@ def test_fx_rate_guards(root: Path) -> None:
     else:
         raise AssertionError("negative usd_per_foreign must be rejected")
 
+    for label, value in (("infinite-rate", "Infinity"), ("nan-rate", "NaN"), ("extreme-rate", "1e999")):
+        invalid_rate = make_year_end_fx_workpaper(
+            root,
+            foreign_per_usd=value,
+            usd_per_foreign="1",
+            name=label,
+        )
+        try:
+            validate_fx_workpaper(invalid_rate, "COP", 2025)
+        except FbarError as exc:
+            assert "finite" in str(exc) or "exponent" in str(exc), str(exc)
+        else:
+            raise AssertionError(f"{label} must be rejected")
+
     yearly_workpaper = root / "yearly-workpaper.json"
     write_json(
         yearly_workpaper,
@@ -3811,6 +3966,83 @@ def test_fx_rate_guards(root: Path) -> None:
         assert "get-year-end-fx-rate" in str(exc)
     else:
         raise AssertionError("get-yearly-fx-rate workpaper must be rejected for FBAR")
+
+
+def test_fx_packet_integrity_guards(root: Path) -> None:
+    """The consumer must verify the producer's retained proof contract."""
+    tampered_source = make_year_end_fx_workpaper(root, name="tampered-source")
+    tampered_source_data = load_json(tampered_source)
+    tampered_source_proof = tampered_source_data["proof"]
+    assert isinstance(tampered_source_proof, dict)
+    saved_files = tampered_source_proof["saved_files"]
+    assert isinstance(saved_files, list) and isinstance(saved_files[0], dict)
+    Path(str(saved_files[0]["path"])).write_text("tampered source proof\n", encoding="utf-8")
+    try:
+        validate_fx_workpaper(tampered_source, "COP", 2025)
+    except FbarError as exc:
+        assert "saved proof 1 SHA-256" in str(exc), str(exc)
+    else:
+        raise AssertionError("tampered retained source proof must be rejected")
+
+    tampered_pdf = make_year_end_fx_workpaper(root, name="tampered-pdf")
+    tampered_pdf_data = load_json(tampered_pdf)
+    tampered_pdf_proof = tampered_pdf_data["proof"]
+    assert isinstance(tampered_pdf_proof, dict)
+    Path(str(tampered_pdf_proof["workpaper_pdf"])).write_bytes(b"tampered PDF")
+    try:
+        validate_fx_workpaper(tampered_pdf, "COP", 2025)
+    except FbarError as exc:
+        assert "workpaper_pdf SHA-256" in str(exc), str(exc)
+    else:
+        raise AssertionError("tampered workpaper PDF must be rejected")
+
+    escaped = make_year_end_fx_workpaper(root, name="escaped-proof")
+    escaped_data = load_json(escaped)
+    escaped_proof = escaped_data["proof"]
+    assert isinstance(escaped_proof, dict)
+    escaped_files = escaped_proof["saved_files"]
+    assert isinstance(escaped_files, list) and isinstance(escaped_files[0], dict)
+    external = root / "external-source-proof.json"
+    external.write_text("external proof\n", encoding="utf-8")
+    escaped_files[0]["path"] = str(external)
+    escaped_files[0]["sha256"] = preflight_file_sha256(external)
+    write_json(escaped, escaped_data)
+    try:
+        validate_fx_workpaper(escaped, "COP", 2025)
+    except FbarError as exc:
+        assert "packet_relative_path" in str(exc), str(exc)
+    else:
+        raise AssertionError("external saved proof path must be rejected")
+
+    symlinked = make_year_end_fx_workpaper(root, name="symlinked-proof")
+    symlinked_data = load_json(symlinked)
+    symlinked_proof = symlinked_data["proof"]
+    assert isinstance(symlinked_proof, dict)
+    symlinked_files = symlinked_proof["saved_files"]
+    assert isinstance(symlinked_files, list) and isinstance(symlinked_files[0], dict)
+    source_path = Path(str(symlinked_files[0]["path"]))
+    source_path.unlink()
+    source_path.symlink_to(external)
+    try:
+        validate_fx_workpaper(symlinked, "COP", 2025)
+    except FbarError as exc:
+        assert "escapes the retained packet" in str(exc) or "not a symlink" in str(exc), str(exc)
+    else:
+        raise AssertionError("symlinked saved proof path must be rejected")
+
+    undocumented = make_year_end_fx_workpaper(root, name="undocumented-no-proof")
+    undocumented_data = load_json(undocumented)
+    undocumented_proof = undocumented_data["proof"]
+    assert isinstance(undocumented_proof, dict)
+    undocumented_proof["saved_files"] = []
+    undocumented_proof["limitations"] = []
+    write_json(undocumented, undocumented_data)
+    try:
+        validate_fx_workpaper(undocumented, "COP", 2025)
+    except FbarError as exc:
+        assert "proof limitation" in str(exc), str(exc)
+    else:
+        raise AssertionError("a no-proof packet must disclose its limitation")
 
 
 def test_boundary_rounding(root: Path) -> None:
@@ -3859,18 +4091,10 @@ def test_aggregate_native_precision_display(root: Path) -> None:
 
 def test_hostile_inputs_clean_errors(root: Path) -> None:
     # A non-integer FX year must raise a clean FbarError, not a raw ValueError.
-    workpaper = root / "hostile-year-workpaper.json"
-    write_json(
-        workpaper,
-        {
-            "skill": "get-year-end-fx-rate",
-            "currency": "COP",
-            "year": "banana",
-            "usd_per_foreign": "0.00025",
-            "source": {"title": "t", "url": "u", "retrieved": "2026-01-01"},
-            "proof": {"workpaper_json": str(workpaper)},
-        },
-    )
+    workpaper = make_year_end_fx_workpaper(root, name="hostile-year")
+    workpaper_data = load_json(workpaper)
+    workpaper_data["year"] = "banana"
+    write_json(workpaper, workpaper_data)
     try:
         validate_fx_workpaper(workpaper, "COP", 2025)
     except FbarError as exc:
