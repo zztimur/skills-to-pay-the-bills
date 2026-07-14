@@ -9,6 +9,24 @@ changelogs, or GitHub Releases.
 The current repository version lives in [`VERSION`](VERSION), is tagged
 `vX.Y.Z`, and has one matching GitHub Release.
 
+## [1.4.0] - 2026-07-14
+
+### Changed
+
+- `statement-intake-preflight`: test(statement-intake-preflight): add period resolution baselines
+- `statement-intake-preflight`: feat(statement-intake-preflight): capture period evidence
+- `statement-intake-preflight`: feat(statement-intake-preflight): resolve source-bound period years
+- `statement-intake-preflight`: feat(statement-intake-preflight): confirm unresolved period years
+- `statement-intake-preflight`: feat(statement-intake-preflight): confirm account opening dates
+- `statement-intake-preflight`: test(statement-intake-preflight): preserve generated date protections
+- `repository`: feat(statement-intake-preflight): validate reviewed period contracts
+- `statement-intake-preflight`: chore(statement-intake-preflight): bump to 1.4.6
+- `fbar-threshold-check`: fix(fbar-threshold-check): preserve compact period evidence and bump to 1.8.7
+- `statement-intake-preflight`: chore(statement-intake-preflight): align package version metadata
+- `statements-to-interest`: Bump statements-to-interest to v1.3.4
+- `fbar-threshold-check`: fix(fbar-threshold-check): sync manifest version to 1.8.7
+- `repository`: docs: document reviewed statement handoffs
+
 ## [1.3.6] - 2026-07-13
 
 ### Changed
