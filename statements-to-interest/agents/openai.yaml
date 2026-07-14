@@ -3,10 +3,5 @@ interface:
   short_description: "Extract statement interest for Schedule B"
   default_prompt: "Use $statements-to-interest after $statement-intake-preflight to extract foreign-bank interest for Schedule B support and pause before non-USD conversion."
 dependencies:
-  skills:
-    - name: "statement-intake-preflight"
-      required: true
-      description: "Runs shared machine-readable statement PDF intake with --scope one-institution before interest extraction."
-    - name: "get-yearly-fx-rate"
-      required: false
-      description: "Creates proof-backed published yearly-average FX workpapers for non-USD interest reports."
+  - "statement-intake-preflight"
+  - "get-yearly-fx-rate"
