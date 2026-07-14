@@ -31,6 +31,8 @@ sign, or account field. It proceeds when the evidence is corroborated. When a
 human answer is needed, it uses these prompts:
 
 - Weak currency evidence: “We could not corroborate the account currency from the statement text. Please confirm the ISO currency code (for example, `COP`).”
+- Unresolved source-labelled period year: “This statement displays a December 1–31 period but no usable year. Please confirm whether this displayed period is 2025.” The handoff accepts only the exact opaque period ID shown by preflight.
+- Inferred period year: “We derived the displayed statement period from exact source-linked account evidence and directly adjacent source periods. Please review the listed source references.” Accepting this gate preserves the derived dates; it does not invite a replacement year or interval.
 - Contextual prior-year date with unclear period coverage: “We found `2024-12-31` in the Q1 statement. It appears to be a prior-year opening balance, while the statement period appears to be 2025. Please confirm that all supplied statements cover 2025 and that this date is contextual.”
 - Out-of-period generated-on metadata: “We found `2026-12-31` as the date the document was generated, not as a statement period. Please confirm that exact displayed date. We will retain it as document metadata and will not use it for statement-year coverage.”
 - Missing or incompletely linked account identity for an FBAR account set: “We could not extract a reliable account identifier from every supplied PDF. Please confirm that the supplied PDFs represent one account. You do not need to provide the account number.”
@@ -54,7 +56,8 @@ The preflight command writes:
 The JSON includes:
 
 - statement files, resolved paths, byte sizes, SHA-256 fingerprints, page counts, and text counts;
-- detected statement titles and period labels (excluding transaction narratives), with source references for both period endpoints;
+- detected statement titles and direct or source-linked inferred period intervals, with independently traceable source references for both endpoints;
+- stable opaque IDs for source-labelled periods whose year remains unresolved and needs one exact reviewed confirmation;
 - detected years and out-of-year hints, plus source-labelled generated-on metadata kept separate from coverage;
 - currency candidates it could back up with a nearby amount or name, the weaker ones it could not, and ambiguous `$` warnings;
 - account hints, source-linkage coverage across the supplied PDFs, and institution hints;
@@ -113,13 +116,14 @@ Then either pass a clean preflight JSON to the downstream skill, or create a rev
 python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-handoff \
   --input work/statement-preflight.json \
   --accept-gate ambiguous-dollar \
+  --confirm-currency COP \
   --user-review-confirmed \
   --out work/statement-preflight-reviewed.json
 ```
 
 Repeat `--accept-gate` for each gate. Structural `stop` gates cannot be accepted: correct the inputs and rerun preflight. For a reviewed handoff, use the new JSON path below:
 
-Add only the resolution flags required by the source gates: `--confirm-currency COP` for weak or unknown currency evidence, `--confirm-one-account` when no account identifier can be extracted or the identifier is not source-linked across every supplied PDF, `--confirm-institution "Example Bank"` for an unknown one-institution issuer or an opt-in FBAR `one-account --require-institution` issuer gate, `--confirm-statement-year 2025` (plus `--classify-contextual-year 2024` when applicable) for unresolved year coverage, and `--confirm-generated-on-date 2026-12-31` once for each extracted out-of-period generated-on date. `--confirm-account-opened-on 2025-05-01` is permitted only for a `possible-missing-statement-period` gate with one continuous leading gap, no internal or trailing gap, and a first source-supported period that starts on that exact date. It keeps the raw coverage gap intact and records a separate reviewed resolution; it cannot excuse a missing middle or year-end statement. A generated-on confirmation binds the exact date and source reference but does not treat it as statement-year coverage. Do not provide a full account number by default. A genuine mixed statement year cannot be accepted. Conflicting issuer evidence can be resolved only for opt-in FBAR `one-account --require-institution` intake after explicit user review; the handoff preserves the original evidence and accepted gate. <!-- privacy-gate: allow -->
+Add only the resolution flags required by the source gates: `--confirm-period-year period-abc123=2025` once for every opaque ID in `coverage_hints.unresolved_periods`; `--confirm-currency COP` for weak or unknown currency evidence; `--confirm-one-account` when no account identifier can be extracted or the identifier is not source-linked across every supplied PDF; `--confirm-institution "Example Bank"` for an unknown one-institution issuer or an opt-in FBAR `one-account --require-institution` issuer gate; `--confirm-statement-year 2025` (plus `--classify-contextual-year 2024` when applicable) only for separately extracted contextual or unresolved year evidence; and `--confirm-generated-on-date 2026-12-31` once for each extracted out-of-period generated-on date. An `inferred-period-year` gate needs only its exact `--accept-gate`; the handoff keeps the preflight-derived interval unchanged. `--confirm-account-opened-on 2025-05-01` is permitted only for a `possible-missing-statement-period` gate with one continuous leading gap, no internal or trailing gap, and a first source-supported period that starts on that exact date. It keeps the raw coverage gap intact and records a separate reviewed resolution; it cannot excuse a missing middle or year-end statement. A generated-on confirmation binds the exact date and source reference but does not treat it as statement-year coverage. Do not provide a full account number by default. A genuine mixed statement year cannot be accepted. Conflicting issuer evidence can be resolved only for opt-in FBAR `one-account --require-institution` intake after explicit user review; the handoff preserves the original evidence and accepted gate. <!-- privacy-gate: allow -->
 
 ```bash
 python3 fbar-threshold-check/scripts/fbar_threshold_check.py extract-account \
@@ -134,7 +138,7 @@ python3 statements-to-interest/scripts/statements_to_interest.py extract \
   --pdf statement-01.pdf statement-02.pdf \
   --tax-year 2025 \
   --institution "Example Bank" \
-  --preflight-json work/statement-preflight.json \
+  --preflight-json work/statement-preflight-reviewed.json \
   --out work/interest-analysis.json
 ```
 
