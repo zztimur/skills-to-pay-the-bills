@@ -14,9 +14,9 @@ One currency. One calendar/tax year. A published yearly average rate.
 
 This is for yearly averages, not year-end conversion or FBAR work.
 
-Use the IRS yearly-average table first when it lists the currency and year. If the IRS does not list it, use a published annual average from a government, tax authority, central bank, bank, or reputable FX provider.
+Use the IRS yearly-average table first when it lists the currency and year. If the IRS does not list it, use a published annual average from a government, tax authority, central bank, bank, or reputable FX provider. This skill emits only published annual-average workpapers with retained proof.
 
-Do not calculate an annual average from daily, monthly, quarterly, or intraday data. If only raw time-series data exists, stop and ask for a published annual source or a custom preparer-approved rate/source.
+Do not calculate an annual average from daily, monthly, quarterly, or intraday data. If only raw time-series data exists, this skill stops and asks for a published annual source. If a consuming workflow permits a user/preparer custom rate, record it there—for example, `statements-to-interest --fx-method user-rate`—instead of dressing it up as a published annual average here.
 
 Also: do not call the result IRS-approved. The IRS says it has no official exchange rate and generally accepts posted rates used consistently. This skill makes a support workpaper, not tax advice.
 
@@ -29,7 +29,7 @@ Rate: 1 USD = 1.37 CAD yearly average
 Reciprocal: 1 CAD = 0.729927007299 USD
 Source: IRS Yearly average currency exchange rates, https://www.irs.gov/..., retrieved YYYY-MM-DD
 Proof: [workpaper.pdf](</absolute/path/to/workpaper.pdf>)
-Artifacts: [workpaper.pdf](</absolute/path/to/workpaper.pdf>), [workpaper.md](</absolute/path/to/workpaper.md>), [workpaper.json](</absolute/path/to/workpaper.json>), [source-proof-1.html](</absolute/path/to/source-proof-1.html>)
+Artifacts: [workpaper.pdf](</absolute/path/to/workpaper.pdf>), [workpaper.md](</absolute/path/to/workpaper.md>), [workpaper.json](</absolute/path/to/workpaper.json>), [irs-yearly-average-source.html](</absolute/path/to/irs-yearly-average-source.html>)
 ```
 
 Those links matter. A path printed as text is technically true and practically annoying; a Markdown file link gives the chat UI a fighting chance to make the proof packet clickable/downloadable.
@@ -82,7 +82,7 @@ python3 get-yearly-fx-rate/scripts/get_yearly_fx_rate.py lookup \
   --output-root work/fx-rate-proof
 ```
 
-If the script cannot reach the IRS page (exit code 5, common in sandboxed or proxied environments), fetch the canonical IRS page yourself, save its raw HTML as a regular UTF-8 file no larger than 5 MiB, and rerun `lookup` with `--html-file <saved.html>`. The saved file is a local replay, not independently IRS-verified evidence: the output and workpaper label it as such and add a caveat. Verify the retained snapshot before relying on it.
+If the script cannot reach the IRS page (exit code 5, common in sandboxed or proxied environments), fetch the canonical IRS page yourself, save its raw HTML as a regular UTF-8 file no larger than 5 MiB, and rerun `lookup` with `--html-file <saved.html>`. A live lookup retains `irs-yearly-average-source.html`; this local replay retains `irs-yearly-average-local-snapshot.html`. The saved replay is not independently IRS-verified evidence: the output and workpaper label it as such and add a caveat. Verify the retained snapshot before relying on it.
 
 Manual workpaper for a non-IRS published annual source:
 
