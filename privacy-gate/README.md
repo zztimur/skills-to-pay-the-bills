@@ -25,6 +25,13 @@ python3 privacy-gate/scripts/privacy_gate.py scan --path .
 python3 privacy-gate/scripts/privacy_gate.py scan --path privacy-gate/SKILL.md
 ```
 
+A directory scan skips fixed high-noise folders: VCS metadata, tool caches,
+virtual environments, and `node_modules`. It reports those structural skips.
+`build/` and `dist/` are not skipped because packaged output is exactly where a
+private artifact can hitch a ride. Files it cannot safely inspect as text,
+including binary and non-UTF files, block unless the policy recognizes a safe
+placeholder format.
+
 Install the tracked Git hook locally:
 
 ```bash
@@ -67,13 +74,15 @@ A reviewed false positive does not have to mean disabling the gate. Two inline m
 - `privacy-gate: allow` in a comment suppresses PII **warnings** on that line. A high-confidence secret on the same line still blocks.
 - `privacy-gate: allow-secret` is required to suppress a **secret** block on that line, and relies entirely on diff review.
 
-Or list glob patterns in a committed `.privacygateignore` to skip whole paths. Neither route affects file-level blocks like binaries or `.env` files. Prefer removing and rotating a real credential over allowlisting it.
+Inline markers cannot suppress file-level blocks such as binaries or `.env` files. `.privacygateignore` is different: it skips matching paths entirely, including binary, environment-file, and secret checks, and reports the skip count. Use it only after deliberate review. Prefer removing and rotating a real credential over allowlisting it.
 
 ## Sanitizing Text
 
 For plain text files with private-looking personal data:
 
 ```bash
+python3 privacy-gate/scripts/privacy_gate.py sanitize --path path/to/file.txt
+# Review the preview, then apply it deliberately:
 python3 privacy-gate/scripts/privacy_gate.py sanitize --path path/to/file.txt --write
 ```
 
