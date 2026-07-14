@@ -97,6 +97,8 @@ The script writes:
 
 `report` accepts only the current extraction contract: it reloads the ready preflight artifact and rechecks its digest plus every source PDF byte size and SHA-256 digest. If those artifacts changed or are missing, re-run extraction rather than editing the analysis JSON.
 
+Choose new artifact paths for every run. `extract` and `report` refuse existing output targets, output paths that overlap each other, and output paths that overlap a supplied or verified input artifact. Do not use an input JSON, source PDF, preflight artifact, FX artifact, or an existing packet as `--out`.
+
 Each `excluded_candidates` item records whether it is `clear-non-interest` or `ambiguous`. Clear exclusions such as withholding remain visible in the support packet but do not block a report. Any ambiguous candidate makes the analysis `review-required`, even when other interest rows were counted.
 
 Use `--account-currency` only when the preflight artifact or statement evidence confirms the currency and the interest extractor cannot infer it. A reviewed preflight currency resolution takes precedence and conflicts with a different CLI value. Do not treat `$` alone as proof of USD; unresolved `$` belongs back in preflight before reporting.
@@ -175,6 +177,8 @@ If counted rows are not USD:
 9. Use item-date spot rates only if the user or preparer explicitly asks for that method.
 
 Daily-rate JSON proof metadata must be an object with `saved_file` and its matching SHA-256 digest. The referenced file is verified before previewing or reporting.
+
+Every FX rate must be a finite, positive decimal. Reject `NaN`, infinity, and rates with exponents outside ±18; do not attempt to calculate or render from them.
 
 Yearly average confirmation prompt shape:
 

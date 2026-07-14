@@ -22,6 +22,8 @@ Zero extracted rows are not proof of zero interest. After resolving any ambiguou
 
 Reporting rechecks the analysis schema, preflight digest, original statement paths and hashes, any exclusion-resolution digest, and retained FX proof hashes before it writes the PDF. A packet should not stay green after its evidence changes underneath it.
 
+Extraction and report outputs are write-once. `extract` refuses an existing JSON or CSV target, targets that overlap each other, or a target that overlaps an input artifact. `report` refuses an existing packet target or a target that overlaps an input or verified evidence artifact. Pick a new output path when rerunning either command.
+
 ## Package Map
 
 - `SKILL.md` is the control plane for Codex/OpenAI Agent Skills.
@@ -40,6 +42,8 @@ For non-USD published yearly-average FX, use the separate `get-yearly-fx-rate` s
 Conditional FX dependency: `get-yearly-fx-rate`. Use it when the packet needs a published yearly-average FX workpaper; use a confirmed user/preparer custom rate only when that dependency cannot produce one or the user chooses a custom rate.
 
 If no published annual workpaper is available, ask for a confirmed user/preparer custom rate. A custom-rate source is optional; when absent, the PDF discloses that no independent source was provided and adds a preparer-review warning.
+
+All FX rates must be finite, positive decimals. The script rejects `NaN`, infinity, and rate exponents outside ±18 before it calculates or renders a packet.
 
 ## Runtime
 

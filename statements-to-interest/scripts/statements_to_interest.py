@@ -54,6 +54,7 @@ ANALYSIS_READY_STATUS = "ready-for-reporting"
 ANALYSIS_REVIEW_REQUIRED_STATUS = "review-required"
 ANALYSIS_ZERO_CONFIRMATION_STATUS = "zero-interest-confirmation-required"
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+MAX_FX_RATE_EXPONENT = 18
 SANITIZED_DOTTED_ACCOUNT = "123.456.789"  # privacy-gate: allow
 SANITIZED_IBAN = "ZZ00TEST0000000000000000"  # privacy-gate: allow
 SANITIZED_EMAIL = "safe-fixture@example.test"  # privacy-gate: allow
@@ -1035,6 +1036,43 @@ def normalize_preflight_path(path: str | Path) -> str:
     return str(Path(path).expanduser().resolve(strict=False))
 
 
+def guard_output_paths(
+    command: str,
+    outputs: list[tuple[str, str | Path]],
+    inputs: list[tuple[str, str | Path]],
+) -> None:
+    """Refuse destructive artifact targets before any command writes a file."""
+    def resolved_path(path: str | Path, label: str) -> Path:
+        candidate = Path(path).expanduser()
+        try:
+            return candidate.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise SystemExit(f"Could not resolve {label} path {candidate}: {exc}") from exc
+
+    resolved_inputs = [(label, resolved_path(path, label)) for label, path in inputs]
+    resolved_outputs: list[tuple[str, Path, Path]] = []
+    for label, path in outputs:
+        candidate = Path(path).expanduser()
+        resolved = resolved_path(candidate, label)
+        for input_label, input_path in resolved_inputs:
+            if resolved == input_path:
+                raise SystemExit(
+                    f"{command} refused unsafe output path: {label} collides with input {input_label}: {candidate}"
+                )
+        for prior_label, _prior_candidate, prior_resolved in resolved_outputs:
+            if resolved == prior_resolved:
+                raise SystemExit(
+                    f"{command} refused unsafe output path: {label} collides with {prior_label}: {candidate}"
+                )
+        # ``Path.exists`` is false for a dangling symlink; it is still an
+        # occupied destination and must never be followed for a write.
+        if os.path.lexists(candidate):
+            raise SystemExit(
+                f"{command} refused unsafe output path: {label} already exists or is a dangling symlink: {candidate}"
+            )
+        resolved_outputs.append((label, candidate, resolved))
+
+
 def sha256_file(path: Path, label: str) -> str:
     digest = hashlib.sha256()
     try:
@@ -1778,6 +1816,13 @@ def command_extract(args: argparse.Namespace) -> int:
     tax_year = int(args.tax_year)
     account_currency_override = normalize_currency_code(args.account_currency, "account currency")
     pdf_paths = [Path(p) for p in args.pdf]
+    out_path = Path(args.out)
+    csv_path = Path(args.csv) if args.csv else out_path.with_name("interest-items.csv")
+    guard_output_paths(
+        "extract",
+        [("analysis JSON output", out_path), ("review CSV output", csv_path)],
+        [("statement PDF", path) for path in pdf_paths] + [("preflight JSON", args.preflight_json)],
+    )
     preflight = load_preflight_json(
         args.preflight_json,
         "one-institution",
@@ -1884,10 +1929,8 @@ def command_extract(args: argparse.Namespace) -> int:
             "foreign_total_by_currency": foreign_totals(all_rows),
         },
     }
-    out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(analysis, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    csv_path = Path(args.csv) if args.csv else out_path.with_name("interest-items.csv")
     write_csv(analysis["rows"], csv_path)
     print(f"Wrote analysis: {out_path}")
     print(f"Wrote CSV: {csv_path}")
@@ -1908,6 +1951,12 @@ def parse_decimal(value: str, label: str) -> Decimal:
         parsed = Decimal(value)
     except InvalidOperation as exc:
         raise SystemExit(f"Invalid {label}: {value}") from exc
+    if not parsed.is_finite():
+        raise SystemExit(f"Invalid {label}: value must be finite.")
+    if abs(parsed.adjusted()) > MAX_FX_RATE_EXPONENT:
+        raise SystemExit(
+            f"Invalid {label}: exponent magnitude must not exceed {MAX_FX_RATE_EXPONENT}."
+        )
     if parsed <= 0:
         raise SystemExit(f"{label} must be greater than zero.")
     return parsed
@@ -2501,6 +2550,32 @@ def validate_analysis_contract(analysis: dict, input_path: Path) -> None:
             raise SystemExit(f"Statement PDF changed after extraction: {source_file}. Re-run extract before reporting.")
 
 
+def report_argument_input_paths(input_path: Path, args: argparse.Namespace) -> list[tuple[str, str | Path]]:
+    inputs: list[tuple[str, str | Path]] = [("analysis JSON", input_path)]
+    for attribute, label in (
+        ("excluded_candidates_resolution_json", "excluded-candidates resolution JSON"),
+        ("fx_workpaper_json", "FX workpaper JSON"),
+        ("fx_rates_json", "FX rates JSON"),
+    ):
+        value = getattr(args, attribute, None)
+        if isinstance(value, str) and value:
+            inputs.append((label, value))
+    return inputs
+
+
+def report_input_paths(analysis: dict, input_path: Path, args: argparse.Namespace) -> list[tuple[str, str | Path]]:
+    inputs = report_argument_input_paths(input_path, args)
+    for index, item in enumerate(analysis.get("statement_files", []), start=1):
+        if isinstance(item, dict):
+            source_file = item.get("resolved_file") or item.get("file")
+            if isinstance(source_file, str) and source_file:
+                inputs.append((f"statement PDF {index}", source_file))
+    preflight = analysis.get("preflight")
+    if isinstance(preflight, dict) and isinstance(preflight.get("source_json"), str):
+        inputs.append(("preflight JSON", preflight["source_json"]))
+    return inputs
+
+
 def load_exclusion_resolution_payload(path: Path) -> dict:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -2677,8 +2752,11 @@ def command_report(args: argparse.Namespace) -> int:
     if args.fx_rates_json and args.fx_method != "posted-daily-spot":
         raise SystemExit("--fx-rates-json is only valid with --fx-method posted-daily-spot.")
     input_path = Path(args.input)
+    out_path = Path(args.out)
+    guard_output_paths("report", [("support packet PDF output", out_path)], report_argument_input_paths(input_path, args))
     analysis = load_analysis_payload(input_path)
     validate_analysis_contract(analysis, input_path)
+    guard_output_paths("report", [("support packet PDF output", out_path)], report_input_paths(analysis, input_path, args))
     rows, _totals, currency, foreign_total = report_rows_and_total(analysis, input_path)
     exclusion_resolution = excluded_candidates_resolution_for_report(
         analysis, getattr(args, "excluded_candidates_resolution_json", None)
@@ -2756,7 +2834,6 @@ def command_report(args: argparse.Namespace) -> int:
                 fx_note = f"{method}; {rate_phrase}; source: {fx_source}."
             fx_note = f"{fx_note} Confirmation: {fx_confirmation}"
 
-    out_path = Path(args.out)
     renderer = ReportlabPacketRenderer(
         out_path,
         footer_text="Generated support packet - not an official IRS form.",
@@ -3158,6 +3235,43 @@ def command_self_test(args: argparse.Namespace) -> int:
         preflight = load_preflight_json(
             str(preflight_path), "one-institution", 2025, [str(pdf_path)], "Preflight Bank"
         )
+        existing_output = tmp_path / "existing-output.json"
+        existing_output.write_text("do not overwrite", encoding="utf-8")
+        dangling_output = tmp_path / "dangling-output.json"
+        dangling_output.symlink_to(tmp_path / "missing-output.json")
+        output_guard_cases = [
+            (
+                "output-guard-existing-target",
+                [("analysis JSON output", existing_output)],
+                [("statement PDF", pdf_path)],
+                "already exists",
+            ),
+            (
+                "output-guard-dangling-symlink",
+                [("analysis JSON output", dangling_output)],
+                [("statement PDF", pdf_path)],
+                "dangling symlink",
+            ),
+            (
+                "output-guard-input-collision",
+                [("analysis JSON output", pdf_path)],
+                [("statement PDF", pdf_path)],
+                "collides with input",
+            ),
+            (
+                "output-guard-sibling-collision",
+                [("analysis JSON output", tmp_path / "same-output"), ("review CSV output", tmp_path / "same-output")],
+                [("statement PDF", pdf_path)],
+                "collides with analysis JSON output",
+            ),
+        ]
+        for name, outputs, inputs, expected in output_guard_cases:
+            try:
+                guard_output_paths("self-test", outputs, inputs)
+                failures.append(f"{name}: expected unsafe output rejection")
+            except SystemExit as exc:
+                if expected not in str(exc):
+                    failures.append(f"{name}: expected {expected!r} in rejection, got {exc}")
         preflight_warnings = preflight_warning_lines(preflight)
         if not any("sample review warning" in warning for warning in preflight_warnings):
             failures.append("preflight-warning-import: expected sample warning")
@@ -3603,6 +3717,13 @@ def command_self_test(args: argparse.Namespace) -> int:
         daily_values, _daily_labels, _daily_note = apply_daily_spot_rates(analysis["rows"], "COP", daily_rates)
         if daily_values != [Decimal("0.3715")]:
             failures.append(f"daily-fx-valid: unexpected converted values {daily_values}")
+        for value, expected in (("NaN", "finite"), ("Infinity", "finite"), ("1e19", "exponent magnitude")):
+            try:
+                parse_decimal(value, "FX rate")
+                failures.append(f"fx-rate-{value}: expected rejection")
+            except SystemExit as exc:
+                if expected not in str(exc):
+                    failures.append(f"fx-rate-{value}: expected {expected!r} in rejection, got {exc}")
         for name, payload, expected in (
             (
                 "daily-fx-yearly-bypass",
@@ -3647,6 +3768,28 @@ def command_self_test(args: argparse.Namespace) -> int:
                 },
                 "does not match",
             ),
+            (
+                "daily-fx-nonfinite-rate",
+                {
+                    "method": "posted-daily-spot",
+                    "source": "Example daily source",
+                    "proof": {"saved_file": str(daily_proof_path), "sha256": daily_proof_sha256},
+                    "rate_direction": "foreign-per-usd",
+                    "rates": {"2025-01-03": "Infinity"},
+                },
+                "finite",
+            ),
+            (
+                "daily-fx-huge-exponent",
+                {
+                    "method": "posted-daily-spot",
+                    "source": "Example daily source",
+                    "proof": {"saved_file": str(daily_proof_path), "sha256": daily_proof_sha256},
+                    "rate_direction": "foreign-per-usd",
+                    "rates": {"2025-01-03": "1e19"},
+                },
+                "exponent magnitude",
+            ),
         ):
             bad_daily_path = tmp_path / f"{name}.json"
             bad_daily_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -3685,6 +3828,18 @@ def command_self_test(args: argparse.Namespace) -> int:
         loaded_workpaper = load_fx_workpaper(workpaper_path, "COP", 2025)
         if loaded_workpaper.get("_fx_rate_decimal") != Decimal("4089.9846"):
             failures.append("fx-workpaper-load: expected normalized foreign_per_usd rate")
+        for value, expected in (("NaN", "finite"), ("1e19", "exponent magnitude")):
+            invalid_rate_workpaper_path = tmp_path / f"workpaper-{value}.json"
+            invalid_rate_workpaper = dict(workpaper)
+            invalid_rate_workpaper["foreign_per_usd"] = value
+            invalid_rate_workpaper["proof"] = {**workpaper["proof"], "workpaper_json": str(invalid_rate_workpaper_path)}
+            invalid_rate_workpaper_path.write_text(json.dumps(invalid_rate_workpaper), encoding="utf-8")
+            try:
+                load_fx_workpaper(invalid_rate_workpaper_path, "COP", 2025)
+                failures.append(f"fx-workpaper-{value}: expected rejection")
+            except SystemExit as exc:
+                if expected not in str(exc):
+                    failures.append(f"fx-workpaper-{value}: expected {expected!r} in rejection, got {exc}")
         args = argparse.Namespace(fx_workpaper_json=str(workpaper_path))
         configure_fx_from_workpaper(args, analysis, "COP")
         if args.fx_method != "get-yearly-fx-rate" or args.fx_rate != "4089.9846" or args.rate_direction != "foreign-per-usd":
@@ -3771,7 +3926,7 @@ def command_self_test(args: argparse.Namespace) -> int:
     print(
         f"Self-test passed: {layout_fixture_count} deidentified layout fixtures, "
         f"{len(cases) + 6} parser/review cases, 5 privacy cases, "
-        "16 FX/dependency/proof cases, strict preflight/provenance identity checks"
+        "FX output/proof cases, strict preflight/provenance identity checks"
     )
     return 0
 
@@ -3814,6 +3969,7 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
                 primary_institution="Example Bank",
             )
             analysis_path = root / f"{Path(name).stem}-analysis.json"
+            csv_path = root / f"{Path(name).stem}-interest-items.csv"
             command_extract(
                 argparse.Namespace(
                     pdf=[str(pdf_path)],
@@ -3822,7 +3978,7 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
                     account_currency=None,
                     preflight_json=str(preflight_path),
                     out=str(analysis_path),
-                    csv=None,
+                    csv=str(csv_path),
                 )
             )
             return analysis_path
@@ -3886,6 +4042,52 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
         if "2025-01-03" not in usd_text or "USD 10.00" not in usd_text:
             failures.append("pdf-privacy: packet redacted a date or monetary amount")
 
+        usd_statement_path = root / "usd-statement.pdf"
+        usd_statement_sha256 = sha256_file(usd_statement_path, "USD source statement")
+        usd_analysis_bytes = usd_analysis_path.read_bytes()
+        output_collision_preflight = write_preflight_fixture(
+            root,
+            "output-collision-preflight",
+            2025,
+            "one-institution",
+            [usd_statement_path],
+            primary_institution="Example Bank",
+        )
+        try:
+            command_extract(
+                argparse.Namespace(
+                    pdf=[str(usd_statement_path)],
+                    tax_year=2025,
+                    institution="Example Bank",
+                    account_currency=None,
+                    preflight_json=str(output_collision_preflight),
+                    out=str(usd_statement_path),
+                    csv=None,
+                )
+            )
+            failures.append("extract-output-source-pdf: expected collision rejection")
+        except SystemExit as exc:
+            if "collides with input statement PDF" not in str(exc):
+                failures.append(f"extract-output-source-pdf: unexpected rejection {exc}")
+        if sha256_file(usd_statement_path, "USD source statement") != usd_statement_sha256:
+            failures.append("extract-output-source-pdf: source statement changed despite output collision")
+
+        for name, output_path, expected in (
+            ("report-output-analysis", usd_analysis_path, "collides with input analysis JSON"),
+            ("report-output-source-pdf", usd_statement_path, "already exists"),
+            ("report-output-existing-target", usd_output_path, "already exists"),
+        ):
+            try:
+                command_report(report_args(usd_analysis_path, output_path))
+                failures.append(f"{name}: expected collision rejection")
+            except SystemExit as exc:
+                if expected not in str(exc):
+                    failures.append(f"{name}: expected {expected!r} in rejection, got {exc}")
+        if usd_analysis_path.read_bytes() != usd_analysis_bytes:
+            failures.append("report-output-analysis: analysis changed despite output collision")
+        if sha256_file(usd_statement_path, "USD source statement") != usd_statement_sha256:
+            failures.append("report-output-source-pdf: source statement changed despite output collision")
+
         cop_analysis_path = extract_pdf(
             "cop-statement.pdf",
             [
@@ -3943,6 +4145,25 @@ def command_smoke_test(_args: argparse.Namespace) -> int:
         cop_text = "\n".join((page.extract_text() or "") for page in PdfReader(cop_output_path).pages)
         if "USD 0.37" not in cop_text or "Preparer confirmed the published yearly average rate." not in cop_text:
             failures.append("cop-yearly-average: packet is missing conversion or confirmation evidence")
+
+        nonfinite_custom_output = root / "nonfinite-custom-rate.pdf"
+        try:
+            command_report(
+                report_args(
+                    cop_analysis_path,
+                    nonfinite_custom_output,
+                    fx_method="user-rate",
+                    fx_rate="Infinity",
+                    fx_rate_confirmed=True,
+                    fx_confirmation_note="Attempted non-finite custom FX rate.",
+                )
+            )
+            failures.append("custom-fx-nonfinite: expected report rejection")
+        except SystemExit as exc:
+            if "finite" not in str(exc):
+                failures.append(f"custom-fx-nonfinite: unexpected rejection {exc}")
+        if nonfinite_custom_output.exists():
+            failures.append("custom-fx-nonfinite: report created a PDF despite invalid FX rate")
 
         for name, proof_update, expected in (
             (

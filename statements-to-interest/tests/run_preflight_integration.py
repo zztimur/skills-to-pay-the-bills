@@ -89,6 +89,7 @@ def preflight(root: Path, tag: str, pdfs: list[Path]) -> tuple[subprocess.Comple
 def extract(
     pdf_paths: list[Path], preflight_json: Path, output: Path, institution: str = "Example Bank"
 ) -> subprocess.CompletedProcess[str]:
+    csv_output = output.with_name(f"{output.stem}-interest-items.csv")
     return command(
         [
             sys.executable,
@@ -104,6 +105,8 @@ def extract(
             str(preflight_json),
             "--out",
             str(output),
+            "--csv",
+            str(csv_output),
         ]
     )
 
