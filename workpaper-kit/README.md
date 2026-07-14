@@ -76,7 +76,7 @@ when it replaces an existing packet.
 | `document_title`, `document_subtitle`, `rate_phrase`, `caveats` | presentation — the divergence knobs |
 | `extra_rows` | extra `label: value` rows (md between Year and Rate; pdf rate-detail rows) |
 | `extra_json` | deep-merged into `workpaper.json` (nested dicts merge, so `source.year_end_confirmed` does not clobber the source block) |
-| `saved_proofs`, `proof_required`, `proof_limitations` | proof policy — `proof_required=True` raises on a missing proof file; `False` skips it |
+| `saved_proofs`, `proof_required`, `proof_limitations` | proof policy — `proof_required=True` rejects an unusable supplied proof path; an empty proof list records `NO_PROOF_LIMITATION` and does not raise. If zero proofs must be impossible, the caller enforces that before calling the kit. `False` skips unusable supplied paths without adding that automatic limitation. |
 
 All per-skill divergence is absorbed by these fields. The proof-entry schema
 (`filename` / `packet_relative_path` / `path` / `sha256`) is identical for both
