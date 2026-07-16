@@ -9,6 +9,17 @@ changelogs, or GitHub Releases.
 The current repository version lives in [`VERSION`](VERSION), is tagged
 `vX.Y.Z`, and has one matching GitHub Release.
 
+## [1.4.2] - 2026-07-16
+
+### Changed
+
+- `repository`: chore: update skill-forge submodule
+- `repository`: fix(openai-metadata): use supported dependency lists
+- `repository`: chore: update skill-forge submodule to v0.4.0
+- `repository`: chore: bump skill-forge submodule to v0.5.1
+- `scripts`: chore: keep release checks free of Python bytecode caches
+- `repository`: fix: keep proof-packet headings with their first row
+
 ## [1.4.1] - 2026-07-14
 
 ### Changed
