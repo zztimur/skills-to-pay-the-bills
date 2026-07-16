@@ -5,6 +5,12 @@ set -eu
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+# Do not create bytecode during validation, and remove stale bytecode before
+# strict package inspection. The inspector intentionally treats ignored files
+# as a coverage gap, so leftover caches must not make a release nonportable.
+export PYTHONDONTWRITEBYTECODE=1
+bash scripts/clean-python-caches.sh
+
 if ! python3 -c 'import pdfplumber, pypdf, reportlab' >/dev/null 2>&1; then
   echo "release-check: PDF integration requires pdfplumber, pypdf, and reportlab in the active python3 runtime." >&2
   exit 2
