@@ -446,8 +446,20 @@ class WorkpaperPdfRenderer:
         )
         self.y = bottom - 28
 
-    def draw_section_title(self, title: str) -> None:
-        self.ensure_space(32)
+    def _key_value_row_height(self, value: object) -> float:
+        value_width = PDF_INNER_WIDTH - 132
+        value_lines = wrap_for_pdf(value, value_width, 9.5)
+        return max(22, (len(value_lines) * 12) + 10)
+
+    def _bullet_block_height(self, item: object) -> float:
+        lines = wrap_for_pdf(item, PDF_INNER_WIDTH - 20, 9.5)
+        return max(15, len(lines) * 12)
+
+    def draw_section_title(self, title: str, *, min_following_height: float = 0) -> None:
+        # Keep the title with the first following row or bullet. Without this
+        # reserve, a row-level page break can leave a section title stranded at
+        # the foot of the preceding page.
+        self.ensure_space(max(32, 26 + min_following_height))
         self.add(pdf_rect(PDF_MARGIN_X, self.y - 1.5, 2.5, 9, fill=PDF_COLOR_ACCENT))
         self.add(pdf_text(title.upper(), PDF_MARGIN_X + 11, self.y, font="F2", size=9, color=PDF_COLOR_BRAND, tracking=1.3))
         self.add(pdf_line(PDF_MARGIN_X, self.y - 9, PDF_MARGIN_X + PDF_INNER_WIDTH, self.y - 9))
@@ -459,7 +471,7 @@ class WorkpaperPdfRenderer:
         value_width = PDF_INNER_WIDTH - 132
         for label, value in rows:
             value_lines = wrap_for_pdf(value, value_width, 9.5)
-            row_height = max(22, (len(value_lines) * 12) + 10)
+            row_height = self._key_value_row_height(value)
             if self.y - (row_height + 4) < PDF_BOTTOM_MARGIN:
                 self.new_page()
                 if continuation_title:
@@ -476,7 +488,7 @@ class WorkpaperPdfRenderer:
     def draw_bullets(self, items: Iterable[object]) -> None:
         for item in items:
             lines = wrap_for_pdf(item, PDF_INNER_WIDTH - 20, 9.5)
-            block_height = max(15, len(lines) * 12)
+            block_height = self._bullet_block_height(item)
             self.ensure_space(block_height + 5)
             baseline = self.y - 9
             self.add(pdf_rect(PDF_MARGIN_X + 1, baseline - 1, 3.5, 3.5, fill=PDF_COLOR_ACCENT))
@@ -510,7 +522,6 @@ class WorkpaperPdfRenderer:
         caveats = self.workpaper.get("caveats", [])
 
         self.draw_rate_card()
-        self.draw_section_title("Rate Details")
         rate_rows: list[tuple[str, object]] = [
             ("Currency", self.workpaper["currency"]),
             ("Year", self.workpaper["year"]),
@@ -519,21 +530,19 @@ class WorkpaperPdfRenderer:
             ("Reciprocal", f"1 {self.workpaper['currency']} = {self.workpaper['usd_per_foreign']} USD"),
         ]
         rate_rows.extend((str(label), value) for label, value in self.extra_rows)
+        self.draw_section_title("Rate Details", min_following_height=self._key_value_row_height(rate_rows[0][1]) + 4)
         self.draw_key_value_rows(rate_rows, continuation_title="Rate Details")
 
-        self.draw_section_title("Source")
-        self.draw_key_value_rows(
-            [
-                ("Title", source.get("title")),
-                ("URL", source.get("url")),
-                ("Category", source.get("category")),
-                ("Retrieved", source.get("retrieved")),
-                ("Note", source.get("note")),
-            ],
-            continuation_title="Source",
-        )
+        source_rows = [
+            ("Title", source.get("title")),
+            ("URL", source.get("url")),
+            ("Category", source.get("category")),
+            ("Retrieved", source.get("retrieved")),
+            ("Note", source.get("note")),
+        ]
+        self.draw_section_title("Source", min_following_height=self._key_value_row_height(source_rows[0][1]) + 4)
+        self.draw_key_value_rows(source_rows, continuation_title="Source")
 
-        self.draw_section_title("Source Proof")
         proof_rows: list[tuple[str, object]] = []
         if isinstance(saved_files, list) and saved_files:
             for index, item in enumerate(saved_files, start=1):
@@ -544,14 +553,15 @@ class WorkpaperPdfRenderer:
             proof_rows.append(("Reviewer note", "Provide this PDF together with the saved source proof file(s); local computer paths are not required to verify the source hash."))
         else:
             proof_rows.append(("Source proof", "No local source artifact was saved; see proof limitations."))
+        self.draw_section_title("Source Proof", min_following_height=self._key_value_row_height(proof_rows[0][1]) + 4)
         self.draw_key_value_rows(proof_rows, continuation_title="Source Proof")
 
         if isinstance(limitations, list) and limitations:
-            self.draw_section_title("Proof Limitations")
+            self.draw_section_title("Proof Limitations", min_following_height=self._bullet_block_height(limitations[0]) + 5)
             self.draw_bullets(limitations)
 
         if isinstance(caveats, list) and caveats:
-            self.draw_section_title("Caveats")
+            self.draw_section_title("Caveats", min_following_height=self._bullet_block_height(caveats[0]) + 5)
             self.draw_bullets(caveats)
 
         self.draw_footer()

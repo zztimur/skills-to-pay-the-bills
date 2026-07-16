@@ -214,6 +214,37 @@ def test_yearly_pdf_structural_terms() -> None:
         assert str(tmp).encode("latin-1", "replace") not in data
 
 
+def test_pdf_section_titles_keep_their_first_content_block() -> None:
+    """No section heading may be left behind when its first item paginates."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        proof = tmp / "golden-proof.txt"
+        proof.write_bytes(b"workpaper-kit golden proof source\n")
+        workpaper = wp.build_workpaper(_yearly_spec(tmp / "work", proof))
+        source = workpaper["source"]
+        assert isinstance(source, dict)
+        # This length placed the title at the bottom of page one before the
+        # keep-with-next reserve was added.
+        source["note"] = "layout-regression-note " * 106
+
+        pages = wp.WorkpaperPdfRenderer(workpaper).render()
+
+        def page_with(text: str) -> int:
+            return next(index for index, page in enumerate(pages) if any(text in command for command in page))
+
+        assert page_with("SOURCE PROOF") == page_with("Saved source 1")
+
+        # The shared primitive handles bullet sections too, rather than fixing
+        # only key/value rows.
+        renderer = wp.WorkpaperPdfRenderer(workpaper)
+        renderer.y = wp.PDF_BOTTOM_MARGIN + 45
+        renderer.draw_section_title("Proof Limitations", min_following_height=renderer._bullet_block_height("first limitation") + 5)
+        renderer.draw_bullets(["first limitation"])
+        assert len(renderer.pages) == 2
+        assert any("PROOF LIMITATIONS" in command for command in renderer.pages[1])
+        assert any("first limitation" in command for command in renderer.pages[1])
+
+
 def test_year_end_divergence_knobs() -> None:
     """extra_json deep-merge, extra_rows, rate_phrase, proof_required."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -587,6 +618,7 @@ def main() -> int:
     tests = [
         test_yearly_golden_md_and_json,
         test_yearly_pdf_structural_terms,
+        test_pdf_section_titles_keep_their_first_content_block,
         test_year_end_divergence_knobs,
         test_proof_policy,
         test_overwrite_warning,
