@@ -22,7 +22,7 @@ The pattern is boring on purpose: one clear `SKILL.md`, thin platform adapters, 
 | Skill | Use it when | Output |
 | --- | --- | --- |
 | [`privacy-gate/`](privacy-gate/) | You are about to commit, package, sync, or share repo content and want to catch secrets, private data, generated artifacts, and unsafe binary exports. | Staged-file or path scan with block/warn findings, optional text sanitization, and an installable Git hook. |
-| [`skill-forge/`](skill-forge/) | You need to audit, pressure test, validate, or grade an agent skill before installing or publishing it. | Structural inspection, qualitative review workflow, release-gate rubric, and regression-tested inspector. |
+| [`skill-forge`](https://github.com/zztimur/skill-forge) | You need to audit, pressure test, validate, or grade an agent skill before installing or publishing it. | Structural inspection, qualitative review workflow, release-gate rubric, and regression-tested inspector. |
 
 ### Build Tax-Support Proof Packets
 
