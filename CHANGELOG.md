@@ -9,6 +9,13 @@ changelogs, or GitHub Releases.
 The current repository version lives in [`VERSION`](VERSION), is tagged
 `vX.Y.Z`, and has one matching GitHub Release.
 
+## [1.5.1] - 2026-07-18
+
+### Changed
+
+- `repository`: fix(readme): replace unresolved skills badge
+- `repository`: docs: add agent compatibility guidance
+
 ## [1.5.0] - 2026-07-18
 
 ### Changed
