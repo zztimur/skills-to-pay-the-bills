@@ -81,6 +81,27 @@ The native `fbar-proof-kit` bundle contains exactly the same three canonical
 skills named above. The top-level skill folders remain the source of truth; a
 deterministic sync check prevents the bundled copies from drifting.
 
+## Compatibility
+
+FBAR Proof Kit runs through an Agent Skills-compatible host, not through a
+model alone. The host must be able to load `SKILL.md` instructions, read local
+files, run Python 3.11–3.13 and shell commands, preserve artifact paths, and
+pause at human review gates.
+
+| Agent host | Model guidance | Current status |
+| --- | --- | --- |
+| [Codex](https://developers.openai.com/codex/models/) | Use the current recommended Codex default; prefer the strongest available reasoning model for ambiguous statement review. | Native plugin package available; model-level validation pending. |
+| [Claude Code](https://code.claude.com/docs/en/model-config) | Use `sonnet` for the synthetic demo and routine runs; prefer `opus` for ambiguous statement review. | Native plugin package available; model-level validation pending. |
+| [Qwen Code](https://qwenlm.github.io/qwen-code-docs/en/users/features/skills/) | Use its current tool-capable default. | Agent Skills-compatible format; validation pending. |
+| [Kimi Code CLI](https://moonshotai.github.io/kimi-cli/en/customization/skills.html) | Use its current managed default. | Agent Skills-compatible format; validation pending. |
+| Other hosts and models | Use only a tool-capable model in a host with Agent Skills, local-file, Python, and shell support. | Unverified. |
+
+No individual model or provider is certified by this project. A host/model
+combination is considered verified only after it passes both the complete
+synthetic workflow and the missing-quarter refusal workflow in a clean session.
+Local script execution also does not determine a model provider's data-handling
+policy; use only synthetic data while evaluating an unverified host.
+
 ## Run the demo
 
 From a clone of this repository:
@@ -175,7 +196,7 @@ and obtain qualified advice for your facts.
 Near-term work stays focused on:
 
 - making installation and the fictional demo easier to complete unaided;
-- documenting compatibility across supported agent hosts and Python 3.11–3.13;
+- validating compatibility across additional agent hosts and model defaults;
 - adding wholly synthetic statement layouts when they expose a reproducible gap;
 - incorporating practitioner review without collecting private financial records.
 
