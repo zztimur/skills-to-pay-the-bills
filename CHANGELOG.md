@@ -9,6 +9,15 @@ changelogs, or GitHub Releases.
 The current repository version lives in [`VERSION`](VERSION), is tagged
 `vX.Y.Z`, and has one matching GitHub Release.
 
+## [1.5.0] - 2026-07-18
+
+### Changed
+
+- `repository`: chore: update skill-forge submodule to v1.0.1
+- `repository`: docs: fix skill-forge README link
+- `repository`: chore: update skill-forge submodule
+- `repository`: feat: publish FBAR Proof Kit packaging and demo foundation
+
 ## [1.4.2] - 2026-07-16
 
 ### Changed
