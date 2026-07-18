@@ -1,0 +1,855 @@
+{
+  "schema_version": "1.2",
+  "skill": "statement-intake-preflight",
+  "artifact_type": "reviewed-handoff",
+  "status": "reviewed-for-domain-extraction",
+  "tax_year": 2025,
+  "scope": "one-account",
+  "requirements": {
+    "institution_required": true
+  },
+  "statement_files": [
+    {
+      "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+      "resolved_file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+      "is_pdf": true,
+      "page_count": 1,
+      "character_count": 606,
+      "content_sha256": "4ceca6e7d9536be52d00c09de9f40097e2f672343f1b45c0e2ff1b39f646db2b",
+      "content_bytes": 2311,
+      "detected_years": [
+        2025
+      ],
+      "detected_periods": [
+        "DESDE 2025/01/01 HASTA 2025/03/31"
+      ],
+      "period_headers": [
+        {
+          "kind": "period-header",
+          "displayed_start": {
+            "month": 1,
+            "day": 1,
+            "year": 2025
+          },
+          "displayed_end": {
+            "month": 3,
+            "day": 31,
+            "year": 2025
+          },
+          "source_ref": {
+            "page": 1,
+            "line": 6
+          }
+        }
+      ],
+      "year_anchors": [
+        {
+          "kind": "year-anchor",
+          "date": "2025-01-01",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 8
+          }
+        },
+        {
+          "kind": "year-anchor",
+          "date": "2025-01-04",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 9
+          }
+        },
+        {
+          "kind": "year-anchor",
+          "date": "2025-01-31",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 10
+          }
+        },
+        {
+          "kind": "year-anchor",
+          "date": "2025-02-28",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 11
+          }
+        },
+        {
+          "kind": "year-anchor",
+          "date": "2025-03-31",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 12
+          }
+        }
+      ],
+      "period_intervals": [
+        {
+          "start": "2025-01-01",
+          "end": "2025-03-31",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 6
+          },
+          "end_source_ref": {
+            "page": 1,
+            "line": 6
+          }
+        }
+      ],
+      "document_metadata_dates": [],
+      "statement_titles": [
+        "SYNTHETIC DEMO ONLY - NOT A REAL STATEMENT",
+        "Movimientos de cuenta en COP",
+        "CUENTA DE AHORROS"
+      ],
+      "currency": {
+        "code": "COP",
+        "candidates": [
+          "COP"
+        ],
+        "weak_candidates": [],
+        "symbol_markers": [
+          "$"
+        ],
+        "alias_evidence": [],
+        "ambiguous_dollar": false
+      },
+      "account_hints": [
+        "00000042"
+      ],
+      "institution_hints": [],
+      "warnings": [],
+      "unresolved_periods": [],
+      "statement_period_years": [
+        2025
+      ],
+      "contextual_date_evidence": [
+        {
+          "year": 2025,
+          "classification": "opening-or-prior-balance",
+          "source_ref": {
+            "page": 1,
+            "line": 8
+          },
+          "date": "2025-01-01"
+        }
+      ],
+      "contextual_years": [
+        2025
+      ],
+      "unresolved_years": [],
+      "coverage_years": [
+        2025
+      ]
+    },
+    {
+      "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+      "resolved_file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+      "is_pdf": true,
+      "page_count": 1,
+      "character_count": 610,
+      "content_sha256": "387862f8fa4ceaf7b3ebd9944c8e5cbdabe8132d6e1c4efb7d2592e5129ce629",
+      "content_bytes": 2314,
+      "detected_years": [
+        2025
+      ],
+      "detected_periods": [
+        "DESDE 2025/07/01 HASTA 2025/09/30"
+      ],
+      "period_headers": [
+        {
+          "kind": "period-header",
+          "displayed_start": {
+            "month": 7,
+            "day": 1,
+            "year": 2025
+          },
+          "displayed_end": {
+            "month": 9,
+            "day": 30,
+            "year": 2025
+          },
+          "source_ref": {
+            "page": 1,
+            "line": 6
+          }
+        }
+      ],
+      "year_anchors": [
+        {
+          "kind": "year-anchor",
+          "date": "2025-07-01",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 8
+          }
+        },
+        {
+          "kind": "year-anchor",
+          "date": "2025-07-31",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 9
+          }
+        },
+        {
+          "kind": "year-anchor",
+          "date": "2025-08-31",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 10
+          }
+        },
+        {
+          "kind": "year-anchor",
+          "date": "2025-09-15",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 11
+          }
+        },
+        {
+          "kind": "year-anchor",
+          "date": "2025-09-30",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 12
+          }
+        }
+      ],
+      "period_intervals": [
+        {
+          "start": "2025-07-01",
+          "end": "2025-09-30",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 6
+          },
+          "end_source_ref": {
+            "page": 1,
+            "line": 6
+          }
+        }
+      ],
+      "document_metadata_dates": [],
+      "statement_titles": [
+        "SYNTHETIC DEMO ONLY - NOT A REAL STATEMENT",
+        "Movimientos de cuenta en COP",
+        "CUENTA DE AHORROS"
+      ],
+      "currency": {
+        "code": "COP",
+        "candidates": [
+          "COP"
+        ],
+        "weak_candidates": [],
+        "symbol_markers": [
+          "$"
+        ],
+        "alias_evidence": [],
+        "ambiguous_dollar": false
+      },
+      "account_hints": [
+        "00000042"
+      ],
+      "institution_hints": [],
+      "warnings": [],
+      "unresolved_periods": [],
+      "statement_period_years": [
+        2025
+      ],
+      "contextual_date_evidence": [
+        {
+          "year": 2025,
+          "classification": "opening-or-prior-balance",
+          "source_ref": {
+            "page": 1,
+            "line": 8
+          },
+          "date": "2025-07-01"
+        }
+      ],
+      "contextual_years": [
+        2025
+      ],
+      "unresolved_years": [],
+      "coverage_years": [
+        2025
+      ]
+    },
+    {
+      "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+      "resolved_file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+      "is_pdf": true,
+      "page_count": 1,
+      "character_count": 613,
+      "content_sha256": "730261d443d4372a75a01c862983fc23106d6866f033fa1d8ccbb0cf86d4a52b",
+      "content_bytes": 2308,
+      "detected_years": [
+        2025
+      ],
+      "detected_periods": [
+        "DESDE 2025/10/01 HASTA 2025/12/31"
+      ],
+      "period_headers": [
+        {
+          "kind": "period-header",
+          "displayed_start": {
+            "month": 10,
+            "day": 1,
+            "year": 2025
+          },
+          "displayed_end": {
+            "month": 12,
+            "day": 31,
+            "year": 2025
+          },
+          "source_ref": {
+            "page": 1,
+            "line": 6
+          }
+        }
+      ],
+      "year_anchors": [
+        {
+          "kind": "year-anchor",
+          "date": "2025-10-01",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 8
+          }
+        },
+        {
+          "kind": "year-anchor",
+          "date": "2025-10-10",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 9
+          }
+        },
+        {
+          "kind": "year-anchor",
+          "date": "2025-10-31",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 10
+          }
+        },
+        {
+          "kind": "year-anchor",
+          "date": "2025-11-30",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 11
+          }
+        },
+        {
+          "kind": "year-anchor",
+          "date": "2025-12-31",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 12
+          }
+        }
+      ],
+      "period_intervals": [
+        {
+          "start": "2025-10-01",
+          "end": "2025-12-31",
+          "confidence": "high",
+          "source_ref": {
+            "page": 1,
+            "line": 6
+          },
+          "end_source_ref": {
+            "page": 1,
+            "line": 6
+          }
+        }
+      ],
+      "document_metadata_dates": [],
+      "statement_titles": [
+        "SYNTHETIC DEMO ONLY - NOT A REAL STATEMENT",
+        "Movimientos de cuenta en COP",
+        "CUENTA DE AHORROS"
+      ],
+      "currency": {
+        "code": "COP",
+        "candidates": [
+          "COP"
+        ],
+        "weak_candidates": [],
+        "symbol_markers": [
+          "$"
+        ],
+        "alias_evidence": [],
+        "ambiguous_dollar": false
+      },
+      "account_hints": [
+        "00000042"
+      ],
+      "institution_hints": [],
+      "warnings": [],
+      "unresolved_periods": [],
+      "statement_period_years": [
+        2025
+      ],
+      "contextual_date_evidence": [
+        {
+          "year": 2025,
+          "classification": "opening-or-prior-balance",
+          "source_ref": {
+            "page": 1,
+            "line": 8
+          },
+          "date": "2025-10-01"
+        }
+      ],
+      "contextual_years": [
+        2025
+      ],
+      "unresolved_years": [],
+      "coverage_years": [
+        2025
+      ]
+    }
+  ],
+  "currency": {
+    "code": "COP",
+    "candidates": [
+      "COP"
+    ],
+    "weak_candidates": [],
+    "symbol_markers": [
+      "$"
+    ],
+    "alias_evidence": [],
+    "ambiguous_dollar": false
+  },
+  "profile": {
+    "primary_institution": "",
+    "statement_titles": [
+      "SYNTHETIC DEMO ONLY - NOT A REAL STATEMENT",
+      "Movimientos de cuenta en COP",
+      "CUENTA DE AHORROS"
+    ],
+    "statement_file_count": 3,
+    "total_page_count": 3,
+    "total_character_count": 1829
+  },
+  "coverage_hints": {
+    "requested_tax_year": 2025,
+    "detected_years": [
+      2025
+    ],
+    "statement_period_years": [
+      2025
+    ],
+    "contextual_years": [
+      2025
+    ],
+    "unresolved_years": [],
+    "outside_requested_years": [],
+    "detected_periods": [
+      "DESDE 2025/01/01 HASTA 2025/03/31",
+      "DESDE 2025/07/01 HASTA 2025/09/30",
+      "DESDE 2025/10/01 HASTA 2025/12/31"
+    ],
+    "period_headers": [
+      {
+        "kind": "period-header",
+        "displayed_start": {
+          "month": 1,
+          "day": 1,
+          "year": 2025
+        },
+        "displayed_end": {
+          "month": 3,
+          "day": 31,
+          "year": 2025
+        },
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 6
+        }
+      },
+      {
+        "kind": "period-header",
+        "displayed_start": {
+          "month": 7,
+          "day": 1,
+          "year": 2025
+        },
+        "displayed_end": {
+          "month": 9,
+          "day": 30,
+          "year": 2025
+        },
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 6
+        }
+      },
+      {
+        "kind": "period-header",
+        "displayed_start": {
+          "month": 10,
+          "day": 1,
+          "year": 2025
+        },
+        "displayed_end": {
+          "month": 12,
+          "day": 31,
+          "year": 2025
+        },
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 6
+        }
+      }
+    ],
+    "year_anchors": [
+      {
+        "kind": "year-anchor",
+        "date": "2025-01-01",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 8
+        }
+      },
+      {
+        "kind": "year-anchor",
+        "date": "2025-01-04",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 9
+        }
+      },
+      {
+        "kind": "year-anchor",
+        "date": "2025-01-31",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 10
+        }
+      },
+      {
+        "kind": "year-anchor",
+        "date": "2025-02-28",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 11
+        }
+      },
+      {
+        "kind": "year-anchor",
+        "date": "2025-03-31",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 12
+        }
+      },
+      {
+        "kind": "year-anchor",
+        "date": "2025-07-01",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 8
+        }
+      },
+      {
+        "kind": "year-anchor",
+        "date": "2025-07-31",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 9
+        }
+      },
+      {
+        "kind": "year-anchor",
+        "date": "2025-08-31",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 10
+        }
+      },
+      {
+        "kind": "year-anchor",
+        "date": "2025-09-15",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 11
+        }
+      },
+      {
+        "kind": "year-anchor",
+        "date": "2025-09-30",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 12
+        }
+      },
+      {
+        "kind": "year-anchor",
+        "date": "2025-10-01",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 8
+        }
+      },
+      {
+        "kind": "year-anchor",
+        "date": "2025-10-10",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 9
+        }
+      },
+      {
+        "kind": "year-anchor",
+        "date": "2025-10-31",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 10
+        }
+      },
+      {
+        "kind": "year-anchor",
+        "date": "2025-11-30",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 11
+        }
+      },
+      {
+        "kind": "year-anchor",
+        "date": "2025-12-31",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 12
+        }
+      }
+    ],
+    "period_intervals": [
+      {
+        "start": "2025-01-01",
+        "end": "2025-03-31",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 6
+        },
+        "end_source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 6
+        }
+      },
+      {
+        "start": "2025-07-01",
+        "end": "2025-09-30",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 6
+        },
+        "end_source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 6
+        }
+      },
+      {
+        "start": "2025-10-01",
+        "end": "2025-12-31",
+        "confidence": "high",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 6
+        },
+        "end_source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 6
+        }
+      }
+    ],
+    "unresolved_periods": [],
+    "document_metadata_dates": [],
+    "contextual_date_evidence": [
+      {
+        "year": 2025,
+        "classification": "opening-or-prior-balance",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 8
+        },
+        "date": "2025-01-01"
+      },
+      {
+        "year": 2025,
+        "classification": "opening-or-prior-balance",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 8
+        },
+        "date": "2025-07-01"
+      },
+      {
+        "year": 2025,
+        "classification": "opening-or-prior-balance",
+        "source_ref": {
+          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 8
+        },
+        "date": "2025-10-01"
+      }
+    ],
+    "period_coverage_review": {
+      "intervals_detected": 3,
+      "calendar_gaps": [
+        {
+          "start": "2025-04-01",
+          "end": "2025-06-30"
+        }
+      ],
+      "review_note": "Detected period labels are intake hints, not proof of transaction or balance coverage."
+    },
+    "low_text_files": []
+  },
+  "account_hints": [
+    "00000042"
+  ],
+  "account_linkage": {
+    "status": "linked-by-source-hint",
+    "canonical_account_hint_count": 1,
+    "matched_file_count": 3,
+    "unlinked_files": []
+  },
+  "institution_hints": [],
+  "warnings": [
+    "Detected statement-period labels leave possible calendar coverage gap(s): 2025-04-01 through 2025-06-30. Obtain the missing statements or review the source periods.",
+    "No institution hint was found in early statement text; a graphical logo or filename is not automatic institution evidence, so verify the institution manually."
+  ],
+  "review_gates": [
+    {
+      "code": "possible-missing-statement-period",
+      "severity": "review",
+      "message": "Detected statement-period labels leave possible calendar coverage gap(s): 2025-04-01 through 2025-06-30. Obtain the missing statements or review the source periods."
+    },
+    {
+      "code": "unknown-institution",
+      "severity": "review",
+      "message": "No institution hint was found in early statement text; a graphical logo or filename is not automatic institution evidence, so verify the institution manually."
+    }
+  ],
+  "source_preflight": {
+    "path": "${REPO_ROOT}/examples/fbar-proof-demo/artifacts/refusal-path/statement-preflight.json",
+    "resolved_path": "${REPO_ROOT}/examples/fbar-proof-demo/artifacts/refusal-path/statement-preflight.json",
+    "sha256": "cd139dc59765245b9d38bf7b67070fa2f4f655aa9af39da16759f17696350b77",
+    "schema_version": "1.2",
+    "status": "review-required",
+    "tax_year": 2025,
+    "scope": "one-account",
+    "requirements": {
+      "institution_required": true
+    }
+  },
+  "review": {
+    "user_review_confirmed": true,
+    "accepted_gate_codes": [
+      "possible-missing-statement-period",
+      "unknown-institution"
+    ],
+    "confirmed_at": "2026-07-18T10:22:06Z"
+  },
+  "user_resolutions": {
+    "source_preflight_sha256": "cd139dc59765245b9d38bf7b67070fa2f4f655aa9af39da16759f17696350b77",
+    "statement_years": {
+      "status": "not-required"
+    },
+    "period_years": {
+      "status": "not-required"
+    },
+    "generated_on_dates": {
+      "status": "not-required"
+    },
+    "account_opened_on": {
+      "status": "not-required"
+    },
+    "currency": {
+      "status": "not-required"
+    },
+    "one_account": {
+      "status": "not-required"
+    },
+    "institution": {
+      "status": "user-confirmed",
+      "name": "Fictional Orbit Bank - Synthetic Demo Only",
+      "resolved_gate_codes": [
+        "unknown-institution"
+      ]
+    }
+  },
+  "artifacts": {
+    "source_preflight_json": "${REPO_ROOT}/examples/fbar-proof-demo/artifacts/refusal-path/statement-preflight.json"
+  }
+}

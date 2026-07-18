@@ -1,0 +1,19 @@
+{
+  "assertions": {
+    "account_id": "synthetic-demo-account-0042",
+    "complete_year": true,
+    "currency": "COP",
+    "institution": "Fictional Orbit Bank - Synthetic Demo Only",
+    "maximum_native_balance": "10500000",
+    "maximum_native_date": "2025-10-10",
+    "missing_days": 0,
+    "same_day_candidate_count": 0
+  },
+  "demo_only": true,
+  "production_note": "A real workflow must stop here for the user to review and confirm the ledger.",
+  "review_basis": "Deterministic assertions against the committed synthetic fixture",
+  "reviewed_artifacts": [
+    "examples/fbar-proof-demo/artifacts/happy-path/account-ledger.json",
+    "examples/fbar-proof-demo/artifacts/happy-path/account-ledger.csv"
+  ]
+}

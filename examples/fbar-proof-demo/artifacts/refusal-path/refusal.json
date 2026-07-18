@@ -1,0 +1,33 @@
+{
+  "assertions": {
+    "confirmation_refused_without_accept_carry_forward": true,
+    "daily_threshold": "insufficient-records",
+    "decision_field_absent": true,
+    "maximum_account_value": "not-determinable"
+  },
+  "confirmation_exit_code": 2,
+  "confirmation_written": false,
+  "data_sufficiency": {
+    "daily_threshold": {
+      "answer": "insufficient-records",
+      "reason_codes": [
+        "long-carry-forward-gap"
+      ]
+    },
+    "evidence_profile": "transaction-rows",
+    "maximum_account_value": {
+      "answer": "not-determinable",
+      "reason_codes": [
+        "long-carry-forward-gap"
+      ]
+    }
+  },
+  "demo_only": true,
+  "omitted_statement": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+  "preflight_exit_code": 3,
+  "preflight_gates": [
+    "possible-missing-statement-period",
+    "unknown-institution"
+  ],
+  "refusal_message": "error: Account ledger has carry-forward gap(s) longer than 40 days (statement evidence is missing for part of the year; see coverage.carry_gaps). Obtain the missing statements, or re-run with --accept-carry-forward only after the user has explicitly reviewed and accepted the carried balances."
+}

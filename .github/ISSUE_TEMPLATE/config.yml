@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security or privacy vulnerability
+    url: https://github.com/zztimur/skills-to-pay-the-bills/security/advisories/new
+    about: Use private vulnerability reporting with synthetic data. Never attach raw statements or real financial information.
+  - name: Read the privacy boundary
+    url: https://github.com/zztimur/skills-to-pay-the-bills/blob/main/PRIVACY.md
+    about: Learn what stays local and how to create a safe synthetic reproduction.
+  - name: Usage documentation
+    url: https://zztimur.github.io/skills-to-pay-the-bills/
+    about: Find the right skill and its package-specific instructions.

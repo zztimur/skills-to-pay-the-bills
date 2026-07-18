@@ -1,0 +1,20 @@
+{
+  "name": "skills-to-pay-the-bills",
+  "interface": {
+    "displayName": "Skills To Pay The Bills"
+  },
+  "plugins": [
+    {
+      "name": "fbar-proof-kit",
+      "source": {
+        "source": "local",
+        "path": "./plugins/fbar-proof-kit"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Finance"
+    }
+  ]
+}

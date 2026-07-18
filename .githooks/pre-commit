@@ -13,4 +13,11 @@ if [ -f workpaper-kit/sync.sh ]; then
   git add get-yearly-fx-rate/scripts/_workpaper.py get-year-end-fx-rate/scripts/_workpaper.py statements-to-interest/scripts/_workpaper.py
 fi
 
+# Keep the native FBAR plugin's three generated skill copies synchronized with
+# their canonical top-level packages before privacy scanning and committing.
+if [ -f scripts/sync-plugin-bundles.py ]; then
+  python3 scripts/sync-plugin-bundles.py
+  git add plugins/fbar-proof-kit/skills plugins/fbar-proof-kit/assets plugins/fbar-proof-kit/BUNDLE-MANIFEST.json
+fi
+
 python3 privacy-gate/scripts/privacy_gate.py scan --staged --strict

@@ -1,0 +1,29 @@
+{
+  "name": "skills-to-pay-the-bills",
+  "owner": {
+    "name": "zztimur"
+  },
+  "description": "Local-first Agent Skills for source-linked FBAR support packets and proof-heavy work.",
+  "version": "1.5.0",
+  "plugins": [
+    {
+      "name": "fbar-proof-kit",
+      "source": "./plugins/fbar-proof-kit",
+      "description": "Preflight statements, retain year-end FX proof, and build reviewed FBAR threshold support artifacts locally.",
+      "version": "1.5.0",
+      "author": {
+        "name": "zztimur"
+      },
+      "homepage": "https://zztimur.github.io/skills-to-pay-the-bills/",
+      "repository": "https://github.com/zztimur/skills-to-pay-the-bills",
+      "license": "MIT",
+      "category": "Finance",
+      "tags": [
+        "fbar",
+        "tax-workpapers",
+        "local-first"
+      ],
+      "strict": true
+    }
+  ]
+}

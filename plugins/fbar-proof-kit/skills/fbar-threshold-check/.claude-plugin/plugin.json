@@ -1,0 +1,22 @@
+{
+  "name": "fbar-threshold-check",
+  "description": "Client-agnostic FBAR evidence builder with reviewed preflight handoffs and daily/max-value support views.",
+  "version": "1.8.7",
+  "dependencies": [
+    {
+      "type": "skill",
+      "name": "statement-intake-preflight",
+      "required": true,
+      "description": "Runs required shared PDF intake with --scope one-account and fingerprints exact statements before FBAR extraction."
+    },
+    {
+      "type": "skill",
+      "name": "get-year-end-fx-rate",
+      "required": false,
+      "description": "Creates retained year-end FX workpapers required for non-USD FBAR conversion."
+    }
+  ],
+  "author": {
+    "name": "Timur"
+  }
+}

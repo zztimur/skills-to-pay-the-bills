@@ -22,10 +22,16 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.13"
 
-      - name: Install PDF test dependencies
-        run: python -m pip install --disable-pip-version-check --no-input pdfplumber reportlab pypdf
+      - name: Install validation dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --no-input \
+            pdfplumber reportlab pypdf pillow \
+            'git+https://github.com/agentskills/agentskills.git@38a2ff82958afee88dadf4831509e6f7e9d8ef4e#subdirectory=skills-ref'
+
+      - name: Validate Agent Skills specification
+        run: bash scripts/validate-agent-skills.sh
 
       - name: Validate release metadata and deterministic checks
         run: |
@@ -42,10 +48,18 @@ jobs:
             END { if (!found) exit 1 }
           ' CHANGELOG.md > release-notes.md
 
+      - name: Build and verify release archives
+        run: |
+          python3 scripts/package-release-assets.py
+          python3 scripts/package-release-assets.py --verify
+          cd dist/release
+          sha256sum --check SHA256SUMS
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --title "Skills To Pay The Bills $GITHUB_REF_NAME" \
-            --notes-file release-notes.md
+            --notes-file release-notes.md \
+            dist/release/*

@@ -1,0 +1,41 @@
+{
+  "account_id": "synthetic-demo-account-0042",
+  "demo": "Synthetic FBAR proof workflow",
+  "demo_only": true,
+  "frozen_treasury_fixture": {
+    "path": "get-year-end-fx-rate/tests/fixtures/treasury-2025-12-31.json",
+    "sha256": "0a798c8a80e87573fc3138b7d08c2e2948e8cf0c0576fb94a2dc60d5f9a0ea20"
+  },
+  "happy_path": {
+    "daily_threshold": "no",
+    "fincen_maximum_value_view": "no",
+    "fx_workpaper": "examples/fbar-proof-demo/artifacts/happy-path/fx-proof/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.json",
+    "maximum_native_balance": "10500000",
+    "maximum_native_date": "2025-10-10",
+    "summary_csv": "examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.csv",
+    "summary_json": "examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.json",
+    "summary_pdf": "examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.pdf"
+  },
+  "institution": "Fictional Orbit Bank - Synthetic Demo Only",
+  "publication_sanitization": {
+    "absolute_checkout_prefix_replaced_with": "${REPO_ROOT}",
+    "applied_after_full_pipeline_validation": true,
+    "reviewed_handoff_source_hashes_rebound": true
+  },
+  "refusal_path": {
+    "confirmation_exit_code": 2,
+    "confirmation_written": false,
+    "daily_threshold": "insufficient-records",
+    "maximum_account_value": "not-determinable",
+    "omitted_statement": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+    "refusal_json": "examples/fbar-proof-demo/artifacts/refusal-path/refusal.json"
+  },
+  "schema_version": "1.0",
+  "statement_files": [
+    "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+    "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+    "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+    "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf"
+  ],
+  "tax_year": 2025
+}

@@ -1,180 +1,215 @@
-# Skills To Pay The Bills
+# FBAR Proof Kit by Skills To Pay The Bills
 
-[![Skill CI](https://img.shields.io/badge/Skill%20CI-configured-16a34a)](https://github.com/zztimur/skills-to-pay-the-bills/actions/workflows/skill-ci.yml)
+[![Skill CI](https://github.com/zztimur/skills-to-pay-the-bills/actions/workflows/skill-ci.yml/badge.svg)](https://github.com/zztimur/skills-to-pay-the-bills/actions/workflows/skill-ci.yml)
+[![skills.sh installs](https://skills.sh/b/zztimur/skills-to-pay-the-bills)](https://skills.sh/zztimur/skills-to-pay-the-bills)
+[![GitHub release](https://img.shields.io/github/v/release/zztimur/skills-to-pay-the-bills)](https://github.com/zztimur/skills-to-pay-the-bills/releases/latest)
+[![Python 3.11–3.13](https://img.shields.io/badge/python-3.11%E2%80%933.13-3776AB)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB)](https://www.python.org/)
-[![Codex/OpenAI Agent Skills](https://img.shields.io/badge/Codex-Agent%20Skills-111827)](https://github.com/zztimur/skills-to-pay-the-bills)
-[![Claude Code](https://img.shields.io/badge/Claude%20Code-compatible-5A3E2B)](https://github.com/zztimur/skills-to-pay-the-bills)
 
-Small, practical agent skills for proof-heavy work where guessing is expensive.
+> Turn machine-readable foreign-bank statements into a local, source-linked,
+> review-ready FBAR threshold support packet.
 
-This is a collection of local-first skills for two kinds of work:
+**[Run the demo](#run-the-demo)** · **[Install the kit](#install-the-kit)** ·
+**[See the sample packet](docs/assets/demo/fbar-proof-summary.pdf)**
 
-- shipping safer agent skills without accidentally bundling private files, broken packages, or vague instructions;
-- producing tax-support workpapers where the rate, source, artifact, and caveat need to survive past the chat window.
+![A 36-second terminal recording of the synthetic happy path and missing-quarter refusal path](docs/assets/demo/fbar-proof-demo-terminal.gif)
 
-The pattern is boring on purpose: one clear `SKILL.md`, thin platform adapters, deterministic scripts where determinism matters, and enough proof left behind that Future Me can tell what happened.
+The kit chains three focused Agent Skills: statement intake preflight, retained
+year-end Treasury FX proof, and an FBAR threshold check. Statement parsing and
+packet generation stay on your machine. The included demo uses only invented
+statements and a frozen public Treasury response, so you can inspect the whole
+workflow without sharing data or making a network request.
 
-## What Is Here
+This is support software, not tax or legal advice. It does not prepare or file
+FinCEN Form 114 and does not decide every filing obligation. See
+[DISCLAIMER.md](DISCLAIMER.md).
 
-### Ship Safer Skills
+## See the proof, including the refusal
 
-| Skill | Use it when | Output |
-| --- | --- | --- |
-| [`privacy-gate/`](privacy-gate/) | You are about to commit, package, sync, or share repo content and want to catch secrets, private data, generated artifacts, and unsafe binary exports. | Staged-file or path scan with block/warn findings, optional text sanitization, and an installable Git hook. |
-| [`skill-forge`](https://github.com/zztimur/skill-forge) | You need to audit, pressure test, validate, or grade an agent skill before installing or publishing it. | Structural inspection, qualitative review workflow, release-gate rubric, and regression-tested inspector. |
-
-### Build Tax-Support Proof Packets
-
-| Skill | Use it when | Output |
-| --- | --- | --- |
-| [`get-yearly-fx-rate/`](get-yearly-fx-rate/) | You need a published yearly average FX rate for one currency and one year. | Cited rate, reciprocal, saved source proof, `workpaper.json`, Markdown, and PDF. |
-| [`get-year-end-fx-rate/`](get-year-end-fx-rate/) | You need a year-end or `YYYY-12-31` FX rate for FBAR-style conversion proof. | Treasury/Fiscal Data first for completed year-ends, then a verified manual fallback: retained source JSON/provenance or an explicit no-proof caveat, plus `workpaper.json`, Markdown, and PDF. |
-| [`statement-intake-preflight/`](statement-intake-preflight/) | You need to preflight machine-readable statement PDFs before FBAR or interest extraction. | Shared intake JSON/CSV with text-layer, scope, source-bound period evidence, currency, account, institution, and review-gate checks. |
-| [`fbar-threshold-check/`](fbar-threshold-check/) | You need to check whether foreign accounts crossed the FBAR threshold for a calendar year. | Account ledgers, daily aggregate threshold view, FinCEN maximum-value view, CSV, JSON, and PDF summary. |
-| [`statements-to-interest/`](statements-to-interest/) | You need to extract interest income from one institution's text PDF statements for one tax year. | IRS-oriented interest support packet with JSON/CSV review artifacts and FX confirmation gates. |
-
-### Shared Internals
-
-The two FX skills share their workpaper/proof-packet engine — folder naming, the `workpaper.md` / `workpaper.json` / `workpaper.pdf` renderers, and the copied-and-hashed source-proof schema — through [`workpaper-kit/`](workpaper-kit/). `statements-to-interest` also uses the kit's optional shared ReportLab packet layout. It is internal plumbing, not a skill: no `SKILL.md`, no agent command or trigger, nothing an agent invokes. Its shell commands are maintainer tools for syncing and testing the kit. Its `.claude-plugin/plugin.json` is package metadata, not a separate release line. You edit one canonical file, `workpaper-kit/workpaper.py`; each participating skill carries a vendored, auto-synced copy (`scripts/_workpaper.py`) so it still installs standalone. Details in [`workpaper-kit/README.md`](workpaper-kit/README.md).
-
-The FX skills deliberately do different jobs. `get-yearly-fx-rate` documents a published yearly average for income-tax support. `get-year-end-fx-rate` documents a `YYYY-12-31` rate for FBAR-style conversion. They share proof mechanics; they do not swap sources or quietly relabel one rate as the other.
-
-## Which Skill Do I Need?
-
-| If you are asking... | Start with |
+| Review artifact | What it establishes |
 | --- | --- |
-| "Am I about to commit something private?" | `privacy-gate` |
-| "Is this skill package actually ready to ship?" | `skill-forge` |
-| "What yearly average FX rate did we use, and can we prove it?" | `get-yearly-fx-rate` |
-| "What year-end FBAR conversion rate did we use?" | `get-year-end-fx-rate` |
-| "Are these statement PDFs ready for FBAR or interest extraction?" | `statement-intake-preflight` |
-| "Did my foreign accounts exceed the FBAR threshold?" | `fbar-threshold-check` |
-| "How much interest income is in these statement PDFs?" | `statements-to-interest` |
+| <img src="docs/assets/demo/fbar-proof-summary-page-1.png" alt="Synthetic FBAR threshold summary showing no threshold crossing" width="430"> | A one-page JSON/CSV/PDF-backed threshold summary from a reviewed 365-day ledger. |
+| <img src="docs/assets/demo/fbar-fx-proof-page-1.png" alt="Retained Treasury year-end COP to USD rate workpaper" width="430"> | The exact year-end rate, source URL, date, reciprocal, retained response, and provenance. |
 
-## Statement Workflow
+The happy path processes four fictional quarterly COP statements and retains a
+reviewed packet. The refusal path omits Q2 and proves the workflow returns
+`insufficient-records` / `not-determinable` and refuses ledger confirmation. It
+does not manufacture a confident annual answer from incomplete evidence.
 
-For statement-based work, begin with `statement-intake-preflight`. It records
-the statement scope, source-bound period evidence, and any reviewer decisions
-in a handoff the downstream skills can verify. A ready preflight can go straight
-to the next skill. A review-required preflight needs a separate reviewed
-handoff with every non-structural gate accepted and every required typed
-resolution recorded. Then choose the outcome you need: pass that ready JSON or
-reviewed handoff to `fbar-threshold-check` for FBAR threshold analysis, or to
-`statements-to-interest` for interest-income support. Both downstream skills
-validate the handoff and the bound statement files before extracting results.
+## Install the kit
 
-## What This Is Not
+### Universal Agent Skills CLI
 
-This repo does not prepare tax forms, file FinCEN Form 114, give legal advice, or turn a source into an official IRS, FinCEN, or Treasury blessing. The goal is support documentation: clear workflow, retained proof, reviewer-friendly artifacts, and honest caveats.
+```bash
+npx skills add zztimur/skills-to-pay-the-bills \
+  --skill statement-intake-preflight \
+  --skill get-year-end-fx-rate \
+  --skill fbar-threshold-check
+```
 
-## Clone Setup
+The [`skills` CLI](https://www.skills.sh/docs/cli) discovers all six public root
+skills in this repository. By default, that third-party CLI sends anonymous
+install telemetry used by the skills.sh leaderboard. This project receives no
+statement data or first-party telemetry. Opt out before installing with:
 
-This collection links `skill-forge` as a git submodule. After cloning, initialize linked skills with:
+```bash
+DISABLE_TELEMETRY=1 npx skills add zztimur/skills-to-pay-the-bills \
+  --skill statement-intake-preflight \
+  --skill get-year-end-fx-rate \
+  --skill fbar-threshold-check
+```
+
+For a telemetry-free, inspect-before-install path, download the versioned skill
+or `fbar-proof-kit` ZIP and `SHA256SUMS` from the
+[latest GitHub Release](https://github.com/zztimur/skills-to-pay-the-bills/releases/latest).
+
+### Native Codex plugin
+
+```bash
+codex plugin marketplace add zztimur/skills-to-pay-the-bills
+codex plugin add fbar-proof-kit@skills-to-pay-the-bills
+```
+
+### Native Claude Code plugin
+
+```text
+/plugin marketplace add zztimur/skills-to-pay-the-bills
+/plugin install fbar-proof-kit@skills-to-pay-the-bills
+```
+
+The native `fbar-proof-kit` bundle contains exactly the same three canonical
+skills named above. The top-level skill folders remain the source of truth; a
+deterministic sync check prevents the bundled copies from drifting.
+
+## Run the demo
+
+From a clone of this repository:
 
 ```bash
 git submodule update --init --recursive
+python3 -m pip install pdfplumber reportlab pillow
+examples/fbar-proof-demo/run_demo.py
 ```
 
-Then enable the repo's tracked Git hooks once per clone (Git will not run a tracked hook otherwise):
+The run produces:
+
+- four conspicuously synthetic, machine-readable quarterly statement PDFs;
+- preflight JSON/CSV and a source-bound reviewed handoff;
+- a 365-row account ledger plus explicit review record;
+- a frozen Treasury/Fiscal Data response and year-end FX workpaper;
+- final threshold JSON, CSV, and PDF;
+- a missing-quarter refusal record, transcript, and SHA-256 manifest.
+
+Read the [demo guide](examples/fbar-proof-demo/README.md), inspect the
+[retained artifacts](examples/fbar-proof-demo/artifacts/), or run the CI-safe
+scratch check:
 
 ```bash
-git config core.hooksPath .githooks
+examples/fbar-proof-demo/run_demo.py --check
 ```
 
-The pre-commit hook runs the `privacy-gate` scan and auto-syncs the vendored `workpaper-kit` copies (`scripts/_workpaper.py` in each participating skill) from the canonical `workpaper-kit/workpaper.py`, staging them so they ride the same commit. Edit only the canonical source; CI runs `workpaper-kit/sync.sh --check` as a backstop. See [`workpaper-kit/README.md`](workpaper-kit/README.md) for the kit interface and sync model.
+## How the proof workflow works
 
-## Using A Skill
+1. `statement-intake-preflight` checks text layers, year and statement-period
+   coverage, currency, account grouping, institution evidence, and review gates.
+2. A human reviews the flagged assumptions and creates a source-bound handoff.
+3. `fbar-threshold-check` extracts and reviews daily account ledgers; incomplete
+   coverage remains insufficient rather than silently carried through.
+4. `get-year-end-fx-rate` retains the applicable public Treasury/Fiscal Data
+   response, rate interpretation, reciprocal, source hash, and PDF workpaper.
+5. The reviewed ledgers and retained FX proof produce JSON, CSV, and PDF support
+   artifacts for both daily aggregate and FinCEN maximum-value views.
 
-Each top-level skill folder is its own agent package. Install or copy the package you need into your agent's skill location, then invoke it by name. `workpaper-kit/` is the internal-library exception; use its README only when changing shared workpaper code. `skill-forge/` is the linked-package exception: it is a git submodule with its own upstream release history, so package it from a release archive or a clean initialized submodule rather than copying the submodule's `.git` control file into an install.
+No parser JSON contract or tax-calculation behavior is changed by the packaging,
+demo, or public documentation in this release.
 
-Codex/OpenAI-style prompts look like:
+## Data boundary
 
-```text
-Use $get-year-end-fx-rate to find the 2025 year-end exchange rate for COP to USD with proof.
-```
+- Statement parsing, review files, ledgers, and summary generation run locally.
+- A live year-end FX lookup contacts only public government sources. The
+  committed demo uses a frozen response and makes no network request.
+- The project has no hosted uploader and collects no first-party telemetry.
+- The optional `skills` installer has its own disclosed anonymous install
+  telemetry; `DISABLE_TELEMETRY=1` or release ZIPs avoid it.
+- Never attach, email, DM, or paste raw bank statements into an issue,
+  Discussion, support request, demo, or contribution. Use only synthetic data.
 
-Claude Code command adapters look like:
+See [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md) for the complete
+reporting boundary.
 
-```text
-/get-year-end-fx-rate:get-year-end-fx-rate COP 2025
-```
+## What is included
 
-The root `SKILL.md`, `references/`, and `scripts/` inside each package are the source of truth. `agents/openai.yaml`, `.claude-plugin/plugin.json`, and `commands/` are discovery or command adapters.
+This repository includes six public, installable root skills:
 
-## Gatekeeper Workflow
+| Skill | Purpose |
+| --- | --- |
+| [`statement-intake-preflight`](statement-intake-preflight/) | Gate machine-readable statement sets before downstream extraction. |
+| [`get-year-end-fx-rate`](get-year-end-fx-rate/) | Retain a source-linked year-end USD FX workpaper for FBAR-style conversion. |
+| [`fbar-threshold-check`](fbar-threshold-check/) | Build reviewed account ledgers and threshold support artifacts. |
+| [`get-yearly-fx-rate`](get-yearly-fx-rate/) | Retain a published yearly-average FX workpaper for income-tax support. |
+| [`statements-to-interest`](statements-to-interest/) | Extract reviewed foreign-bank interest support after preflight. |
+| [`privacy-gate`](privacy-gate/) | Block secrets, private data, and unsafe exports before publishing. |
 
-Run `privacy-gate` before committing or publishing anything from this repo:
+[`skill-forge`](https://github.com/zztimur/skill-forge) is a separate companion
+project linked here as a submodule. It audits and pressure-tests Agent Skills;
+it is not one of the six root skills and is not inside the FBAR Proof Kit bundle.
+
+[`workpaper-kit`](workpaper-kit/) is internal shared rendering code, not an
+invokable skill. Its vendored copies are synchronized and hash-checked so every
+standalone package remains portable.
+
+## Scope guardrails
+
+The project does not provide a hosted statement uploader, OCR service, Form 114
+filing flow, delinquent-filing guidance, or Form 8938 determination. It never
+claims IRS approval, guaranteed compliance, penalty avoidance, or an
+"audit-proof" result. Public examples use fictional institutions and synthetic
+identifiers only.
+
+Official filing scope, thresholds, and deadlines can change. Check current
+[IRS FBAR guidance](https://www.irs.gov/businesses/small-businesses-self-employed/report-of-foreign-bank-and-financial-accounts-fbar)
+and obtain qualified advice for your facts.
+
+## Roadmap and contributing
+
+Near-term work stays focused on:
+
+- making installation and the fictional demo easier to complete unaided;
+- documenting compatibility across supported agent hosts and Python 3.11–3.13;
+- adding wholly synthetic statement layouts when they expose a reproducible gap;
+- incorporating practitioner review without collecting private financial records.
+
+Contributions must use synthetic fixtures. See [CONTRIBUTING.md](CONTRIBUTING.md)
+before opening an issue or pull request, and never submit raw statements.
+Security problems belong in the private process described in
+[SECURITY.md](SECURITY.md).
+
+## Maintainer release gate
+
+CI tests Python 3.11, 3.12, and 3.13. It runs the official Agent Skills
+reference validator, strict Skill Forge package inspection, plugin-bundle drift
+checks, privacy scans, deterministic unit/integration suites, happy/refusal demo
+assertions, and PDF generation tests.
+
+Install the release-gate dependencies in an isolated Python environment:
 
 ```bash
-python3 privacy-gate/scripts/privacy_gate.py scan --staged --strict
+python3 -m pip install pdfplumber reportlab pypdf pillow \
+  'git+https://github.com/agentskills/agentskills.git@38a2ff82958afee88dadf4831509e6f7e9d8ef4e#subdirectory=skills-ref'
 ```
 
-To install it as a Git pre-commit hook, run `privacy_gate.py install-hook`. The default hook embeds the installing script's absolute path for solo convenience; committing that to a shared repo discloses a local path and won't resolve on teammates' machines, so use `install-hook --portable` there and pair it with a vendored `privacy-gate/` or the `PRIVACY_GATE_SCRIPT` override.
-
-Use `skill-forge` before shipping any skill change. Validate the changed package, not the repository root:
-
-```bash
-python3 -S skill-forge/scripts/inspect_skill_package.py <skill-folder> --json --strict
-```
-
-Run the package's own self-test or regression entrypoint when one exists. Most
-behavioral skill scripts expose `self-test`; the two repo-tooling packages use
-dedicated runners:
-
-```bash
-python3 <skill-folder>/scripts/<script-name>.py self-test
-python3 privacy-gate/scripts/test_privacy_gate.py
-python3 -S skill-forge/scripts/run_self_tests.py
-```
-
-If the package has a Claude plugin manifest and Claude Code is available locally, also run:
-
-```bash
-claude plugin validate --strict <skill-folder>
-```
-
-## Releasing The Repository
-
-This collection repository has one public release stream. A change to one skill becomes a collection release only when you explicitly release the repository; normal edits and commits do not bump [`VERSION`](VERSION), create tags, or publish GitHub Releases.
-
-`VERSION` and [`CHANGELOG.md`](CHANGELOG.md) are the canonical record for every published collection release. Each release gets one `vX.Y.Z` tag and one GitHub Release. The release version is independent of the package metadata in individual `.claude-plugin/plugin.json` files. The linked `skill-forge` submodule is the deliberate exception: it has its own upstream tags and releases; this repository records and releases only the pinned submodule commit.
-
-Review the next global release before publishing:
+The repository has one release stream. `VERSION` and [CHANGELOG.md](CHANGELOG.md)
+define each `vX.Y.Z` release. Tags publish deterministic ZIPs for every public
+skill and the native plugin plus `SHA256SUMS`. Before a release:
 
 ```bash
 scripts/release-diff.sh
-scripts/release-repo.sh --dry-run
+scripts/release-repo.sh --dry-run minor
 ```
 
-Publish with a patch bump by default, or choose the SemVer scope explicitly:
-
-```bash
-scripts/release-repo.sh
-scripts/release-repo.sh minor
-scripts/release-repo.sh major
-```
-
-The command requires a clean `main` branch that is not behind `origin/main`. It generates the root changelog entry from commits since the latest global tag, runs the deterministic release checks, commits the release metadata, creates and pushes `vX.Y.Z`, and then GitHub Actions creates the GitHub Release. The first global release uses the most recent `VERSION` commit as its baseline because this repository has no prior global tag.
-
-## CI
-
-GitHub Actions runs these deterministic core checks on pull requests and `main`; the release workflow runs the same checks against the tagged commit before creating its GitHub Release. Both workflows initialize the linked `skill-forge` submodule first:
-
-- strict `skill-forge` inspection for every skill package;
-- a strict `privacy-gate` scan of the repo tree, so a stray secret or private file fails the build the same way the pre-commit hook fails a commit;
-- a `workpaper-kit/sync.sh --check` backstop, so a vendored `_workpaper.py` copy that drifted from the canonical source fails the build;
-- deterministic self-tests, regression runners, and generated-PDF smoke, pressure, and cross-skill integration suites, including the `workpaper-kit` golden test;
-- no live IRS/Treasury lookups and no local-only Claude validator assumptions.
-
-CI installs `pdfplumber`, `reportlab`, and `pypdf` before it runs `scripts/release-check.sh`, so a pull request or release cannot skip the generated-PDF suites. Locally, run the same gate with a Python 3.11+ environment that has those dependencies:
-
-```bash
-bash scripts/release-check.sh
-```
-
-Live source checks still belong in release review when the task needs them. A green badge means the deterministic core, including its generated-PDF workflows, holds together—not that the internet behaved today.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dependency setup and exact validation
+commands.
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE).
+MIT. See [LICENSE](LICENSE).

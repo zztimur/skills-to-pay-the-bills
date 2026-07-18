@@ -1,0 +1,53 @@
+name: Feature request
+description: Propose a focused improvement with its proof and privacy boundaries.
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the workflow problem, not private source material. Never attach or link raw statements, real financial records, account data, personal information, or credentials.
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: This request contains no raw statements, real financial or account data, personal information, credentials, or private links.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What proof-heavy workflow is difficult today, and who encounters it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain inputs, outputs, review gates, and how uncertainty should be represented.
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Privacy and failure boundaries
+      description: What data must stay local? When should the feature stop or require human review?
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Synthetic example
+      description: Show the idea with invented values only. Do not attach documents derived from real records.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

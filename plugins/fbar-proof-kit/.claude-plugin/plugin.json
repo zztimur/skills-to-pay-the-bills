@@ -1,0 +1,18 @@
+{
+  "name": "fbar-proof-kit",
+  "version": "1.5.0",
+  "description": "Build a local, source-linked, review-ready FBAR threshold support packet from machine-readable foreign-bank statements.",
+  "author": {
+    "name": "zztimur"
+  },
+  "homepage": "https://zztimur.github.io/skills-to-pay-the-bills/",
+  "repository": "https://github.com/zztimur/skills-to-pay-the-bills",
+  "license": "MIT",
+  "keywords": [
+    "fbar",
+    "foreign-bank-statements",
+    "agent-skills",
+    "tax-workpapers",
+    "local-first"
+  ]
+}

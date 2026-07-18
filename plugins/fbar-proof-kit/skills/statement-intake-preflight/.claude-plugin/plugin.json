@@ -1,0 +1,8 @@
+{
+  "name": "statement-intake-preflight",
+  "description": "Shared statement-PDF preflight and reviewed FBAR-handoff builder for tax-support workflows.",
+  "version": "1.4.6",
+  "author": {
+    "name": "Timur"
+  }
+}

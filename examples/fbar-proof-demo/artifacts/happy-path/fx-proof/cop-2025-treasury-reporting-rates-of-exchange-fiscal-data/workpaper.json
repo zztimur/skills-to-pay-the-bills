@@ -1,0 +1,52 @@
+{
+  "caveats": [
+    "This is a retained support workpaper, not legal or tax advice.",
+    "Use this for year-end support only; do not reuse it as an income-tax average rate."
+  ],
+  "currency": "COP",
+  "foreign_per_usd": "3773.62",
+  "proof": {
+    "limitations": [],
+    "saved_files": [
+      {
+        "filename": "treasury-fiscal-data-response.json",
+        "packet_relative_path": "treasury-fiscal-data-response.json",
+        "path": "${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/fx-proof/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/treasury-fiscal-data-response.json",
+        "sha256": "0a798c8a80e87573fc3138b7d08c2e2948e8cf0c0576fb94a2dc60d5f9a0ea20"
+      }
+    ],
+    "workpaper_json": "${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/fx-proof/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.json",
+    "workpaper_md": "${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/fx-proof/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.md",
+    "workpaper_pdf": "${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/fx-proof/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.pdf",
+    "workpaper_pdf_sha256": "72b59326119590a056bef27ea5e6c1314942c3047e5c81a865933906c5bb37ca"
+  },
+  "purpose": "FBAR-style year-end USD exchange-rate support",
+  "rate": "3773.62",
+  "rate_direction": "foreign-per-usd",
+  "skill": "get-year-end-fx-rate",
+  "source": {
+    "category": "Treasury/Fiscal Data year-end reporting rate",
+    "note": "Treasury/Fiscal Data record date 2025-12-31; row Colombia-Peso; exchange_rate 3773.62. Snapshot origin: supplied local JSON file; retained API JSON sha256 0a798c8a80e87573fc3138b7d08c2e2948e8cf0c0576fb94a2dc60d5f9a0ea20. API query URL is retained in workpaper.json.",
+    "retrieved": "2026-07-18",
+    "title": "Treasury Reporting Rates of Exchange - Fiscal Data",
+    "url": "https://fiscaldata.treasury.gov/datasets/treasury-reporting-rates-exchange/treasury-reporting-rates-of-exchange",
+    "year_end_confirmed": true
+  },
+  "treasury_record": {
+    "api_query_url": "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/accounting/od/rates_of_exchange_source?fields=record_date%2Ccountry%2Ccurrency%2Ccountry_currency_desc%2Cexchange_rate%2Ceffective_date%2Csrc_line_nbr%2Crecord_calendar_year&filter=record_date%3Aeq%3A2025-12-31%2Ccurrency%3Aeq%3APeso%2Ccountry%3Aeq%3AColombia&sort=country%2Ccurrency%2Csrc_line_nbr&page%5Bsize%5D=500",
+    "country": "Colombia",
+    "country_currency_desc": "Colombia-Peso",
+    "currency": "Peso",
+    "dataset_url": "https://fiscaldata.treasury.gov/datasets/treasury-reporting-rates-exchange/treasury-reporting-rates-of-exchange",
+    "effective_date": "2025-12-31",
+    "exchange_rate": "3773.62",
+    "record_calendar_year": "2025",
+    "record_date": "2025-12-31",
+    "snapshot_origin": "supplied local JSON file",
+    "source_response_reference": "${REPO_ROOT}/get-year-end-fx-rate/tests/fixtures/treasury-2025-12-31.json",
+    "src_line_nbr": "35"
+  },
+  "usd_per_foreign": "0.000264997536",
+  "year": 2025,
+  "year_end_date": "2025-12-31"
+}

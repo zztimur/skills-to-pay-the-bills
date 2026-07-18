@@ -1,0 +1,8 @@
+{
+  "name": "get-year-end-fx-rate",
+  "description": "Agent-agnostic workflow for finding a cited Treasury/Fiscal Data or manual year-end USD FX rate with FBAR-style retained proof.",
+  "version": "1.4.3",
+  "author": {
+    "name": "Timur"
+  }
+}

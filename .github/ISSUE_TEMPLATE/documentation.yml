@@ -1,0 +1,38 @@
+name: Documentation improvement
+description: Report unclear, missing, or inconsistent public documentation.
+title: "docs: "
+labels:
+  - documentation
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not include raw statements, real financial or account data, personal information, credentials, or private links. Use an invented example if one is needed.
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: This report contains no raw statements or other private data.
+          required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Page or file
+      placeholder: README.md, package README, or public URL
+    validations:
+      required: true
+
+  - type: textarea
+    id: issue
+    attributes:
+      label: What is unclear or incorrect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement

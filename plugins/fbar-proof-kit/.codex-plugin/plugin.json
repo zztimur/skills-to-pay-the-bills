@@ -1,0 +1,45 @@
+{
+  "name": "fbar-proof-kit",
+  "version": "1.5.0",
+  "description": "Build a local, source-linked, review-ready FBAR threshold support packet from machine-readable foreign-bank statements.",
+  "author": {
+    "name": "zztimur",
+    "url": "https://github.com/zztimur"
+  },
+  "homepage": "https://zztimur.github.io/skills-to-pay-the-bills/",
+  "repository": "https://github.com/zztimur/skills-to-pay-the-bills",
+  "license": "MIT",
+  "keywords": [
+    "fbar",
+    "foreign-bank-statements",
+    "agent-skills",
+    "tax-workpapers",
+    "local-first"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "FBAR Proof Kit",
+    "shortDescription": "Local statement-to-FBAR support packets.",
+    "longDescription": "Preflight machine-readable foreign-bank statements, retain reviewed year-end FX proof, and build source-linked FBAR threshold support artifacts without uploading statement data.",
+    "developerName": "zztimur",
+    "category": "Finance",
+    "capabilities": [
+      "Local files",
+      "Human review gates",
+      "JSON CSV PDF artifacts"
+    ],
+    "websiteURL": "https://zztimur.github.io/skills-to-pay-the-bills/",
+    "privacyPolicyURL": "https://github.com/zztimur/skills-to-pay-the-bills/blob/main/PRIVACY.md",
+    "defaultPrompt": [
+      "Preflight my 2025 foreign-bank statement PDFs for an FBAR threshold review.",
+      "Build a reviewed year-end FX proof workpaper for this non-USD account.",
+      "Check the FBAR threshold only after the statement and ledger review gates pass."
+    ],
+    "brandColor": "#071510",
+    "logo": "./assets/social-preview.png",
+    "screenshots": [
+      "./assets/summary.png",
+      "./assets/fx-proof.png"
+    ]
+  }
+}
