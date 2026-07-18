@@ -1,7 +1,7 @@
 # FBAR Proof Kit by Skills To Pay The Bills
 
 [![Skill CI](https://github.com/zztimur/skills-to-pay-the-bills/actions/workflows/skill-ci.yml/badge.svg)](https://github.com/zztimur/skills-to-pay-the-bills/actions/workflows/skill-ci.yml)
-[![skills.sh installs](https://skills.sh/b/zztimur/skills-to-pay-the-bills)](https://skills.sh/zztimur/skills-to-pay-the-bills)
+[![Install with skills.sh](https://img.shields.io/badge/install-skills.sh-111111)](#install-the-kit)
 [![GitHub release](https://img.shields.io/github/v/release/zztimur/skills-to-pay-the-bills)](https://github.com/zztimur/skills-to-pay-the-bills/releases/latest)
 [![Python 3.11–3.13](https://img.shields.io/badge/python-3.11%E2%80%933.13-3776AB)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
