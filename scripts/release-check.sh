@@ -31,7 +31,7 @@ do
 done
 bash workpaper-kit/sync.sh --check
 python3 scripts/sync-plugin-bundles.py --check
-python3 privacy-gate/scripts/privacy_gate.py scan --path . --strict
+python3 privacy-gate/scripts/privacy_gate.py scan --index --strict
 python3 -S skill-forge/scripts/run_self_tests.py
 python3 workpaper-kit/test_workpaper.py
 python3 privacy-gate/scripts/test_privacy_gate.py

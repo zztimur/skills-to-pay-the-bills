@@ -221,7 +221,9 @@ python3 -m pip install pdfplumber reportlab pypdf pillow \
 
 The repository has one release stream. `VERSION` and [CHANGELOG.md](CHANGELOG.md)
 define each `vX.Y.Z` release. Tags publish deterministic ZIPs for every public
-skill and the native plugin plus `SHA256SUMS`. Before a release:
+skill and the native plugin plus `SHA256SUMS`. The repository gate scans the
+complete proposed Git index; generated filesystem exports retain their own
+artifact/package verification. Before a release:
 
 ```bash
 scripts/release-diff.sh

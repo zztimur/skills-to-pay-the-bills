@@ -1,6 +1,6 @@
 ---
 name: privacy-gate
-description: Scan staged commits, repo trees, or files for secrets, private data, generated artifacts, and unsafe binary exports; sanitize PII in text. Use before commit, release, packaging, syncing, or sharing.
+description: Scan staged changes, proposed Git indexes, or filesystem paths for secrets, private data, and unsafe artifacts; sanitize PII. Use before commit, push, release, packaging, syncing, or sharing.
 ---
 
 # Privacy Gate
@@ -13,6 +13,7 @@ Call the bundled CLI. Do not reimplement detection logic in chat or in a client-
 
 ```bash
 python3 "<package-root>/scripts/privacy_gate.py" scan --staged
+python3 "<package-root>/scripts/privacy_gate.py" scan --index --strict
 python3 "<package-root>/scripts/privacy_gate.py" scan --path .
 python3 "<package-root>/scripts/privacy_gate.py" sanitize --path FILE --write
 python3 "<package-root>/scripts/privacy_gate.py" install-hook
@@ -24,20 +25,29 @@ Bundled files: `scripts/privacy_gate.py` (scanner, source of truth), `scripts/te
 
 ## Flags And Exit Codes
 
+The three scan sources are mutually exclusive and intentionally different:
+
+- `--staged` scans only changed staged blobs. Use it for a focused pre-commit review.
+- `--index` scans every entry in the proposed Git index from indexed blob contents, including unchanged tracked files and staged additions/modifications. It excludes untracked and ignored workspace files plus staged deletions. Use it before a Git commit, push, or Git-based release.
+- `--path` scans the actual filesystem file or directory. Use it when copying, packaging, synchronizing, or publishing those physical bytes.
+
+Both Git modes use the indexed `.privacygateignore`, if present. Indexed symlinks block. Gitlinks are commit pointers rather than blobs, so they are counted as skipped and not recursively scanned; scan the submodule separately at the boundary being shipped.
+
 - Default `scan` exits nonzero only on `BLOCK` findings (high-confidence secrets); `WARN` findings (PII) print but do not fail. This is the pre-commit default.
 - `--fail-on-warn` (or its alias `--strict`) also fails on `WARN` findings; use it for stricter CI gates and release checks.
 - `--json` emits a structured report instead of text.
 
-Allowlist reviewed false positives without disabling the gate. Two inline markers, both leaving a visible in-diff audit trail: `privacy-gate: allow` in a comment suppresses PII warnings on that line, but a high-confidence secret still blocks; `privacy-gate: allow-secret` is required to suppress a secret on that line and relies entirely on diff review. Or list glob patterns in a committed `.privacygateignore` to skip paths. Neither affects file-level blocks (binary, `.env`). See `references/policy.md`.
+Allowlist reviewed false positives without disabling the gate. Two inline markers, both leaving a visible in-diff audit trail: `privacy-gate: allow` in a comment suppresses PII warnings on that line, but a high-confidence secret still blocks; `privacy-gate: allow-secret` is required to suppress a secret on that line and relies entirely on diff review. Or list reviewed path globs in a committed `.privacygateignore`. Path ignores can cover reviewed binary exports, but they never suppress environment files, private-key/service-credential filenames, or `work/`/`outputs/` artifact paths. See `references/policy.md`.
 
 ## Workflow
 
-1. Run `scan --staged` before committing staged changes; add `--strict` in CI to also fail on PII warnings.
-2. Run `scan --path .` before publishing, packaging, or syncing a repo copy.
-3. Treat `BLOCK` findings as release blockers.
-4. Treat `WARN` findings as review items that may need redaction or manual confirmation.
-5. Use `sanitize --path FILE --write` only for text-file PII cleanup; review the printed preview first.
-6. Remove and rotate credentials instead of sanitizing them.
+1. Run `scan --staged` while reviewing a focused staged change.
+2. Run `scan --index --strict` before a commit, push, or Git-based release.
+3. Run `scan --path PATH --strict` before copying, packaging, synchronizing, or publishing that filesystem path.
+4. Treat `BLOCK` findings as release blockers.
+5. Treat `WARN` findings as review items that may need redaction or manual confirmation.
+6. Use `sanitize --path FILE --write` only for text-file PII cleanup; review the printed preview first.
+7. Remove and rotate credentials instead of sanitizing them.
 
 ## Policy Reference
 

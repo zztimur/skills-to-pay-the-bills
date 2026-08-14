@@ -1,4 +1,4 @@
 interface:
   display_name: "Privacy Gate"
-  short_description: "Block secrets and private data before commits."
-  default_prompt: "Use $privacy-gate to scan staged or local files for secrets and private data before committing."
+  short_description: "Block private data in Git proposals and exports."
+  default_prompt: "Use $privacy-gate to scan the proposed Git index or the filesystem export boundary for secrets and private data."

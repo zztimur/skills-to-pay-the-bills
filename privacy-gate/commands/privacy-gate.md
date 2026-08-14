@@ -1,6 +1,6 @@
 ---
-description: Scan staged or local files for secrets and private data before commit or release
-argument-hint: "scan --staged --strict | scan --path <path> | sanitize --path <path> --write | install-hook"
+description: Scan staged changes, a complete Git index, or filesystem paths for secrets and private data
+argument-hint: "scan --staged --strict | scan --index --strict | scan --path <path> --strict | sanitize --path <path> --write | install-hook"
 ---
 
 You are running `/privacy-gate:privacy-gate $ARGUMENTS`.

@@ -294,6 +294,24 @@ class ScanResult:
     skipped_dirs: List[str] = field(default_factory=list)  # structural skips (display paths)
 
 
+@dataclass(frozen=True)
+class GitIndexEntry:
+    mode: str
+    object_id: str
+    stage: int
+    path: str
+
+
+def parse_ignore_patterns(data: bytes) -> List[str]:
+    """Parse .privacygateignore bytes using the existing tolerant text policy."""
+    patterns: List[str] = []
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            patterns.append(stripped.rstrip("/"))
+    return patterns
+
+
 def load_ignore_patterns(base: Path) -> List[str]:
     """Read committed .privacygateignore glob patterns from the scan base.
 
@@ -303,12 +321,7 @@ def load_ignore_patterns(base: Path) -> List[str]:
     ignore_file = base / IGNORE_FILE_NAME
     if ignore_file.is_symlink() or not ignore_file.is_file():
         return []
-    patterns: List[str] = []
-    for line in ignore_file.read_text(encoding="utf-8", errors="replace").splitlines():
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#"):
-            patterns.append(stripped.rstrip("/"))
-    return patterns
+    return parse_ignore_patterns(ignore_file.read_bytes())
 
 
 def is_ignored(display_path: str, patterns: Sequence[str]) -> bool:
@@ -456,6 +469,22 @@ def path_policy_findings(display_path: str) -> List[Finding]:
                 break
 
     return findings
+
+
+def unsuppressible_path_findings(display_path: str) -> List[Finding]:
+    """Credential-bearing/path blocks .privacygateignore may never hide.
+
+    Reviewed binary exports can be allowlisted by exact path (the repository
+    ships conspicuously synthetic PDF/PNG fixtures), but an ignore glob must
+    never make a force-added environment file, credential filename, or raw
+    work/output artifact disappear from a Git gate.
+    """
+    unsuppressible_codes = {
+        "generated_artifact_path",
+        "secret_env_file",
+        "secret_filename",
+    }
+    return [item for item in path_policy_findings(display_path) if item.code in unsuppressible_codes]
 
 
 def luhn_valid(digits: str) -> bool:
@@ -680,17 +709,19 @@ def scan_bytes(display_path: str, data: bytes) -> List[Finding]:
         )
         return findings
     if len(data) > MAX_TEXT_BYTES:
-        findings.append(
-            Finding(
-                "block",
-                "text_read_limit_exceeded",
-                normalize_display_path(display_path),
-                "text file exceeds the safe full-read limit, so the scan would be partial",
-                remediation="Split, remove, or manually review the file before committing.",
-            )
-        )
+        findings.append(text_read_limit_finding(display_path))
     findings.extend(scan_text_content(display_path, text))
     return findings
+
+
+def text_read_limit_finding(display_path: str) -> Finding:
+    return Finding(
+        "block",
+        "text_read_limit_exceeded",
+        normalize_display_path(display_path),
+        "file exceeds the safe full-read limit, so the scan would be partial",
+        remediation="Split, remove, or manually review the file before committing.",
+    )
 
 
 def relative_display_path(file_path: Path, base: Path) -> str:
@@ -796,11 +827,12 @@ def scan_path(path: Path) -> ScanResult:
 
     for file_path in candidate_files:
         display = single_file_display if single_file_display is not None else relative_display_path(file_path, base)
-        if is_ignored(display, ignore_patterns):
-            skipped += 1
-            continue
         if file_path.is_symlink():
             findings.append(symlink_finding(display))
+            continue
+        if display != IGNORE_FILE_NAME and is_ignored(display, ignore_patterns):
+            skipped += 1
+            findings.extend(unsuppressible_path_findings(display))
             continue
         try:
             data = read_limited_bytes(file_path)
@@ -821,9 +853,14 @@ def scan_path(path: Path) -> ScanResult:
 
 
 def run_git(args: Sequence[str], cwd: Optional[Path] = None, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+    git_env = os.environ.copy()
+    # Indexed object IDs are the source of truth. Replacement refs must not
+    # substitute different object contents underneath an index scan.
+    git_env["GIT_NO_REPLACE_OBJECTS"] = "1"
     result = subprocess.run(
         ["git", *args],
         cwd=str(cwd) if cwd else None,
+        env=git_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -837,6 +874,75 @@ def run_git(args: Sequence[str], cwd: Optional[Path] = None, check: bool = True)
 def git_root() -> Path:
     result = run_git(["rev-parse", "--show-toplevel"])
     return Path(result.stdout.decode("utf-8", errors="replace").strip())
+
+
+def git_index_entries(root: Path, paths: Optional[Sequence[str]] = None) -> List[GitIndexEntry]:
+    """Return exact index entries, including non-zero merge stages."""
+    args = ["ls-files", "--stage", "-z"]
+    if paths is not None:
+        if not paths:
+            return []
+        args.extend(["--", *paths])
+    result = run_git(args, cwd=root)
+    entries: List[GitIndexEntry] = []
+    for raw_entry in result.stdout.split(b"\x00"):
+        if not raw_entry:
+            continue
+        metadata, separator, raw_path = raw_entry.partition(b"\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3:
+            raise RuntimeError("could not parse a Git index entry")
+        mode, object_id, raw_stage = fields
+        try:
+            stage = int(raw_stage)
+        except ValueError as exc:
+            raise RuntimeError("could not parse a Git index stage") from exc
+        try:
+            decoded_mode = mode.decode("ascii", errors="strict")
+            decoded_object_id = object_id.decode("ascii", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise RuntimeError("could not parse Git index object metadata") from exc
+        entries.append(
+            GitIndexEntry(
+                decoded_mode,
+                decoded_object_id,
+                stage,
+                raw_path.decode("utf-8", errors="surrogateescape"),
+            )
+        )
+    return entries
+
+
+def indexed_blob(root: Path, entry: GitIndexEntry) -> bytes:
+    """Read the exact object named by an index entry, never the working tree."""
+    result = run_git(["cat-file", "blob", entry.object_id], cwd=root)
+    return result.stdout
+
+
+def indexed_blob_size(root: Path, entry: GitIndexEntry) -> int:
+    result = run_git(["cat-file", "-s", entry.object_id], cwd=root)
+    try:
+        return int(result.stdout.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"could not determine indexed blob size for {entry.path}") from exc
+
+
+def indexed_ignore_patterns(root: Path, entries: Sequence[GitIndexEntry]) -> List[str]:
+    """Load .privacygateignore from the proposed index when it is a regular blob."""
+    candidates = [entry for entry in entries if entry.path == IGNORE_FILE_NAME]
+    if len(candidates) != 1:
+        return []
+    entry = candidates[0]
+    if entry.stage != 0 or entry.mode not in {"100644", "100755"}:
+        return []
+    try:
+        if indexed_blob_size(root, entry) > MAX_TEXT_BYTES:
+            return []
+        return parse_ignore_patterns(indexed_blob(root, entry))
+    except RuntimeError:
+        # The entry itself will fail closed during the normal scan below. Do not
+        # let an unreadable ignore file reduce coverage before that happens.
+        return []
 
 
 def staged_paths(root: Path) -> List[str]:
@@ -893,7 +999,9 @@ def staged_symlinks(root: Path, paths: Sequence[str]) -> Set[str]:
 
 def scan_staged() -> ScanResult:
     root = git_root()
-    ignore_patterns = load_ignore_patterns(root)
+    # The ignore policy for a Git proposal must come from that proposal too;
+    # an unstaged working-tree edit must not change which staged blobs are seen.
+    ignore_patterns = indexed_ignore_patterns(root, git_index_entries(root))
     paths = staged_paths(root)
     gitlinks = staged_gitlinks(root, paths)
     symlinks = staged_symlinks(root, paths)
@@ -901,14 +1009,15 @@ def scan_staged() -> ScanResult:
     scanned = 0
     skipped = 0
     for path in paths:
-        if is_ignored(path, ignore_patterns):
-            skipped += 1
-            continue
         if path in gitlinks:
             skipped += 1
             continue
         if path in symlinks:
             findings.append(symlink_finding(path))
+            continue
+        if path != IGNORE_FILE_NAME and is_ignored(path, ignore_patterns):
+            skipped += 1
+            findings.extend(unsuppressible_path_findings(path))
             continue
         try:
             data = staged_blob(root, path)
@@ -920,6 +1029,78 @@ def scan_staged() -> ScanResult:
                     path,
                     f"could not read staged blob, so it cannot be inspected: {exc}",
                     remediation="Resolve the staged blob and rescan; uninspectable staged content is blocked fail-closed.",
+                )
+            )
+            continue
+        scanned += 1
+        findings.extend(scan_bytes(path, data))
+    return ScanResult(scanned, findings, skipped)
+
+
+def scan_index() -> ScanResult:
+    """Scan every proposed index entry from its indexed blob object."""
+    root = git_root()
+    entries = git_index_entries(root)
+    ignore_patterns = indexed_ignore_patterns(root, entries)
+    findings: List[Finding] = []
+    scanned = 0
+    skipped = 0
+    unresolved_paths: Set[str] = set()
+
+    for entry in entries:
+        path = entry.path
+        if entry.stage != 0:
+            if path not in unresolved_paths:
+                findings.append(
+                    Finding(
+                        "block",
+                        "index_unmerged_entry",
+                        path,
+                        "Git index contains unresolved merge stages, so the proposed tree is not inspectable",
+                        remediation="Resolve the index conflict, stage the result, and rerun the scan.",
+                    )
+                )
+                unresolved_paths.add(path)
+            continue
+        if entry.mode == "160000":
+            # Preserve --staged behavior: a gitlink is a commit pointer, not a
+            # blob. The parent index cannot inspect the submodule tree.
+            skipped += 1
+            continue
+        if entry.mode == "120000":
+            findings.append(symlink_finding(path))
+            continue
+        if entry.mode not in {"100644", "100755"}:
+            findings.append(
+                Finding(
+                    "block",
+                    "index_entry_type_unsupported",
+                    path,
+                    f"Git index mode {entry.mode} is not an inspectable regular blob",
+                    remediation="Replace the entry with an intentionally reviewed regular file and rescan.",
+                )
+            )
+            continue
+        if path != IGNORE_FILE_NAME and is_ignored(path, ignore_patterns):
+            skipped += 1
+            findings.extend(unsuppressible_path_findings(path))
+            continue
+        try:
+            blob_size = indexed_blob_size(root, entry)
+            if blob_size > MAX_TEXT_BYTES:
+                scanned += 1
+                findings.extend(path_policy_findings(path))
+                findings.append(text_read_limit_finding(path))
+                continue
+            data = indexed_blob(root, entry)
+        except RuntimeError as exc:
+            findings.append(
+                Finding(
+                    "block",
+                    "index_blob_read_failed",
+                    path,
+                    f"could not read indexed blob, so it cannot be inspected: {exc}",
+                    remediation="Repair the index entry and rescan; uninspectable indexed content is blocked fail-closed.",
                 )
             )
             continue
@@ -1157,7 +1338,9 @@ def report_scan(result: ScanResult, json_output: bool) -> None:
 
     notes = []
     if result.skipped_files:
-        notes.append(f"{result.skipped_files} skipped via {IGNORE_FILE_NAME}")
+        notes.append(
+            f"{result.skipped_files} content item(s) skipped by {IGNORE_FILE_NAME} or Git-link boundary"
+        )
     if result.skipped_dirs:
         names = sorted({PurePosixPath(d).name for d in result.skipped_dirs})
         notes.append(f"{len(result.skipped_dirs)} dir(s) skipped structurally: {', '.join(names)}")
@@ -1185,6 +1368,8 @@ def exit_code_for(result: ScanResult, fail_on_warn: bool) -> int:
 def command_scan(args: argparse.Namespace) -> int:
     if args.staged:
         result = scan_staged()
+    elif args.index:
+        result = scan_index()
     else:
         result = scan_path(Path(args.path))
     report_scan(result, args.json)
@@ -1198,10 +1383,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    scan = subparsers.add_parser("scan", help="scan staged content or a file/folder path")
+    scan = subparsers.add_parser("scan", help="scan staged changes, the complete Git index, or a file/folder path")
     scan_source = scan.add_mutually_exclusive_group()
-    scan_source.add_argument("--staged", action="store_true", help="scan Git staged blobs")
-    scan_source.add_argument("--path", default=".", help="file or folder to scan")
+    scan_source.add_argument("--staged", action="store_true", help="scan only changed staged Git blobs")
+    scan_source.add_argument(
+        "--index",
+        action="store_true",
+        help="scan every entry in the proposed Git index from indexed blobs",
+    )
+    scan_source.add_argument("--path", default=".", help="scan the actual filesystem file or folder (default: .)")
     scan.add_argument("--strict", action="store_true", help="strict CI gate: warnings fail too (alias for --fail-on-warn)")
     scan.add_argument("--fail-on-warn", action="store_true", help="exit nonzero for warning findings too")
     scan.add_argument("--json", action="store_true", help="emit structured JSON")
