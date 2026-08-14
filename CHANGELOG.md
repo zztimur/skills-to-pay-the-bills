@@ -9,6 +9,13 @@ changelogs, or GitHub Releases.
 The current repository version lives in [`VERSION`](VERSION), is tagged
 `vX.Y.Z`, and has one matching GitHub Release.
 
+## [1.5.2] - 2026-08-14
+
+### Changed
+
+- `repository`: feat(privacy-gate): scan complete Git index
+- `repository`: Merge pull request #17 from zztimur/codex/privacy-gate-index-scan
+
 ## [1.5.1] - 2026-07-18
 
 ### Changed
