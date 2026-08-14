@@ -73,6 +73,14 @@ python3 privacy-gate/scripts/privacy_gate.py scan --staged --strict
 git diff --cached --check
 ```
 
+Before pushing or cutting a Git-based release, scan the complete proposed index:
+
+```bash
+python3 privacy-gate/scripts/privacy_gate.py scan --index --strict
+```
+
+Use `scan --path <path> --strict` instead when the thing being distributed is a physical directory or artifact rather than the Git index.
+
 If your environment lacks an optional dependency, say exactly which check you could not run and why. Do not report an unrun check as passing.
 
 ## Open the pull request

@@ -257,6 +257,29 @@ class PrivacyGateTests(unittest.TestCase):
         subprocess.run(["git", "config", "user.email", "a@b.c"], cwd=root, check=True, **q)
         subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True, **q)
 
+    def _git(self, root: Path, *args: str):
+        return subprocess.run(
+            ["git", *args],
+            cwd=root,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    def _scan_cli(self, root: Path, *args: str):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT_PATH), "scan", *args],
+            cwd=root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    def _commit_index(self, root: Path, message: str = "fixture"):
+        self._git(root, "commit", "-m", message)
+
     def _install_hook(self, root: Path, *extra):
         return subprocess.run(
             [sys.executable, str(SCRIPT_PATH), "install-hook", *extra],
@@ -510,6 +533,37 @@ class PrivacyGateTests(unittest.TestCase):
         self.assertFalse(any(f.path.startswith("fixtures/") for f in result.findings))
         self.assertGreaterEqual(result.skipped_files, 1)
 
+    def test_ignore_file_cannot_suppress_environment_file_block(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / ".privacygateignore").write_text("*\n", encoding="utf-8")
+            (root / ".env").write_text("PLACEHOLDER=1\n", encoding="utf-8")
+            result = privacy_gate.scan_path(root)
+        self.assertTrue(
+            any(f.path == ".env" and f.code == "secret_env_file" for f in result.findings),
+            [(f.path, f.code) for f in result.findings],
+        )
+
+    def test_ignore_file_does_not_skip_itself(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            email = "jane" + "@" + "private.test"
+            (root / ".privacygateignore").write_text("*\n# owner " + email + "\n", encoding="utf-8")
+            result = privacy_gate.scan_path(root)
+        self.assertTrue(
+            any(f.path == ".privacygateignore" and f.code == "private_email" for f in result.findings),
+            [(f.path, f.code) for f in result.findings],
+        )
+
+    def test_reviewed_binary_path_can_still_be_ignored(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / ".privacygateignore").write_text("reviewed.png\n", encoding="utf-8")
+            (root / "reviewed.png").write_bytes(b"synthetic\x00fixture")
+            result = privacy_gate.scan_path(root)
+        self.assertFalse(any(f.path == "reviewed.png" for f in result.findings))
+        self.assertEqual(result.skipped_files, 1)
+
     def test_ignore_file_symlink_not_followed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -562,6 +616,242 @@ class PrivacyGateTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("secret_openai_api_key", result.stdout)
         self.assertNotIn(secret, result.stdout)
+
+    def test_staged_ignore_cannot_suppress_environment_file_block(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            (root / ".privacygateignore").write_text("*\n", encoding="utf-8")
+            (root / ".env").write_text("PLACEHOLDER=1\n", encoding="utf-8")
+            self._git(root, "add", ".privacygateignore")
+            self._git(root, "add", "-f", ".env")
+            result = self._scan_cli(root, "--staged", "--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(any(f["path"] == ".env" and f["code"] == "secret_env_file" for f in payload["findings"]))
+
+    def test_index_excludes_ignored_untracked_environment_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            (root / ".gitignore").write_text(".env\n", encoding="utf-8")
+            (root / "tracked.txt").write_text("safe\n", encoding="utf-8")
+            self._git(root, "add", ".gitignore", "tracked.txt")
+            secret = "sk-" + ("I" * 32)
+            (root / ".env").write_text("API_KEY=" + secret + "\n", encoding="utf-8")
+            result = self._scan_cli(root, "--index", "--strict", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertFalse(any(f["path"] == ".env" for f in payload["findings"]))
+        self.assertNotIn(secret, result.stdout)
+
+    def test_index_unchanged_tracked_environment_file_blocks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            (root / ".env").write_text("PLACEHOLDER=1\n", encoding="utf-8")
+            self._git(root, "add", "-f", ".env")
+            self._commit_index(root)
+            result = self._scan_cli(root, "--index", "--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(any(f["path"] == ".env" and f["code"] == "secret_env_file" for f in payload["findings"]))
+
+    def test_index_newly_staged_environment_file_blocks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            (root / ".env.local").write_text("PLACEHOLDER=1\n", encoding="utf-8")
+            self._git(root, "add", "-f", ".env.local")
+            result = self._scan_cli(root, "--index", "--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(any(f["path"] == ".env.local" and f["code"] == "secret_env_file" for f in payload["findings"]))
+
+    def test_index_ignore_cannot_suppress_environment_file_block(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            (root / ".privacygateignore").write_text("*\n", encoding="utf-8")
+            (root / ".env.production").write_text("PLACEHOLDER=1\n", encoding="utf-8")
+            self._git(root, "add", ".privacygateignore")
+            self._git(root, "add", "-f", ".env.production")
+            result = self._scan_cli(root, "--index", "--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(
+            any(f["path"] == ".env.production" and f["code"] == "secret_env_file" for f in payload["findings"])
+        )
+
+    def test_indexed_content_wins_over_unstaged_worktree_version(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            secret = "sk-" + ("J" * 32)
+            target = root / "config.txt"
+            target.write_text("OPENAI_API_KEY=" + secret + "\n", encoding="utf-8")
+            self._git(root, "add", "config.txt")
+            target.write_text("safe working tree\n", encoding="utf-8")
+            result = self._scan_cli(root, "--index", "--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("secret_openai_api_key", result.stdout)
+        self.assertNotIn(secret, result.stdout)
+
+    def test_indexed_ignore_file_wins_over_unstaged_version(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            (root / ".privacygateignore").write_text("ignored.txt\n", encoding="utf-8")
+            secret = "sk-" + ("K" * 32)
+            (root / "real.txt").write_text("OPENAI_API_KEY=" + secret + "\n", encoding="utf-8")
+            self._git(root, "add", ".privacygateignore", "real.txt")
+            (root / ".privacygateignore").write_text("*\n", encoding="utf-8")
+            result = self._scan_cli(root, "--index", "--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("secret_openai_api_key", result.stdout)
+        self.assertNotIn(secret, result.stdout)
+
+    def test_index_scans_staged_additions_and_modifications(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            (root / "modified.txt").write_text("safe\n", encoding="utf-8")
+            self._git(root, "add", "modified.txt")
+            self._commit_index(root)
+            first = "sk-" + ("L" * 32)
+            second = "sk-" + ("M" * 32)
+            (root / "modified.txt").write_text("OPENAI_API_KEY=" + first + "\n", encoding="utf-8")
+            (root / "added.txt").write_text("OPENAI_API_KEY=" + second + "\n", encoding="utf-8")
+            self._git(root, "add", "modified.txt", "added.txt")
+            result = self._scan_cli(root, "--index", "--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        paths = {f["path"] for f in json.loads(result.stdout)["findings"] if f["code"] == "secret_openai_api_key"}
+        self.assertEqual(paths, {"added.txt", "modified.txt"})
+        self.assertNotIn(first, result.stdout)
+        self.assertNotIn(second, result.stdout)
+
+    def test_index_excludes_staged_deletions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            (root / ".env").write_text("PLACEHOLDER=1\n", encoding="utf-8")
+            (root / "keep.txt").write_text("safe\n", encoding="utf-8")
+            self._git(root, "add", "-f", ".env")
+            self._git(root, "add", "keep.txt")
+            self._commit_index(root)
+            self._git(root, "rm", ".env")
+            result = self._scan_cli(root, "--index", "--strict", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(any(f["path"] == ".env" for f in json.loads(result.stdout)["findings"]))
+
+    def test_index_scans_unchanged_tracked_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            secret = "sk-" + ("N" * 32)
+            (root / "committed.txt").write_text("OPENAI_API_KEY=" + secret + "\n", encoding="utf-8")
+            self._git(root, "add", "committed.txt")
+            self._commit_index(root)
+            result = self._scan_cli(root, "--index", "--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("secret_openai_api_key", result.stdout)
+        self.assertNotIn(secret, result.stdout)
+
+    def test_index_staged_symlink_blocks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            target = root / "target.txt"
+            target.write_text("safe\n", encoding="utf-8")
+            link = root / "linked.txt"
+            try:
+                link.symlink_to(target)
+            except OSError as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+            self._git(root, "add", "linked.txt")
+            result = self._scan_cli(root, "--index", "--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(any(f["code"] == "symlink_found" for f in json.loads(result.stdout)["findings"]))
+
+    def test_index_skips_gitlink_submodule(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            sub_repo = base / "sub"
+            sub_repo.mkdir()
+            self._init_repo(sub_repo)
+            (sub_repo / "f.txt").write_text("hello\n", encoding="utf-8")
+            self._git(sub_repo, "add", "f.txt")
+            self._commit_index(sub_repo)
+
+            root = base / "outer"
+            root.mkdir()
+            self._init_repo(root)
+            self._git(root, "-c", "protocol.file.allow=always", "submodule", "add", str(sub_repo), "sub")
+            result = self._scan_cli(root, "--index", "--json")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["block_count"], 0)
+        self.assertGreaterEqual(payload["skipped_files"], 1)
+
+    def test_index_scans_renames_large_files_and_binary_blobs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            (root / "old.txt").write_text("safe\n", encoding="utf-8")
+            self._git(root, "add", "old.txt")
+            self._commit_index(root)
+            self._git(root, "mv", "old.txt", "renamed.txt")
+            secret = "sk-" + ("P" * 32)
+            (root / "renamed.txt").write_text("OPENAI_API_KEY=" + secret + "\n", encoding="utf-8")
+            (root / "large.txt").write_text("a" * (privacy_gate.MAX_TEXT_BYTES + 1), encoding="utf-8")
+            (root / "binary.dat").write_bytes(b"safe-prefix\x00binary")
+            self._git(root, "add", "renamed.txt", "large.txt", "binary.dat")
+            result = self._scan_cli(root, "--index", "--json")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        codes_by_path = {(f["path"], f["code"]) for f in json.loads(result.stdout)["findings"]}
+        self.assertIn(("renamed.txt", "secret_openai_api_key"), codes_by_path)
+        self.assertIn(("large.txt", "text_read_limit_exceeded"), codes_by_path)
+        self.assertIn(("binary.dat", "binary_file"), codes_by_path)
+        self.assertNotIn(secret, result.stdout)
+
+    def test_index_default_and_strict_exit_behavior(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            email = "jane" + "@" + "private.test"
+            (root / "notes.txt").write_text("contact " + email + "\n", encoding="utf-8")
+            self._git(root, "add", "notes.txt")
+            default = self._scan_cli(root, "--index", "--json")
+            strict = self._scan_cli(root, "--index", "--strict", "--json")
+            fail_on_warn = self._scan_cli(root, "--index", "--fail-on-warn", "--json")
+        self.assertEqual(default.returncode, 0, default.stdout + default.stderr)
+        self.assertEqual(strict.returncode, 1, strict.stdout + strict.stderr)
+        self.assertEqual(fail_on_warn.returncode, 1, fail_on_warn.stdout + fail_on_warn.stderr)
+
+    def test_index_json_preserves_scan_report_schema(self):
+        expected_keys = {
+            "scanned_files", "skipped_files", "skipped_dirs", "block_count",
+            "warning_count", "findings", "note",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._init_repo(root)
+            email = "jane" + "@" + "private.test"
+            (root / "notes.txt").write_text("contact " + email + "\n", encoding="utf-8")
+            self._git(root, "add", "notes.txt")
+            staged = json.loads(self._scan_cli(root, "--staged", "--json").stdout)
+            indexed = json.loads(self._scan_cli(root, "--index", "--json").stdout)
+        self.assertEqual(set(staged), expected_keys)
+        self.assertEqual(set(indexed), expected_keys)
+        self.assertEqual(set(indexed["findings"][0]), {"severity", "code", "path", "message", "line", "remediation"})
+
+    def test_index_outside_git_repository_fails_clearly(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = self._scan_cli(Path(tmpdir), "--index")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Privacy Gate:", result.stderr)
+        self.assertIn("not a git repository", result.stderr.lower())
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_staged_scan_skips_gitlink_submodule(self):
         with tempfile.TemporaryDirectory() as tmpdir:

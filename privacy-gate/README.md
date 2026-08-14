@@ -12,13 +12,21 @@ The script is the source of truth. The skill wrapper and Git hook are only adapt
 
 ## The Fast Path
 
-Scan exactly what is staged for commit:
+Scan only the changed blobs staged for a focused commit review:
 
 ```bash
 python3 privacy-gate/scripts/privacy_gate.py scan --staged --strict
 ```
 
-Scan a file or folder:
+Scan the complete proposed Git index before a commit, push, or Git-based release:
+
+```bash
+python3 privacy-gate/scripts/privacy_gate.py scan --index --strict
+```
+
+That reads indexed blob objects, including unchanged tracked files and staged additions or modifications. It excludes staged deletions plus untracked and ignored workspace files. If an ignored, untracked `.env` exists on your laptop, it is outside the Git proposal and does not affect this scan. If an environment file is tracked or force-added to the index, it blocks.
+
+Scan the actual file or folder when those physical bytes are being copied, packaged, synchronized, or published:
 
 ```bash
 python3 privacy-gate/scripts/privacy_gate.py scan --path .
@@ -38,7 +46,7 @@ Install the tracked Git hook locally:
 python3 privacy-gate/scripts/privacy_gate.py install-hook
 ```
 
-The hook runs the staged scan. That matters because the thing in your working tree and the thing Git is about to commit are not always the same thing.
+The hook runs the focused staged scan. The complete repository gate is `scan --index --strict`; the two commands answer different questions.
 
 The default hook embeds the installing script's absolute path, which is convenient solo but discloses a local path and won't resolve on a teammate's machine. For a shared repo use `install-hook --portable` and pair it with a vendored `privacy-gate/` or the `PRIVACY_GATE_SCRIPT` override. Pass `install-hook --force` to take over a foreign pre-commit hook or an existing `core.hooksPath`.
 
@@ -74,7 +82,9 @@ A reviewed false positive does not have to mean disabling the gate. Two inline m
 - `privacy-gate: allow` in a comment suppresses PII **warnings** on that line. A high-confidence secret on the same line still blocks.
 - `privacy-gate: allow-secret` is required to suppress a **secret** block on that line, and relies entirely on diff review.
 
-Inline markers cannot suppress file-level blocks such as binaries or `.env` files. `.privacygateignore` is different: it skips matching paths entirely, including binary, environment-file, and secret checks, and reports the skip count. Use it only after deliberate review. Prefer removing and rotating a real credential over allowlisting it.
+Inline markers cannot suppress file-level blocks. `.privacygateignore` can skip reviewed content paths, including exact synthetic binary/export fixtures, and reports the skip count. It cannot suppress environment-file identities, private-key/service-credential filenames, or files under `work/` and `outputs/`. Never add `.env` to `.privacygateignore`: a force-added environment file must remain a block.
+
+For Git scans, the ignore file also comes from the index. An unstaged edit to `.privacygateignore` cannot change a staged or index result. Indexed symlinks block. Gitlinks/submodules are commit pointers rather than blobs, so the parent scan counts them as skipped; scan the submodule separately using its own `--index` or the exported submodule path.
 
 ## Sanitizing Text
 
