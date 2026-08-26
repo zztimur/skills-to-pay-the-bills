@@ -17,6 +17,7 @@ REGRESSION_SCRIPTS = (
     "test_treasury_map.py",
     "test_treasury_offline_provenance.py",
     "test_year_end_availability.py",
+    "test_runtime_immutability.py",
 )
 
 
@@ -28,7 +29,7 @@ def main() -> int:
             return 1
         print(f"running {script_name}")
         result = subprocess.run(
-            [sys.executable, str(script_path)],
+            [sys.executable, "-B", str(script_path)],
             cwd=PACKAGE_ROOT,
             text=True,
             capture_output=True,

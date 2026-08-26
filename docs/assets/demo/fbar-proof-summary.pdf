@@ -13,7 +13,7 @@ endobj
 << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
 endobj
 5 0 obj
-<< /Length 1172 >>
+<< /Length 1654 >>
 stream
 BT
 /F1 11 Tf
@@ -25,11 +25,21 @@ T*
 T*
 (Daily threshold: NO) Tj
 T*
-(Maximum combined daily USD value: 2782.474123 on 2025-10-10) Tj
+(Known maximum combined daily USD value: 2782.474123 on 2025-10-10) Tj
+T*
+(Conservative upper-bound maximum: 2782.474123 on 2025-10-10) Tj
+T*
+(Answer range: no to no \(not-sensitive\)) Tj
+T*
+(Time alignment: date-only-upper-bound) Tj
 T*
 (FinCEN maximum-value view: NO) Tj
 T*
-(Aggregate account maximums, rounded up to whole dollars: 2783) Tj
+(Aggregate exact account maximums: 2782.474123) Tj
+T*
+(Aggregate account maximums, each rounded up then summed: 2783) Tj
+T*
+(Sum exact maximums then round: 2783) Tj
 T*
 () Tj
 T*
@@ -41,11 +51,17 @@ T*
 T*
 (Accounts:) Tj
 T*
-(- synthetic-demo-account-0042: max USD 2782.474123 \(whole dollars 2783\)) Tj
+(- synthetic-demo-account-0042: max USD 2782.474123 \(whole dollars 2783; evidence formal-) Tj
+T*
+(extracted; maximum date 2025-10-10\)) Tj
 T*
 () Tj
 T*
 (Warnings:) Tj
+T*
+(- Daily totals are a conservative day-level upper bound because account values are date-) Tj
+T*
+(aligned, not synchronized intraday observations.) Tj
 T*
 (- synthetic-demo-account-0042: Preflight gate unknown-institution: No institution hint) Tj
 T*
@@ -80,5 +96,5 @@ xref
 trailer
 << /Size 6 /Root 1 0 R /Info << /Title (FBAR Threshold Check 2025) >> >>
 startxref
-1541
+2023
 %%EOF

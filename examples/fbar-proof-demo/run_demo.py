@@ -185,6 +185,70 @@ def repo_relative(path: Path) -> str:
         return str(path.resolve())
 
 
+def resolve_demo_path(value: object) -> Path:
+    candidate = Path(str(value))
+    return candidate if candidate.is_absolute() else REPO_ROOT / candidate
+
+
+def validate_demo_contract(manifest: dict[str, Any], label: str) -> None:
+    require(manifest.get("schema_version") == "1.1", f"{label} demo manifest is not schema 1.1.")
+    happy = manifest.get("happy_path")
+    refusal = manifest.get("refusal_path")
+    require(
+        isinstance(happy, dict)
+        and happy.get("daily_threshold") == "no"
+        and happy.get("fincen_maximum_value_view") == "no"
+        and happy.get("integrity_status") == "pass"
+        and happy.get("evidence_status") == "sufficient"
+        and happy.get("answer_lower_bound") == "no"
+        and happy.get("answer_upper_bound") == "no"
+        and happy.get("time_alignment") == "date-only-upper-bound"
+        and happy.get("rounding_policy") == "round-each-account-up-then-sum",
+        f"{label} happy path did not preserve the expected decision/evidence contract.",
+    )
+    require(
+        isinstance(refusal, dict)
+        and refusal.get("daily_threshold") == "insufficient-records"
+        and refusal.get("maximum_account_value") == "not-determinable"
+        and refusal.get("confirmation_written") is False,
+        f"{label} refusal path did not fail closed.",
+    )
+    summary_path = resolve_demo_path(happy.get("summary_json"))
+    postflight_path = resolve_demo_path(happy.get("postflight_manifest"))
+    verification_path = resolve_demo_path(happy.get("verification_json"))
+    summary = read_json(summary_path)
+    verification = read_json(verification_path)
+    require(
+        summary.get("schema_version") == "1.4"
+        and summary.get("path_contract", {}).get("mode") == "manifest-relative-v1",
+        f"{label} summary is not the current portable schema 1.4 contract.",
+    )
+    require(
+        verification.get("integrity_status") == "pass" and verification.get("failures") == [],
+        f"{label} retained verification result is not a clean pass.",
+    )
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-B",
+            str(FBAR_SCRIPT),
+            "verify-packet",
+            "--summary",
+            str(summary_path),
+            "--manifest",
+            str(postflight_path),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    require(
+        process.returncode == 0 and "Packet integrity: pass" in process.stdout,
+        f"{label} retained packet did not reverify: {process.stdout.strip()} {process.stderr.strip()}",
+    )
+
+
 def clean_known_outputs(artifact_root: Path, media_root: Path, *, clean_media: bool) -> None:
     for path in (artifact_root / "happy-path", artifact_root / "refusal-path"):
         if path.exists():
@@ -326,7 +390,7 @@ def create_reviewed_handoff(
     raw_transcript: list[str],
 ) -> dict[str, Any]:
     codes = gate_codes(source_data)
-    command = [sys.executable, str(PREFLIGHT_SCRIPT), "review-handoff", "--input", str(source)]
+    command = [sys.executable, repo_relative(PREFLIGHT_SCRIPT), "review-handoff", "--input", repo_relative(source)]
     for code in codes:
         command.extend(["--accept-gate", code])
     command.extend(["--user-review-confirmed"])
@@ -334,7 +398,7 @@ def create_reviewed_handoff(
         command.extend(["--confirm-institution", SYNTHETIC_INSTITUTION])
     if "unknown-account" in codes or "incomplete-account-linkage" in codes or "possible-mixed-accounts" in codes:
         command.append("--confirm-one-account")
-    command.extend(["--out", str(output)])
+    command.extend(["--out", repo_relative(output)])
     run_command(command, raw_transcript)
     data = read_json(output)
     require(data.get("status") == "reviewed-for-domain-extraction", "Reviewed handoff was not accepted.")
@@ -493,12 +557,14 @@ def sanitize_published_text_artifacts(
     artifact_root: Path,
     preflight_pairs: Sequence[tuple[Path, Path]],
 ) -> None:
-    """Remove workstation paths after the real pipeline and preserve handoff hashes.
+    """Remove workstation paths before final sealing and preserve handoff hashes.
 
     The raw CLIs intentionally retain absolute paths. Public sample text uses a
-    clear checkout token instead, after all production contract assertions have
-    run. Rebinding the reviewed handoff's source-preflight SHA keeps the nested
-    provenance internally consistent with the sanitized source JSON.
+    clear checkout token instead, after the applicable upstream contract checks
+    have run. Rebinding the reviewed handoff's source-preflight SHA keeps the
+    nested provenance internally consistent with the sanitized source JSON. The
+    happy packet is aggregated only after this step so postflight hashes bind the
+    final published bytes.
     """
     text_paths = [
         path
@@ -555,23 +621,24 @@ def run_demo(artifact_root: Path, media_root: Path, *, skip_media: bool) -> None
     run_command(
         [
             sys.executable,
-            str(PREFLIGHT_SCRIPT),
+            repo_relative(PREFLIGHT_SCRIPT),
             "preflight",
             "--pdf",
-            *(str(path) for path in statements),
+            *(repo_relative(path) for path in statements),
             "--tax-year",
             str(TAX_YEAR),
             "--scope",
             "one-account",
             "--require-institution",
             "--out",
-            str(happy_preflight),
+            repo_relative(happy_preflight),
             "--csv",
-            str(happy_preflight_csv),
+            repo_relative(happy_preflight_csv),
         ],
         raw_transcript,
     )
     happy_preflight_data = read_json(happy_preflight)
+    require(happy_preflight_data.get("schema_version") == "1.3", "Happy preflight did not use current schema 1.3.")
     require(happy_preflight_data.get("status") == "review-required", "Happy preflight should stop for issuer review.")
     require(gate_codes(happy_preflight_data) == ["unknown-institution"], "Unexpected happy-path preflight gates.")
     require(happy_preflight_data.get("currency", {}).get("code") == "COP", "Preflight did not corroborate COP.")
@@ -587,24 +654,25 @@ def run_demo(artifact_root: Path, media_root: Path, *, skip_media: bool) -> None
     run_command(
         [
             sys.executable,
-            str(FBAR_SCRIPT),
+            repo_relative(FBAR_SCRIPT),
             "extract-account",
             "--pdf",
-            *(str(path) for path in statements),
+            *(repo_relative(path) for path in statements),
             "--tax-year",
             str(TAX_YEAR),
             "--preflight-json",
-            str(happy_handoff),
+            repo_relative(happy_handoff),
             "--account-id",
             SYNTHETIC_ACCOUNT_ID,
             "--out",
-            str(ledger),
+            repo_relative(ledger),
             "--csv",
-            str(ledger_csv),
+            repo_relative(ledger_csv),
         ],
         raw_transcript,
     )
     ledger_data = read_json(ledger)
+    require(ledger_data.get("schema_version") == "1.4", "Happy ledger did not use current schema 1.4.")
     coverage = ledger_data.get("coverage")
     require(isinstance(coverage, dict), "Happy ledger has no coverage card.")
     require(coverage.get("complete_year") is True, "Happy ledger does not cover the complete year.")
@@ -647,7 +715,7 @@ def run_demo(artifact_root: Path, media_root: Path, *, skip_media: bool) -> None
     run_command(
         [
             sys.executable,
-            str(FX_SCRIPT),
+            repo_relative(FX_SCRIPT),
             "lookup",
             "--currency",
             "COP",
@@ -656,9 +724,9 @@ def run_demo(artifact_root: Path, media_root: Path, *, skip_media: bool) -> None
             "--retrieved",
             FIXED_RETRIEVAL_DATE,
             "--api-file",
-            str(TREASURY_FIXTURE),
+            repo_relative(TREASURY_FIXTURE),
             "--output-root",
-            str(fx_root),
+            repo_relative(fx_root),
         ],
         raw_transcript,
     )
@@ -681,23 +749,29 @@ def run_demo(artifact_root: Path, media_root: Path, *, skip_media: bool) -> None
     run_command(
         [
             sys.executable,
-            str(FBAR_SCRIPT),
+            repo_relative(FBAR_SCRIPT),
             "confirm-account",
             "--input",
-            str(ledger),
+            repo_relative(ledger),
             "--balances-confirmed",
             "--fx-workpaper-json",
-            str(fx_workpaper),
+            repo_relative(fx_workpaper),
             "--out",
-            str(confirmed),
+            repo_relative(confirmed),
             "--csv",
-            str(confirmed_csv),
+            repo_relative(confirmed_csv),
         ],
         raw_transcript,
     )
     confirmed_data = read_json(confirmed)
     require(confirmed_data.get("status") == "confirmed", "Happy ledger was not confirmed.")
+    require(confirmed_data.get("schema_version") == "1.4", "Confirmed ledger did not use current schema 1.4.")
     emit("[6/9] Reviewed synthetic ledger confirmed with retained FX dependency")
+
+    # Public samples replace checkout-specific paths before the final packet is
+    # sealed. The aggregate then binds the exact published ledger/workpaper
+    # bytes, so postflight verification remains valid after cloning or copying.
+    sanitize_published_text_artifacts(happy, ((happy_preflight, happy_handoff),))
 
     summary_json = happy / "fbar-2025-summary.json"
     summary_csv = happy / "fbar-2025-summary.csv"
@@ -705,29 +779,73 @@ def run_demo(artifact_root: Path, media_root: Path, *, skip_media: bool) -> None
     run_command(
         [
             sys.executable,
-            str(FBAR_SCRIPT),
+            repo_relative(FBAR_SCRIPT),
             "aggregate",
             "--account-ledger",
-            str(confirmed),
+            repo_relative(confirmed),
             "--out",
-            str(summary_json),
+            repo_relative(summary_json),
             "--csv",
-            str(summary_csv),
+            repo_relative(summary_csv),
             "--pdf",
-            str(summary_pdf),
+            repo_relative(summary_pdf),
+            "--packet-root",
+            repo_relative(happy),
         ],
         raw_transcript,
     )
+    postflight = happy / "fbar-2025-summary-postflight.json"
+    verification_json = happy / "fbar-2025-summary-verification.json"
     summary_data = read_json(summary_json)
     daily = summary_data.get("daily_threshold")
     maximum_view = summary_data.get("fincen_max_value_view")
     require(isinstance(daily, dict) and daily.get("answer") == "no", "Unexpected happy daily-threshold answer.")
     require(
+        summary_data.get("schema_version") == "1.4"
+        and summary_data.get("integrity_status") == "pass"
+        and summary_data.get("evidence_status") == "sufficient",
+        "Happy summary did not retain the current evidence/integrity contract.",
+    )
+    require(
+        daily.get("answer_lower_bound") == "no"
+        and daily.get("answer_upper_bound") == "no"
+        and daily.get("answer_sensitivity") == "not-sensitive"
+        and daily.get("time_alignment") == "date-only-upper-bound",
+        "Happy summary did not retain its expected interval/time-alignment result.",
+    )
+    require(
         isinstance(maximum_view, dict) and maximum_view.get("exceeded") is False,
         "Unexpected happy maximum-value answer.",
     )
-    require(summary_csv.is_file() and summary_pdf.is_file(), "Aggregate did not write JSON/CSV/PDF outputs.")
-    emit("[7/9] Summary: daily threshold NO; FinCEN maximum-value view NO")
+    require(
+        maximum_view.get("rounding_policy") == "round-each-account-up-then-sum"
+        and maximum_view.get("rounding_policy_dependency") is False,
+        "Happy summary did not retain its expected rounding policy.",
+    )
+    require(
+        summary_csv.is_file() and summary_pdf.is_file() and postflight.is_file(),
+        "Aggregate did not write JSON/CSV/PDF/postflight outputs.",
+    )
+    run_command(
+        [
+            sys.executable,
+            repo_relative(FBAR_SCRIPT),
+            "verify-packet",
+            "--summary",
+            repo_relative(summary_json),
+            "--manifest",
+            repo_relative(postflight),
+            "--out",
+            repo_relative(verification_json),
+        ],
+        raw_transcript,
+    )
+    verification_data = read_json(verification_json)
+    require(
+        verification_data.get("integrity_status") == "pass" and verification_data.get("failures") == [],
+        "Published happy packet did not pass postflight verification.",
+    )
+    emit("[7/9] Summary: daily threshold NO; postflight integrity PASS")
 
     omitted = statements[1]
     refusal_statements = [statements[0], statements[2], statements[3]]
@@ -736,25 +854,26 @@ def run_demo(artifact_root: Path, media_root: Path, *, skip_media: bool) -> None
     refusal_preflight_process = run_command(
         [
             sys.executable,
-            str(PREFLIGHT_SCRIPT),
+            repo_relative(PREFLIGHT_SCRIPT),
             "preflight",
             "--pdf",
-            *(str(path) for path in refusal_statements),
+            *(repo_relative(path) for path in refusal_statements),
             "--tax-year",
             str(TAX_YEAR),
             "--scope",
             "one-account",
             "--require-institution",
             "--out",
-            str(refusal_preflight),
+            repo_relative(refusal_preflight),
             "--csv",
-            str(refusal_preflight_csv),
+            repo_relative(refusal_preflight_csv),
             "--exit-nonzero-on-review",
         ],
         raw_transcript,
         expected_codes=(3,),
     )
     refusal_preflight_data = read_json(refusal_preflight)
+    require(refusal_preflight_data.get("schema_version") == "1.3", "Refusal preflight did not use current schema 1.3.")
     refusal_gates = gate_codes(refusal_preflight_data)
     require("possible-missing-statement-period" in refusal_gates, "Omitted Q2 did not trigger the missing-period gate.")
     require("unknown-institution" in refusal_gates, "Refusal preflight did not retain the issuer review gate.")
@@ -766,24 +885,25 @@ def run_demo(artifact_root: Path, media_root: Path, *, skip_media: bool) -> None
     run_command(
         [
             sys.executable,
-            str(FBAR_SCRIPT),
+            repo_relative(FBAR_SCRIPT),
             "extract-account",
             "--pdf",
-            *(str(path) for path in refusal_statements),
+            *(repo_relative(path) for path in refusal_statements),
             "--tax-year",
             str(TAX_YEAR),
             "--preflight-json",
-            str(refusal_handoff),
+            repo_relative(refusal_handoff),
             "--account-id",
             SYNTHETIC_ACCOUNT_ID,
             "--out",
-            str(refusal_ledger),
+            repo_relative(refusal_ledger),
             "--csv",
-            str(refusal_ledger_csv),
+            repo_relative(refusal_ledger_csv),
         ],
         raw_transcript,
     )
     refusal_ledger_data = read_json(refusal_ledger)
+    require(refusal_ledger_data.get("schema_version") == "1.4", "Refusal ledger did not use current schema 1.4.")
     sufficiency = refusal_ledger_data.get("data_sufficiency")
     require(isinstance(sufficiency, dict), "Refusal ledger has no sufficiency card.")
     refusal_daily = sufficiency.get("daily_threshold")
@@ -809,15 +929,15 @@ def run_demo(artifact_root: Path, media_root: Path, *, skip_media: bool) -> None
     refused_process = run_command(
         [
             sys.executable,
-            str(FBAR_SCRIPT),
+            repo_relative(FBAR_SCRIPT),
             "confirm-account",
             "--input",
-            str(refusal_ledger),
+            repo_relative(refusal_ledger),
             "--balances-confirmed",
             "--fx-workpaper-json",
-            str(fx_workpaper),
+            repo_relative(fx_workpaper),
             "--out",
-            str(refused_output),
+            repo_relative(refused_output),
         ],
         raw_transcript,
         expected_codes=(2,),
@@ -846,8 +966,10 @@ def run_demo(artifact_root: Path, media_root: Path, *, skip_media: bool) -> None
     )
     emit("[8/9] Omitted Q2: INSUFFICIENT RECORDS; confirm-account REFUSED")
 
+    sanitize_published_text_artifacts(refusal, ((refusal_preflight, refusal_handoff),))
+
     manifest = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "demo": "Synthetic FBAR proof workflow",
         "demo_only": True,
         "tax_year": TAX_YEAR,
@@ -866,6 +988,14 @@ def run_demo(artifact_root: Path, media_root: Path, *, skip_media: bool) -> None
             "summary_json": repo_relative(summary_json),
             "summary_csv": repo_relative(summary_csv),
             "summary_pdf": repo_relative(summary_pdf),
+            "postflight_manifest": repo_relative(postflight),
+            "verification_json": repo_relative(verification_json),
+            "integrity_status": verification_data.get("integrity_status"),
+            "evidence_status": summary_data.get("evidence_status"),
+            "answer_lower_bound": daily.get("answer_lower_bound"),
+            "answer_upper_bound": daily.get("answer_upper_bound"),
+            "time_alignment": daily.get("time_alignment"),
+            "rounding_policy": maximum_view.get("rounding_policy"),
             "fx_workpaper": repo_relative(fx_workpaper),
         },
         "refusal_path": {
@@ -877,9 +1007,10 @@ def run_demo(artifact_root: Path, media_root: Path, *, skip_media: bool) -> None
             "refusal_json": repo_relative(refusal_record),
         },
         "publication_sanitization": {
-            "applied_after_full_pipeline_validation": True,
+            "applied_before_final_packet_seal": True,
             "absolute_checkout_prefix_replaced_with": PUBLISHED_REPO_PREFIX,
             "reviewed_handoff_source_hashes_rebound": True,
+            "postflight_binds_published_bytes": True,
         },
     }
     manifest_path = DEMO_ROOT / "demo-manifest.json"
@@ -898,7 +1029,7 @@ def run_demo(artifact_root: Path, media_root: Path, *, skip_media: bool) -> None
         terminal_gif = media_root / TERMINAL_GIF_ASSET
         recording_lines = [
             *console_lines,
-            "[9/9] PASS - JSON, CSV, PDF, screenshots, recording, and checksums retained",
+            "[9/9] PASS - portable postflight, JSON, CSV, PDF, media, and checksums retained",
             f"      {repo_relative(summary_pdf)}",
             f"      {repo_relative(terminal_gif)} (36 seconds)",
         ]
@@ -906,14 +1037,9 @@ def run_demo(artifact_root: Path, media_root: Path, *, skip_media: bool) -> None
         create_terminal_gif(recording_lines, terminal_gif, poster_output=terminal_poster)
         media_paths.extend([summary_pdf_asset, summary_png, fx_png, terminal_gif, terminal_poster])
 
-    sanitize_published_text_artifacts(
-        artifact_root,
-        ((happy_preflight, happy_handoff), (refusal_preflight, refusal_handoff)),
-    )
-
     final_console_lines = [
         *console_lines,
-        "[9/9] PASS - JSON, CSV, PDF, screenshots, recording, and checksums retained",
+        "[9/9] PASS - portable postflight, JSON, CSV, PDF, media, and checksums retained",
         f"      {repo_relative(summary_pdf)}",
     ]
     if not skip_media:
@@ -939,7 +1065,7 @@ def run_demo(artifact_root: Path, media_root: Path, *, skip_media: bool) -> None
         checksum_destinations.append(media_root / CHECKSUM_ASSET)
     write_checksums(checksum_inputs, checksum_destinations)
 
-    emit("[9/9] PASS - JSON, CSV, PDF, screenshots, recording, and checksums retained")
+    emit("[9/9] PASS - portable postflight, JSON, CSV, PDF, media, and checksums retained")
     emit(f"      {repo_relative(summary_pdf)}")
     if not skip_media:
         emit(f"      {repo_relative(media_root / TERMINAL_GIF_ASSET)} (36 seconds)")
@@ -968,22 +1094,28 @@ def run_ephemeral_check() -> None:
                 f"stderr:\n{process.stderr.rstrip()}"
             )
         manifest = read_json(scratch / "demo-manifest.json")
-        happy = manifest.get("happy_path")
-        refusal = manifest.get("refusal_path")
+        validate_demo_contract(manifest, "Ephemeral")
+
+        committed_manifest = read_json(DEMO_ROOT / "demo-manifest.json")
+        validate_demo_contract(committed_manifest, "Committed")
+        for relative, expected_schema in (
+            ("artifacts/happy-path/statement-preflight.json", "1.3"),
+            ("artifacts/happy-path/statement-preflight-reviewed.json", "1.3"),
+            ("artifacts/happy-path/account-confirmed.json", "1.4"),
+            ("artifacts/refusal-path/statement-preflight.json", "1.3"),
+            ("artifacts/refusal-path/account-ledger.json", "1.4"),
+        ):
+            require(
+                read_json(DEMO_ROOT / relative).get("schema_version") == expected_schema,
+                f"Committed demo artifact {relative} is stale; regenerate the demo.",
+            )
+        checksum_text = (DEMO_ROOT / CHECKSUM_ASSET).read_text(encoding="utf-8")
         require(
-            isinstance(happy, dict)
-            and happy.get("daily_threshold") == "no"
-            and happy.get("fincen_maximum_value_view") == "no",
-            "Ephemeral happy path did not preserve both expected no results.",
+            "fbar-2025-summary-postflight.json" in checksum_text
+            and "fbar-2025-summary-verification.json" in checksum_text,
+            "Committed demo checksum manifest does not cover the postflight evidence.",
         )
-        require(
-            isinstance(refusal, dict)
-            and refusal.get("daily_threshold") == "insufficient-records"
-            and refusal.get("maximum_account_value") == "not-determinable"
-            and refusal.get("confirmation_written") is False,
-            "Ephemeral refusal path did not fail closed.",
-        )
-        print("PASS: ephemeral happy path and missing-quarter refusal path")
+        print("PASS: ephemeral workflow and committed demo freshness/postflight contract")
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:

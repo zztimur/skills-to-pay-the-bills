@@ -27,6 +27,17 @@ FinCEN line-item instructions describe a maximum account value process:
 
 This skill reports both the day-by-day aggregate view and the FinCEN maximum-value view so disagreements are visible.
 
+## Evidence And Computation Limits
+
+Keep policy, evidence, and arithmetic separate:
+
+- `formal-extracted` means a supported statement parser captured source-bound balances; it does not decide reportability.
+- `diagnostic-reconstructed` means labelled opening balance plus signed movements reconciled to a labelled close; it remains a workpaper reconstruction.
+- `user-attested-*` means the user/preparer confirmed values from certificate or other evidence; it is never relabelled as formal extraction.
+- An undated annual maximum has no defensible daily placement. Aggregate it as a possible daily upper bound and report `review-required` when it can change the threshold answer.
+- Statement dates do not establish intraday simultaneity. Label daily combinations `date-only-upper-bound` unless stronger timestamp evidence exists.
+- Compare exact converted values to `$10,000` before display rounding. Exactly `$10,000` is not an exceedance. Show whole-dollar maximum values separately and disclose when rounding policy changes a displayed result.
+
 ## FX Dependency Note
 
 This skill consumes FX proof workpapers only from its `get-year-end-fx-rate` companion skill and must not duplicate FX sourcing:
@@ -42,6 +53,7 @@ Use:
 - "Daily threshold exceeded" / "No daily threshold crossing found in reviewed records."
 - "FinCEN maximum-value view exceeded" / "FinCEN maximum-value view not exceeded."
 - "Insufficient records for a confident daily no" when coverage is incomplete.
+- "Review required: known daily total does not exceed $10,000, but the possible upper bound does" when undated evidence is answer-sensitive.
 - "Support artifact" or "summary" instead of "official form."
 
 Avoid:

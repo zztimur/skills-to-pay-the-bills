@@ -9,6 +9,17 @@ changelogs, or GitHub Releases.
 The current repository version lives in [`VERSION`](VERSION), is tagged
 `vX.Y.Z`, and has one matching GitHub Release.
 
+## [1.6.0] - 2026-08-26
+
+### Changed
+
+- `fbar-threshold-check`: add currency-agnostic geometry parsing, reconciled movement reconstruction, explicit formal/reconstructed/attested evidence, interval-aware aggregation, and postflight verification.
+- `fbar-threshold-check`: make postflight packets relocatable, require the exact bound artifact set, validate nested FX proof, and recompute threshold semantics from retained ledger bytes.
+- `statement-intake-preflight`: add compact-period and split-account parsing, typed date roles, certificate-date review, migration/reissue attestations, and month-resolution opening evidence.
+- `get-year-end-fx-rate`: classify network/TLS failures, add deterministic fetch plans, and prove read-only installed-runtime behavior.
+- `statements-to-interest`: accept and validate the additive preflight schema while retaining legacy handoff compatibility.
+- `repository`: gate CI on the real-run postmortem regressions and publish a current schema 1.4 synthetic packet with retained postflight verification.
+
 ## [1.5.2] - 2026-08-14
 
 ### Changed

@@ -1,4 +1,4 @@
 interface:
   display_name: "Statement Intake Preflight"
-  short_description: "Preflight statement PDFs for tax support"
-  default_prompt: "Use $statement-intake-preflight to preflight these statement PDFs for one tax year, write review JSON/CSV artifacts, and identify any downstream review gate."
+  short_description: "Preflight statements and certificate evidence"
+  default_prompt: "Use $statement-intake-preflight to preflight these statement or certificate PDFs for one tax year, preserve date roles and source bindings, and identify every downstream review gate."

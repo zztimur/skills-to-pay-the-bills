@@ -45,7 +45,7 @@ EXCLUSION_RESOLUTION_SCHEMA_VERSION = "1.0"
 MIN_TEXT_CHARS = 40
 PREFLIGHT_SKILL = "statement-intake-preflight"
 SKILL_ROOTS_ENV = "STATEMENTS_TO_INTEREST_SKILL_ROOTS"
-PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0", "1.1", "1.2"}
+PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0", "1.1", "1.2", "1.3"}
 PREFLIGHT_READY_STATUS = "ready-for-domain-extraction"
 PREFLIGHT_REVIEWED_HANDOFF_STATUS = "reviewed-for-domain-extraction"
 PREFLIGHT_REVIEWED_HANDOFF_TYPE = "reviewed-handoff"
@@ -1026,7 +1026,7 @@ def write_csv(rows: list[dict], path: Path) -> None:
         "notes",
     ]
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         for row in rows:
             writer.writerow({field: row.get(field, "") for field in fields})
@@ -1331,7 +1331,7 @@ def _normalized_period_interval(value: object, source_file: str, aggregate: bool
 
 def preflight_v12_period_contract(source: dict) -> tuple[list[dict], list[dict]]:
     """Validate schema-1.2 source period evidence and its aggregate mirror."""
-    if str(source.get("schema_version") or "") != "1.2":
+    if str(source.get("schema_version") or "") not in {"1.2", "1.3"}:
         return [], []
     raw_files, coverage = source.get("statement_files"), source.get("coverage_hints")
     if not isinstance(raw_files, list) or not raw_files or not isinstance(coverage, dict):
@@ -1424,7 +1424,7 @@ def preflight_v12_account_opening_evidence(periods: list[dict], tax_year: int) -
 def validate_reviewed_v12_period_resolutions(resolutions: dict, source: dict, source_sha256: str, gate_codes: set[str]) -> None:
     """Require exact period and account-opening reviewer decisions for schema 1.2."""
     periods, unresolved = preflight_v12_period_contract(source)
-    if str(source.get("schema_version") or "") != "1.2":
+    if str(source.get("schema_version") or "") not in {"1.2", "1.3"}:
         return
     try:
         tax_year = int(source.get("tax_year", 0))
@@ -1455,6 +1455,20 @@ def validate_reviewed_v12_period_resolutions(resolutions: dict, source: dict, so
             raise SystemExit("Reviewed handoff account-opening resolution does not exactly match source coverage evidence.")
     elif opening != {"status": "not-required"}:
         raise SystemExit("Reviewed handoff has an invalid account-opening resolution.")
+    opening_month = resolutions.get("account_opened_month")
+    if opening_month is None and str(source.get("schema_version") or "") != "1.3":
+        return
+    if not isinstance(opening_month, dict):
+        raise SystemExit("Reviewed handoff account-opening-month resolution must be an object.")
+    if opening.get("status") == "user-confirmed" and opening_month.get("status") == "user-confirmed":
+        raise SystemExit("Reviewed handoff cannot confirm both an exact opening date and an opening month.")
+    if opening_month.get("status") == "user-confirmed":
+        expected_month = str(evidence["first_source_period"]["start"])[:7] if opening_gate and evidence else None
+        expected = {"status": "user-confirmed", "month": expected_month, **evidence, "resolved_gate_codes": ["possible-missing-statement-period"], "source_preflight_sha256": source_sha256} if expected_month and evidence else None
+        if opening_month != expected:
+            raise SystemExit("Reviewed handoff opening-month resolution does not exactly match source coverage evidence.")
+    elif opening_month != {"status": "not-required"}:
+        raise SystemExit("Reviewed handoff has an invalid account-opening-month resolution.")
 
 
 def validate_reviewed_statement_year_resolution(

@@ -44,6 +44,7 @@ python3 statements-to-interest/scripts/statements_to_interest.py self-test
 python3 statement-intake-preflight/scripts/statement_intake_preflight.py smoke-test
 python3 statement-intake-preflight/tests/run_pressure_suite.py
 python3 fbar-threshold-check/tests/run_preflight_integration.py
+python3 fbar-threshold-check/tests/run_postmortem_regressions.py
 python3 examples/fbar-proof-demo/run_demo.py --check
 cmp examples/fbar-proof-demo/checksums.sha256 docs/assets/demo/checksums.sha256
 sha256sum --check examples/fbar-proof-demo/checksums.sha256

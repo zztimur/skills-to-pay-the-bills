@@ -22,6 +22,8 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 from urllib.parse import urlparse
 
+sys.dont_write_bytecode = True
+
 from _workpaper import RateError, WorkpaperSpec, build_workpaper, final_text
 
 getcontext().prec = 28

@@ -10,16 +10,23 @@ import hashlib
 import http.client
 import io
 import json
+import os
 import re
+import socket
+import ssl
 import sys
 import tempfile
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, getcontext
 from pathlib import Path
 from typing import Iterable
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
+
+# Normal execution must not mutate an installed Skill tree with __pycache__.
+# Set this before importing the vendored helper.
+sys.dont_write_bytecode = True
 
 from _workpaper import (
     RateError,
@@ -486,14 +493,38 @@ def load_json_text(query_url: str, api_file: str | None) -> tuple[str, str, str]
         headers={"User-Agent": "get-year-end-fx-rate/1.0 (+FBAR support workpaper)"},
     )
     try:
-        with urlopen(request, timeout=30) as response:
+        with urlopen(request, timeout=30, context=verified_ssl_context()) as response:
             charset = response.headers.get_content_charset() or "utf-8"
             return response.read().decode(charset, errors="replace"), query_url, "live Treasury/Fiscal Data API fetch"
     except (URLError, OSError, http.client.HTTPException) as exc:
+        failure_class = classify_fetch_failure(exc)
         raise RateError(
-            f"Could not fetch Treasury/Fiscal Data API: {exc}. Save the raw JSON response for this exact query and rerun with --api-file: {query_url}",
+            f"Could not fetch Treasury/Fiscal Data API (fetch_failure_class={failure_class}): {exc}. "
+            f"Save the raw JSON response for this exact query and rerun with --api-file: {query_url}",
             5,
         ) from exc
+
+
+def verified_ssl_context() -> ssl.SSLContext:
+    """Use a configured CA bundle when available; never disable verification."""
+    for variable in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+        candidate = os.environ.get(variable)
+        if candidate and Path(candidate).is_file():
+            return ssl.create_default_context(cafile=candidate)
+    return ssl.create_default_context()
+
+
+def classify_fetch_failure(exc: BaseException) -> str:
+    if isinstance(exc, HTTPError):
+        return "http-error"
+    reason = exc.reason if isinstance(exc, URLError) else exc
+    if isinstance(reason, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(reason):
+        return "tls-certificate-verification"
+    if isinstance(reason, socket.gaierror):
+        return "dns-unavailable"
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return "timeout"
+    return "network-unavailable"
 
 
 def parse_json_payload(json_text: str) -> dict[str, object]:
@@ -873,6 +904,30 @@ def command_map_check(args: argparse.Namespace) -> int:
             return 4
     else:
         print("All parsed rows are mapped or explicitly classified.")
+    return 0
+
+
+def command_fetch_plan(args: argparse.Namespace) -> int:
+    ensure_year_end_has_occurred(args.year)
+    if args.mode == "lookup":
+        if not args.currency:
+            raise RateError("fetch-plan --mode lookup requires --currency.", 2)
+        code = normalize_currency(args.currency)
+        url = treasury_query_url(code, args.year, args.api_url)
+        print(f"fetch_failure_class=not-attempted")
+        print(f"query_url={url}")
+        print(
+            "offline_replay="
+            f"{Path(__file__).name} lookup --currency {code} --year {args.year} --api-file <raw-json> --output-root <output-root>"
+        )
+    else:
+        url = treasury_rows_url(args.year, args.api_url)
+        print("fetch_failure_class=not-attempted")
+        print(f"query_url={url}")
+        print(
+            "offline_replay="
+            f"{Path(__file__).name} map-check --year {args.year} --api-file <raw-json> --strict"
+        )
     return 0
 
 
@@ -1260,6 +1315,18 @@ def command_self_test(_args: argparse.Namespace) -> int:
         with contextlib.redirect_stdout(io.StringIO()):
             assert command_manual(allowed_unknown_args) == 0
 
+    assert classify_fetch_failure(URLError(socket.gaierror(-2, "name resolution failed"))) == "dns-unavailable"
+    assert classify_fetch_failure(URLError(ssl.SSLCertVerificationError("certificate verify failed"))) == "tls-certificate-verification"
+    assert classify_fetch_failure(URLError(TimeoutError("timed out"))) == "timeout"
+    assert classify_fetch_failure(HTTPError("https://example.invalid", 503, "unavailable", {}, None)) == "http-error"
+    fetch_output = io.StringIO()
+    with contextlib.redirect_stdout(fetch_output):
+        command_fetch_plan(
+            argparse.Namespace(currency="COP", year=2025, mode="lookup", api_url=TREASURY_API_URL)
+        )
+    assert "fetch_failure_class=not-attempted" in fetch_output.getvalue()
+    assert "record_date%3Aeq%3A2025-12-31" in fetch_output.getvalue()
+
     print("self-test passed")
     return 0
 
@@ -1307,6 +1374,16 @@ def build_parser() -> argparse.ArgumentParser:
     map_check.add_argument("--api-file", help="Use a local JSON response instead of fetching the API.")
     map_check.add_argument("--strict", action="store_true", help="Exit nonzero when unmapped Treasury rows are found.")
     map_check.set_defaults(func=command_map_check)
+
+    fetch_plan = subparsers.add_parser(
+        "fetch-plan",
+        help="Print the exact strict-TLS Treasury query and deterministic --api-file replay command without making a network request.",
+    )
+    fetch_plan.add_argument("--year", required=True, type=_year_arg, help="Calendar year to query (1900-2100).")
+    fetch_plan.add_argument("--mode", choices=["lookup", "map-check"], default="lookup")
+    fetch_plan.add_argument("--currency", help="Required ISO code or unambiguous currency name for lookup mode.")
+    fetch_plan.add_argument("--api-url", default=TREASURY_API_URL, help="Treasury/Fiscal Data API endpoint.")
+    fetch_plan.set_defaults(func=command_fetch_plan)
 
     self_test = subparsers.add_parser("self-test", help="Run dependency-free parser/workpaper tests.")
     self_test.set_defaults(func=command_self_test)

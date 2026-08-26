@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "skill": "statement-intake-preflight",
   "status": "review-required",
   "tax_year": 2025,
@@ -7,7 +7,7 @@
   "requirements": {
     "institution_required": true
   },
-  "created_at": "2026-07-18T10:22:06Z",
+  "created_at": "2026-08-26T16:22:52Z",
   "profile": {
     "primary_institution": "",
     "statement_titles": [
@@ -21,7 +21,7 @@
   },
   "statement_files": [
     {
-      "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+      "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
       "resolved_file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
       "is_pdf": true,
       "page_count": 1,
@@ -100,6 +100,16 @@
           }
         }
       ],
+      "parser_hints": [
+        {
+          "kind": "transaction-like-table",
+          "page": 1,
+          "header_lines": [
+            7
+          ],
+          "dated_monetary_row_count": 6
+        }
+      ],
       "period_intervals": [
         {
           "start": "2025-01-01",
@@ -162,7 +172,7 @@
       ]
     },
     {
-      "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+      "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
       "resolved_file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
       "is_pdf": true,
       "page_count": 1,
@@ -241,6 +251,16 @@
           }
         }
       ],
+      "parser_hints": [
+        {
+          "kind": "transaction-like-table",
+          "page": 1,
+          "header_lines": [
+            7
+          ],
+          "dated_monetary_row_count": 6
+        }
+      ],
       "period_intervals": [
         {
           "start": "2025-04-01",
@@ -303,7 +323,7 @@
       ]
     },
     {
-      "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+      "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
       "resolved_file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
       "is_pdf": true,
       "page_count": 1,
@@ -382,6 +402,16 @@
           }
         }
       ],
+      "parser_hints": [
+        {
+          "kind": "transaction-like-table",
+          "page": 1,
+          "header_lines": [
+            7
+          ],
+          "dated_monetary_row_count": 6
+        }
+      ],
       "period_intervals": [
         {
           "start": "2025-07-01",
@@ -444,7 +474,7 @@
       ]
     },
     {
-      "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+      "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
       "resolved_file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
       "is_pdf": true,
       "page_count": 1,
@@ -521,6 +551,16 @@
             "page": 1,
             "line": 12
           }
+        }
+      ],
+      "parser_hints": [
+        {
+          "kind": "transaction-like-table",
+          "page": 1,
+          "header_lines": [
+            7
+          ],
+          "dated_monetary_row_count": 6
         }
       ],
       "period_intervals": [
@@ -640,7 +680,7 @@
           "year": 2025
         },
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
           "page": 1,
           "line": 6
         }
@@ -658,7 +698,7 @@
           "year": 2025
         },
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
           "page": 1,
           "line": 6
         }
@@ -676,7 +716,7 @@
           "year": 2025
         },
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
           "page": 1,
           "line": 6
         }
@@ -694,7 +734,7 @@
           "year": 2025
         },
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
           "page": 1,
           "line": 6
         }
@@ -706,7 +746,7 @@
         "date": "2025-01-01",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
           "page": 1,
           "line": 8
         }
@@ -716,7 +756,7 @@
         "date": "2025-01-04",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
           "page": 1,
           "line": 9
         }
@@ -726,7 +766,7 @@
         "date": "2025-01-31",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
           "page": 1,
           "line": 10
         }
@@ -736,7 +776,7 @@
         "date": "2025-02-28",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
           "page": 1,
           "line": 11
         }
@@ -746,7 +786,7 @@
         "date": "2025-03-31",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
           "page": 1,
           "line": 12
         }
@@ -756,7 +796,7 @@
         "date": "2025-04-01",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
           "page": 1,
           "line": 8
         }
@@ -766,7 +806,7 @@
         "date": "2025-04-30",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
           "page": 1,
           "line": 9
         }
@@ -776,7 +816,7 @@
         "date": "2025-05-31",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
           "page": 1,
           "line": 10
         }
@@ -786,7 +826,7 @@
         "date": "2025-06-15",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
           "page": 1,
           "line": 11
         }
@@ -796,7 +836,7 @@
         "date": "2025-06-30",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
           "page": 1,
           "line": 12
         }
@@ -806,7 +846,7 @@
         "date": "2025-07-01",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
           "page": 1,
           "line": 8
         }
@@ -816,7 +856,7 @@
         "date": "2025-07-31",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
           "page": 1,
           "line": 9
         }
@@ -826,7 +866,7 @@
         "date": "2025-08-31",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
           "page": 1,
           "line": 10
         }
@@ -836,7 +876,7 @@
         "date": "2025-09-15",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
           "page": 1,
           "line": 11
         }
@@ -846,7 +886,7 @@
         "date": "2025-09-30",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
           "page": 1,
           "line": 12
         }
@@ -856,7 +896,7 @@
         "date": "2025-10-01",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
           "page": 1,
           "line": 8
         }
@@ -866,7 +906,7 @@
         "date": "2025-10-10",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
           "page": 1,
           "line": 9
         }
@@ -876,7 +916,7 @@
         "date": "2025-10-31",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
           "page": 1,
           "line": 10
         }
@@ -886,7 +926,7 @@
         "date": "2025-11-30",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
           "page": 1,
           "line": 11
         }
@@ -896,10 +936,48 @@
         "date": "2025-12-31",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
           "page": 1,
           "line": 12
         }
+      }
+    ],
+    "parser_hints": [
+      {
+        "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+        "kind": "transaction-like-table",
+        "page": 1,
+        "header_lines": [
+          7
+        ],
+        "dated_monetary_row_count": 6
+      },
+      {
+        "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+        "kind": "transaction-like-table",
+        "page": 1,
+        "header_lines": [
+          7
+        ],
+        "dated_monetary_row_count": 6
+      },
+      {
+        "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+        "kind": "transaction-like-table",
+        "page": 1,
+        "header_lines": [
+          7
+        ],
+        "dated_monetary_row_count": 6
+      },
+      {
+        "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+        "kind": "transaction-like-table",
+        "page": 1,
+        "header_lines": [
+          7
+        ],
+        "dated_monetary_row_count": 6
       }
     ],
     "period_intervals": [
@@ -908,12 +986,12 @@
         "end": "2025-03-31",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
           "page": 1,
           "line": 6
         },
         "end_source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
           "page": 1,
           "line": 6
         }
@@ -923,12 +1001,12 @@
         "end": "2025-06-30",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
           "page": 1,
           "line": 6
         },
         "end_source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
           "page": 1,
           "line": 6
         }
@@ -938,12 +1016,12 @@
         "end": "2025-09-30",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
           "page": 1,
           "line": 6
         },
         "end_source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
           "page": 1,
           "line": 6
         }
@@ -953,12 +1031,12 @@
         "end": "2025-12-31",
         "confidence": "high",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
           "page": 1,
           "line": 6
         },
         "end_source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
           "page": 1,
           "line": 6
         }
@@ -971,7 +1049,7 @@
         "year": 2025,
         "classification": "opening-or-prior-balance",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
           "page": 1,
           "line": 8
         },
@@ -981,7 +1059,7 @@
         "year": 2025,
         "classification": "opening-or-prior-balance",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
           "page": 1,
           "line": 8
         },
@@ -991,7 +1069,7 @@
         "year": 2025,
         "classification": "opening-or-prior-balance",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
           "page": 1,
           "line": 8
         },
@@ -1001,11 +1079,293 @@
         "year": 2025,
         "classification": "opening-or-prior-balance",
         "source_ref": {
-          "file": "${REPO_ROOT}/examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
           "page": 1,
           "line": 8
         },
         "date": "2025-10-01"
+      }
+    ],
+    "date_evidence": [
+      {
+        "role": "statement-period",
+        "start": "2025-01-01",
+        "end": "2025-03-31",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 6
+        },
+        "end_source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 6
+        }
+      },
+      {
+        "role": "statement-period",
+        "start": "2025-04-01",
+        "end": "2025-06-30",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "page": 1,
+          "line": 6
+        },
+        "end_source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "page": 1,
+          "line": 6
+        }
+      },
+      {
+        "role": "statement-period",
+        "start": "2025-07-01",
+        "end": "2025-09-30",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 6
+        },
+        "end_source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 6
+        }
+      },
+      {
+        "role": "statement-period",
+        "start": "2025-10-01",
+        "end": "2025-12-31",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 6
+        },
+        "end_source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 6
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-01-01",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 8
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-01-04",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 9
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-01-31",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 10
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-02-28",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 11
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-03-31",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 12
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-04-01",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "page": 1,
+          "line": 8
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-04-30",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "page": 1,
+          "line": 9
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-05-31",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "page": 1,
+          "line": 10
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-06-15",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "page": 1,
+          "line": 11
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-06-30",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "page": 1,
+          "line": 12
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-07-01",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 8
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-07-31",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 9
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-08-31",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 10
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-09-15",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 11
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-09-30",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 12
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-10-01",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 8
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-10-10",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 9
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-10-31",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 10
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-11-30",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 11
+        }
+      },
+      {
+        "role": "movement",
+        "date": "2025-12-31",
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 12
+        }
+      },
+      {
+        "role": "opening-boundary",
+        "date": "2025-01-01",
+        "year": 2025,
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf",
+          "page": 1,
+          "line": 8
+        }
+      },
+      {
+        "role": "opening-boundary",
+        "date": "2025-04-01",
+        "year": 2025,
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf",
+          "page": 1,
+          "line": 8
+        }
+      },
+      {
+        "role": "opening-boundary",
+        "date": "2025-07-01",
+        "year": 2025,
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf",
+          "page": 1,
+          "line": 8
+        }
+      },
+      {
+        "role": "opening-boundary",
+        "date": "2025-10-01",
+        "year": 2025,
+        "source_ref": {
+          "file": "examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf",
+          "page": 1,
+          "line": 8
+        }
       }
     ],
     "period_coverage_review": {
@@ -1026,6 +1386,6 @@
     }
   ],
   "artifacts": {
-    "review_csv": "${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/statement-preflight.csv"
+    "review_csv": "examples/fbar-proof-demo/artifacts/happy-path/statement-preflight.csv"
   }
 }

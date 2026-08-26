@@ -245,6 +245,7 @@ EMAIL_PATTERN = re.compile(r"\b[A-Z0-9._%+-]+@([A-Z0-9.-]+\.[A-Z]{2,})\b", re.IG
 PHONE_PATTERN = re.compile(
     r"(?<!\d)(?:\+?1[-.\s]?)?(?:\(?[2-9]\d{2}\)?[-.\s]?)[2-9]\d{2}[-.\s]?\d{4}(?!\d)"
 )
+HEX_DIGEST_MIN_LENGTH = 32
 SSN_ITIN_PATTERN = re.compile(r"\b(?:\d{3}-\d{2}-\d{4}|9\d{2}-[78]\d-\d{4})\b")
 EIN_PATTERN = re.compile(r"\b\d{2}-\d{7}\b")
 IBAN_PATTERN = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b")
@@ -504,6 +505,17 @@ def is_example_email(match: re.Match[str]) -> bool:
     return domain in EXAMPLE_DOMAINS or domain.endswith(".example")
 
 
+def match_is_inside_hex_digest(text: str, match: re.Match[str]) -> bool:
+    """Return true when a numeric-looking match is part of a long hex digest."""
+    start = match.start()
+    end = match.end()
+    while start > 0 and text[start - 1] in "0123456789abcdefABCDEF":
+        start -= 1
+    while end < len(text) and text[end] in "0123456789abcdefABCDEF":
+        end += 1
+    return end - start >= HEX_DIGEST_MIN_LENGTH
+
+
 def add_line_finding(
     findings: List[Finding],
     severity: str,
@@ -609,7 +621,7 @@ def scan_text_content(display_path: str, text: str) -> List[Finding]:
                     )
                     break
 
-            if PHONE_PATTERN.search(line):
+            if any(not match_is_inside_hex_digest(line, match) for match in PHONE_PATTERN.finditer(line)):
                 add_line_finding(
                     findings,
                     "warning",
@@ -1114,7 +1126,10 @@ def redact_text(text: str) -> str:
         lambda match: match.group(0) if is_example_email(match) else "<REDACTED_EMAIL>",
         text,
     )
-    redacted = PHONE_PATTERN.sub("<REDACTED_PHONE>", redacted)
+    redacted = PHONE_PATTERN.sub(
+        lambda match: match.group(0) if match_is_inside_hex_digest(redacted, match) else "<REDACTED_PHONE>",
+        redacted,
+    )
     redacted = SSN_ITIN_PATTERN.sub("<REDACTED_TAX_ID>", redacted)
     redacted = EIN_PATTERN.sub("<REDACTED_TAX_ID>", redacted)
     redacted = IBAN_PATTERN.sub("<REDACTED_IBAN>", redacted)

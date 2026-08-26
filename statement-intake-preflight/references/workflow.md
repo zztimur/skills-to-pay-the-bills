@@ -18,7 +18,7 @@ Before running preflight, verify the user is asking for early statement review, 
 Requires Python 3.11 or newer (the script uses `datetime.UTC`). Use a Python runtime with `pdfplumber`:
 
 ```bash
-python3 "<package-root>/scripts/statement_intake_preflight.py" dependency-check
+python3 -B "<package-root>/scripts/statement_intake_preflight.py" dependency-check
 ```
 
 In Codex Desktop, if plain `python3` reports `pdfplumber missing`, call `load_workspace_dependencies` and retry the command with the bundled Python executable. If no available runtime has `pdfplumber`, stop before preflight and report the missing dependency. `dependency-check` exits non-zero and prints `pdfplumber missing` both when the package is absent and when it is installed but fails to import (a broken native dependency), rather than crashing. Do not OCR scanned/image-only PDFs in v1.
@@ -28,7 +28,7 @@ In Codex Desktop, if plain `python3` reports `pdfplumber missing`, call `load_wo
 Run:
 
 ```bash
-python3 "<package-root>/scripts/statement_intake_preflight.py" preflight \
+python3 -B "<package-root>/scripts/statement_intake_preflight.py" preflight \
   --pdf "statement-01.pdf" "statement-02.pdf" \
   --tax-year 2025 \
   --scope one-account \
@@ -49,7 +49,8 @@ Open the JSON and CSV before continuing. Confirm:
 - `statement_files` are the exact PDFs expected for the downstream run, in that order. Each carries `content_bytes` and `content_sha256`, so a downstream run can reject substituted, reordered, or duplicated files.
 - `tax_year` and `scope` match the intended downstream workflow.
 - The files have enough machine-readable text.
-- `coverage_hints.statement_period_years`, source-referenced `period_intervals`, `unresolved_periods`, and any `contextual_date_evidence` support the requested year. Each aggregated period interval has independently traceable `source_ref` and `end_source_ref` objects with its source file, page, and extracted line; the CSV shows both as `start=` and `end=`. A `direct-anchor` interval also records the source-bound period header and date anchor. A `medium` `inferred-chain` interval is only an exact-account, directly-adjacent derivation and remains review-required. Each unresolved period has a stable opaque ID, displayed month/day range, and source reference; resolve only that ID in a reviewed handoff. A labelled prior-year opening balance, or an exact prior December 31 opening boundary ending in the requested year, is contextual evidence rather than a second statement period.
+- `coverage_hints.statement_period_years`, source-referenced `period_intervals`, `unresolved_periods`, and `date_evidence` support the requested year. Schema 1.3 classifies each date as statement-period, movement, opening-boundary, generated-on, or certificate-issued; only statement periods establish coverage. Compact headers such as `1 SEP - 30 SEP` need an in-range source anchor before they resolve. Each interval retains independent start/end references; resolve an unresolved period only through its stable opaque ID.
+- `coverage_hints.parser_hints` records supported structural table cues without claiming that a downstream balance or interest parser succeeded.
 - `coverage_hints.period_coverage_review` has no possible internal, leading, or trailing statement-period gap. An account-opened-on resolution is permitted only for one continuous leading gap whose end is immediately before the first source-supported period start; it never changes raw coverage evidence or excuses an internal or trailing gap. Its period labels are intake hints only, limited to source-labelled dates, connected date ranges, and compact month/year headings rather than transaction narratives; they do not prove complete transaction or balance coverage.
 - `currency.code` is usable, or weak/unknown currency received the specific ISO confirmation below.
 - `account_hints` describe one account when scope is `one-account`, or the user confirmed one-account scope without supplying an account number.
@@ -72,6 +73,7 @@ the corroborated result and proceed.
 - Bare `$` or other weak/unknown currency evidence (`ambiguous-dollar` or `unknown-currency`): ask: “We could not corroborate the account currency from the statement text. Please confirm the ISO currency code (for example, `COP`).” Do not infer USD from `$`.
 - Contextual prior-year date: if the statement period is clearly inside the requested year and its coverage is otherwise clear, explain it without asking: “We found `2024-12-31` as a prior-year opening boundary. The detected statement period is 2025, so this date is contextual and does not change the statement year.” This includes a period that begins exactly on the prior December 31 and ends in the requested year. If coverage is unclear, ask: “We found `2024-12-31` in the Q1 statement. It appears to be a prior-year opening balance, while the statement period appears to be 2025. Please confirm that all supplied statements cover 2025 and that this date is contextual.”
 - Out-of-period generated-on metadata (`out-of-period-generated-date`): ask: “We found `2026-12-31` as the date the document was generated, not as a statement period. Please confirm that exact displayed date. We will retain it as document metadata and will not use it for statement-year coverage.” Substitute the extracted date.
+- Out-of-period certificate metadata (`out-of-period-certificate-date`): ask the user to confirm the exact displayed certificate issue date. Retain it as metadata; it never establishes statement-year coverage. If the user separately attests a migration/reissue on that date, record it as unverified user evidence with a specific note.
 - Inferred period year (`inferred-period-year`): say: “We derived the displayed statement period from an exact source-linked account identifier and directly adjacent source periods. Please review the listed source references; accepting this review keeps the derived dates unchanged.” Do not ask for a different year or accept a replacement interval.
 - Unresolved source-labelled period (`unresolved-period-year`): ask exactly: “This statement displays a December 1–31 period but no usable year. Please confirm whether this displayed period is 2025.” Substitute the displayed range and requested year, then accept only the matching `--confirm-period-year period-…=2025` value shown in the source preflight. Do not accept a replacement range or date.
 - Possible missing statement period (`possible-missing-statement-period`): ask the user to provide the missing statement. Only if the account actually opened during the requested year, the source intervals show one continuous leading gap with no internal or trailing gap, and the opening date is exactly the first source-supported period start, record `--confirm-account-opened-on YYYY-MM-DD`. Do not use this confirmation for a missing middle or year-end statement.
@@ -97,6 +99,7 @@ Complete gate catalog:
 | `mixed-years` | review | A detected statement-period year falls outside the requested tax year. Copyright/legal years are excluded even with an intervening month, a range, or a comma/space-separated list (`© 2019`, `© May 2019`, `© 2019-2024`, `© 2019, 2020, 2021`), as are bare or month-only heritage/account-open years (`since 1904`, `Customer since March 2015`); a period year carrying a numeric date (`since 2025-04-01`) is kept. A labelled opening/prior balance and an exact prior December 31 opening boundary are recorded separately as contextual evidence. |
 | `unresolved-year-evidence` | review | An out-of-period year could not be classified as a statement period or labelled contextual evidence. Review the source before downstream extraction. |
 | `out-of-period-generated-date` | review | A source-labelled document-generated date falls outside the requested tax year. It is metadata, not statement-period evidence; confirm the exact date through a source-bound reviewed handoff. |
+| `out-of-period-certificate-date` | review | A source-labelled certificate issue date falls outside the requested tax year. It is metadata, not statement-period evidence; confirm the exact date through a source-bound reviewed handoff. |
 | `inferred-period-year` | review | A source-labelled period header was assigned a year only through exact source-linked account evidence and direct calendar adjacency. Accepting a reviewed handoff preserves the preflight-derived interval unchanged. |
 | `unresolved-period-year` | review | A source-labelled period header has no resolvable year. Confirm each stable opaque period ID at the requested tax year; the reviewed handoff records the preflight-derived start/end dates and source reference without editing raw coverage evidence. |
 | `unknown-year-coverage` | review | No source-bound statement-period year was detected. Dated movement rows without a source-labelled period heading remain review-required and cannot be converted into coverage by broad year confirmation. |
@@ -119,7 +122,7 @@ Preflight is not a guarantee of complete coverage. It is an intake guardrail and
 Downstream tools should accept only JSON where:
 
 - `skill` is `statement-intake-preflight`.
-- `schema_version` is supported. Schema `1.2` adds a fail-closed downstream contract: file-level direct or inferred period evidence must exactly mirror the aggregated source references, and any reviewed period-year or account-opening resolution must retain the exact source-preflight hash and evidence.
+- `schema_version` is supported. Schema `1.2` adds fail-closed period provenance. Schema `1.3` adds compact period/split-account parsing, parser hints, typed date roles, certificate-date review, migration/reissue attestations, and month-resolution opening attestations while retaining the same source-preflight binding.
 - `tax_year` matches the extraction command.
 - `scope` matches the downstream workflow.
 - The resolved PDF sequence matches the extraction command.
@@ -135,7 +138,7 @@ For `fbar-threshold-check` specifically:
 - After the user reviews every `review` gate, create a separate handoff:
 
 ```bash
-python3 "<package-root>/scripts/statement_intake_preflight.py" review-handoff \
+python3 -B "<package-root>/scripts/statement_intake_preflight.py" review-handoff \
   --input "work/statement-preflight.json" \
   --accept-gate "ambiguous-dollar" \
   --confirm-currency COP \
@@ -152,10 +155,12 @@ Repeat `--accept-gate` for every listed review code. Add only the resolution fla
 - `--confirm-period-year period-abc123=2025` confirms one exact source-labelled unresolved period. Repeat once for every opaque ID in `coverage_hints.unresolved_periods`; IDs, displayed endpoints, and source references must match the immutable source preflight. The reviewed handoff records the confirmed year, resolved start/end dates, source reference, and source-preflight hash. Do not use it to change the displayed range.
 - `--confirm-statement-year 2025` records the requested tax year only for separately extracted contextual or unresolved year evidence. Pair it with `--classify-contextual-year 2024` only for extracted contextual/unresolved prior-year evidence. It cannot manufacture statement coverage when no source-labelled period header exists. A genuine `mixed-years` statement-period gate cannot be overridden; correct the year or statement set and rerun preflight.
 - `--confirm-generated-on-date 2026-12-31` confirms one extracted out-of-period generated-on date. Repeat it for every such source-labelled date; it must exactly match the retained date and source reference and never contributes to statement-period coverage.
+- `--confirm-certificate-issued-date 2026-08-01` confirms one out-of-period certificate issue date. Repeat it for every source date. Optionally pair exact matching `--confirm-account-migrated-or-reissued-on 2026-08-01` value(s) with a specific `--migration-note`; the event remains `user-confirmed-unverified`.
 - `--confirm-account-opened-on 2025-05-01` records a confirmed account-opening date only when `possible-missing-statement-period` has exactly one continuous leading gap, no internal or trailing gaps, and the date exactly equals the first source-supported period start. The separate resolution retains the leading-gap and first-period source reference plus the source-preflight hash; it does not edit raw coverage evidence or excuse a missing middle or year-end statement.
+- `--confirm-account-opened-month 2025-05` is the lower-resolution alternative for the same single-leading-gap case. It must match the first source period's month and cannot be combined with the exact-date flag.
 - `inferred-period-year` requires only its exact `--accept-gate` value. It has no year or interval override: the reviewed handoff copies the preflight-derived interval evidence unchanged.
 
-The reviewed handoff preserves raw preflight evidence unchanged. Its separate `user_resolutions` section contains confirmation state, accepted gates, the source-preflight SHA-256, and only the user-provided source-bound period-year, account-opening, year/currency/account-scope/institution assertions plus source-bound generated-on-date confirmations when required. Both downstream consumers validate schema 1.2 direct and inferred provenance, the exact aggregate mirror, period-year/account-opening evidence, accepted gates, and source-preflight hash before relying on the handoff. FBAR extraction verifies the source fields, validates an opt-in typed institution selection, rejects a conflicting `--institution` argument, then rechecks the ordered PDF byte-size and SHA-256 fingerprints before and after parsing. `statements-to-interest` can consume a reviewed `one-institution` handoff only when it verifies the same source binding and typed institution, year, currency, and generated-on-date resolutions. Changed, duplicate, reordered, substituted, hand-edited, or legacy-unfingerprinted files require a fresh preflight (and, where applicable, a new reviewed handoff).
+The reviewed handoff preserves raw evidence unchanged. Its `user_resolutions` section contains confirmation state, accepted gates, source-preflight SHA-256, and typed source-bound resolutions. Both consumers retain schema 1.2 compatibility and validate schema 1.3 interval, metadata-date, opening, accepted-gate, and fingerprint contracts. Changed, duplicate, reordered, substituted, hand-edited, or legacy-unfingerprinted files require a fresh preflight and, where applicable, a fresh reviewed handoff.
 
 Downstream tools should retain preflight warnings, profile hints, and coverage hints (including period and contextual-date evidence) in their own JSON output, but they still own domain-specific parsing and review gates.
 

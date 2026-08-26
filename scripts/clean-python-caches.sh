@@ -8,12 +8,14 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
 cache_dirs='
+examples/fbar-proof-demo/__pycache__
 fbar-threshold-check/scripts/__pycache__
 fbar-threshold-check/tests/__pycache__
 get-year-end-fx-rate/scripts/__pycache__
 get-year-end-fx-rate/tests/__pycache__
 get-yearly-fx-rate/scripts/__pycache__
 privacy-gate/scripts/__pycache__
+scripts/__pycache__
 skill-forge/scripts/__pycache__
 statement-intake-preflight/scripts/__pycache__
 statement-intake-preflight/tests/__pycache__

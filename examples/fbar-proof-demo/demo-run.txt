@@ -7,27 +7,27 @@ SYNTHETIC FBAR PROOF DEMO - no real people, accounts, or institutions
       Maximum native balance: 10,500,000 COP on 2025-10-10
 [5/9] Frozen Treasury proof retained: 1 USD = 3773.62 COP
 [6/9] Reviewed synthetic ledger confirmed with retained FX dependency
-[7/9] Summary: daily threshold NO; FinCEN maximum-value view NO
+[7/9] Summary: daily threshold NO; postflight integrity PASS
 [8/9] Omitted Q2: INSUFFICIENT RECORDS; confirm-account REFUSED
-[9/9] PASS - JSON, CSV, PDF, screenshots, recording, and checksums retained
+[9/9] PASS - portable postflight, JSON, CSV, PDF, media, and checksums retained
       examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.pdf
       docs/assets/demo/fbar-proof-demo-terminal.gif (36 seconds)
 
 DETAILED COMMAND TRANSCRIPT
 $ python3 statement-intake-preflight/scripts/statement_intake_preflight.py preflight --pdf examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf --tax-year 2025 --scope one-account --require-institution --out examples/fbar-proof-demo/artifacts/happy-path/statement-preflight.json --csv examples/fbar-proof-demo/artifacts/happy-path/statement-preflight.csv
-Wrote preflight JSON: ${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/statement-preflight.json
-Wrote review CSV: ${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/statement-preflight.csv
+Wrote preflight JSON: examples/fbar-proof-demo/artifacts/happy-path/statement-preflight.json
+Wrote review CSV: examples/fbar-proof-demo/artifacts/happy-path/statement-preflight.csv
 Status: review-required
 Review gates:
 - unknown-institution: No institution hint was found in early statement text; a graphical logo or filename is not automatic institution evidence, so verify the institution manually.
 [exit 0]
 $ python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-handoff --input examples/fbar-proof-demo/artifacts/happy-path/statement-preflight.json --accept-gate unknown-institution --user-review-confirmed --confirm-institution 'Fictional Orbit Bank - Synthetic Demo Only' --out examples/fbar-proof-demo/artifacts/happy-path/statement-preflight-reviewed.json
-Wrote reviewed handoff JSON: ${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/statement-preflight-reviewed.json
+Wrote reviewed handoff JSON: examples/fbar-proof-demo/artifacts/happy-path/statement-preflight-reviewed.json
 Accepted review gates: unknown-institution
 [exit 0]
 $ python3 fbar-threshold-check/scripts/fbar_threshold_check.py extract-account --pdf examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q2.pdf examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf --tax-year 2025 --preflight-json examples/fbar-proof-demo/artifacts/happy-path/statement-preflight-reviewed.json --account-id synthetic-demo-account-0042 --out examples/fbar-proof-demo/artifacts/happy-path/account-ledger.json --csv examples/fbar-proof-demo/artifacts/happy-path/account-ledger.csv
-Wrote account JSON: ${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/account-ledger.json
-Wrote review CSV: ${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/account-ledger.csv
+Wrote account JSON: examples/fbar-proof-demo/artifacts/happy-path/account-ledger.json
+Wrote review CSV: examples/fbar-proof-demo/artifacts/happy-path/account-ledger.csv
 Review warnings:
 - Preflight gate unknown-institution: No institution hint was found in early statement text; a graphical logo or filename is not automatic institution evidence, so verify the institution manually.
 - Preflight reviewed handoff accepted gate(s): unknown-institution
@@ -41,31 +41,36 @@ Proof: [workpaper.pdf](<${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-pa
 Artifacts: [workpaper.pdf](<${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/fx-proof/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.pdf>), [workpaper.md](<${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/fx-proof/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.md>), [workpaper.json](<${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/fx-proof/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.json>), [treasury-fiscal-data-response.json](<${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/fx-proof/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/treasury-fiscal-data-response.json>)
 [exit 0]
 $ python3 fbar-threshold-check/scripts/fbar_threshold_check.py confirm-account --input examples/fbar-proof-demo/artifacts/happy-path/account-ledger.json --balances-confirmed --fx-workpaper-json examples/fbar-proof-demo/artifacts/happy-path/fx-proof/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.json --out examples/fbar-proof-demo/artifacts/happy-path/account-confirmed.json --csv examples/fbar-proof-demo/artifacts/happy-path/account-confirmed.csv
-Wrote confirmed account JSON: ${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/account-confirmed.json
-Wrote confirmed CSV: ${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/account-confirmed.csv
+Wrote confirmed account JSON: examples/fbar-proof-demo/artifacts/happy-path/account-confirmed.json
+Wrote confirmed CSV: examples/fbar-proof-demo/artifacts/happy-path/account-confirmed.csv
 [exit 0]
-$ python3 fbar-threshold-check/scripts/fbar_threshold_check.py aggregate --account-ledger examples/fbar-proof-demo/artifacts/happy-path/account-confirmed.json --out examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.json --csv examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.csv --pdf examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.pdf
+$ python3 fbar-threshold-check/scripts/fbar_threshold_check.py aggregate --account-ledger examples/fbar-proof-demo/artifacts/happy-path/account-confirmed.json --out examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.json --csv examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.csv --pdf examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.pdf --packet-root examples/fbar-proof-demo/artifacts/happy-path
 Daily threshold answer: no
 FinCEN max-value view exceeded: no
-Wrote final JSON: ${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.json
-Wrote final CSV: ${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.csv
-Wrote summary PDF: ${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.pdf
+Wrote final JSON: examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.json
+Wrote final CSV: examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.csv
+Wrote summary PDF: examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.pdf
+Wrote postflight manifest: examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary-postflight.json
+[exit 0]
+$ python3 fbar-threshold-check/scripts/fbar_threshold_check.py verify-packet --summary examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.json --manifest examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary-postflight.json --out examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary-verification.json
+Wrote verification JSON: examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary-verification.json
+Packet integrity: pass
 [exit 0]
 $ python3 statement-intake-preflight/scripts/statement_intake_preflight.py preflight --pdf examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf --tax-year 2025 --scope one-account --require-institution --out examples/fbar-proof-demo/artifacts/refusal-path/statement-preflight.json --csv examples/fbar-proof-demo/artifacts/refusal-path/statement-preflight.csv --exit-nonzero-on-review
-Wrote preflight JSON: ${REPO_ROOT}/examples/fbar-proof-demo/artifacts/refusal-path/statement-preflight.json
-Wrote review CSV: ${REPO_ROOT}/examples/fbar-proof-demo/artifacts/refusal-path/statement-preflight.csv
+Wrote preflight JSON: examples/fbar-proof-demo/artifacts/refusal-path/statement-preflight.json
+Wrote review CSV: examples/fbar-proof-demo/artifacts/refusal-path/statement-preflight.csv
 Status: review-required
 Review gates:
 - possible-missing-statement-period: Detected statement-period labels leave possible calendar coverage gap(s): 2025-04-01 through 2025-06-30. Obtain the missing statements or review the source periods.
 - unknown-institution: No institution hint was found in early statement text; a graphical logo or filename is not automatic institution evidence, so verify the institution manually.
 [exit 3]
 $ python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-handoff --input examples/fbar-proof-demo/artifacts/refusal-path/statement-preflight.json --accept-gate possible-missing-statement-period --accept-gate unknown-institution --user-review-confirmed --confirm-institution 'Fictional Orbit Bank - Synthetic Demo Only' --out examples/fbar-proof-demo/artifacts/refusal-path/statement-preflight-reviewed.json
-Wrote reviewed handoff JSON: ${REPO_ROOT}/examples/fbar-proof-demo/artifacts/refusal-path/statement-preflight-reviewed.json
+Wrote reviewed handoff JSON: examples/fbar-proof-demo/artifacts/refusal-path/statement-preflight-reviewed.json
 Accepted review gates: possible-missing-statement-period, unknown-institution
 [exit 0]
 $ python3 fbar-threshold-check/scripts/fbar_threshold_check.py extract-account --pdf examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q1.pdf examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q3.pdf examples/fbar-proof-demo/fixtures/statements/fictional-orbit-q4.pdf --tax-year 2025 --preflight-json examples/fbar-proof-demo/artifacts/refusal-path/statement-preflight-reviewed.json --account-id synthetic-demo-account-0042 --out examples/fbar-proof-demo/artifacts/refusal-path/account-ledger.json --csv examples/fbar-proof-demo/artifacts/refusal-path/account-ledger.csv
-Wrote account JSON: ${REPO_ROOT}/examples/fbar-proof-demo/artifacts/refusal-path/account-ledger.json
-Wrote review CSV: ${REPO_ROOT}/examples/fbar-proof-demo/artifacts/refusal-path/account-ledger.csv
+Wrote account JSON: examples/fbar-proof-demo/artifacts/refusal-path/account-ledger.json
+Wrote review CSV: examples/fbar-proof-demo/artifacts/refusal-path/account-ledger.csv
 Evidence sufficiency: profile=transaction-rows; daily threshold=insufficient-records; maximum account value=not-determinable. Do not treat period-end observations or carried balances as an annual maximum.
 Review warnings:
 - 1 carry-forward gap(s) exceed 40 days inside the year (longest 91 day(s)); statement coverage may be missing periods.

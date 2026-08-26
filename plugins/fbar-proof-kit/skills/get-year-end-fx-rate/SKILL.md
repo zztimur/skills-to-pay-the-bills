@@ -32,7 +32,7 @@ Before running either workflow, make sure the requested `YYYY-12-31` date has pa
 Treasury/Fiscal Data lookup:
 
 ```bash
-python3 "<package-root>/scripts/get_year_end_fx_rate.py" lookup \
+python3 -B "<package-root>/scripts/get_year_end_fx_rate.py" lookup \
   --currency COP \
   --year 2025 \
   --output-root work/fbar-fx-rate-proof
@@ -41,7 +41,7 @@ python3 "<package-root>/scripts/get_year_end_fx_rate.py" lookup \
 Manual fallback after the agent has found or received a verifiable year-end source:
 
 ```bash
-python3 "<package-root>/scripts/get_year_end_fx_rate.py" manual \
+python3 -B "<package-root>/scripts/get_year_end_fx_rate.py" manual \
   --currency COP \
   --year 2025 \
   --rate 3900.00 \
@@ -65,13 +65,20 @@ For manual workpapers, do not run the script until the source clearly supports a
 The helper uses a Treasury row-to-ISO map because Fiscal Data rows use country/currency labels, not ISO codes. The package carries a frozen `tests/fixtures/treasury-2025-12-31.json` response so map validation remains deterministic. When `map-check --strict` reports an unexplained row, update `TREASURY_ROWS_BY_CODE`, an alternate row mapping, or the explicit exception registry; do not treat an unmapped code as Treasury unavailability.
 
 ```bash
-python3 "<package-root>/scripts/get_year_end_fx_rate.py" map-check \
+python3 -B "<package-root>/scripts/get_year_end_fx_rate.py" map-check \
   --year 2025 \
   --currency AED \
   --strict
 ```
 
-If `lookup` or `map-check` exits 5, fetch the exact API query URL shown in the error with an available web tool, save the **raw JSON response** locally, then rerun the same command with `--api-file <saved.json>`. Do not substitute a search snippet, screenshot, or manually copied rate. The packet records whether its JSON came from a live API fetch or a supplied local file.
+Use `fetch-plan` before handing an API failure to another runtime. It prints the exact query URL and the deterministic offline replay command without making a network call:
+
+```bash
+python3 -B "<package-root>/scripts/get_year_end_fx_rate.py" fetch-plan \
+  --mode lookup --currency COP --year 2025
+```
+
+If `lookup` or `map-check` exits 5, retain its `fetch_failure_class` (`tls-certificate-verification`, `dns-unavailable`, `timeout`, `http-error`, or `network-unavailable`), fetch the exact query URL with an available web tool, save the **raw JSON response** locally, then rerun with `--api-file <saved.json>`. TLS verification remains strict; use the runtime trust store or an existing `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`, never an insecure bypass. Do not substitute a search snippet, screenshot, or manually copied rate.
 
 ## Proof Packet
 
@@ -111,15 +118,15 @@ Add one short caveat only when needed, such as `Treasury/Fiscal Data did not lis
 
 ## Runtime And Validation
 
-The script uses only Python standard-library modules. Use `python3` unless the active environment provides `python`.
+The script uses only Python standard-library modules. Run it with `python3 -B` so an installed or read-only skill tree is never mutated by bytecode caches.
 
 `scripts/get_year_end_fx_rate.py` imports `scripts/_workpaper.py`, a generated, byte-identical vendored copy of the shared proof-packet engine (the same copy `get-yearly-fx-rate` carries, so both proof packets look the same). This installed skill runs standalone and never imports `workpaper-kit` at runtime. Do not hand-edit `scripts/_workpaper.py`. To change shared proof-packet behavior in the source repository, edit `workpaper-kit/workpaper.py` and let the pre-commit hook or `workpaper-kit/sync.sh` regenerate both FX skills; the canonical kit is not included in standalone installs.
 
 After changing this skill, run:
 
 ```bash
-python3 "<package-root>/scripts/get_year_end_fx_rate.py" self-test
-python3 "<package-root>/tests/run_regressions.py"
+python3 -B "<package-root>/scripts/get_year_end_fx_rate.py" self-test
+python3 -B "<package-root>/tests/run_regressions.py"
 python3 -S skill-forge/scripts/inspect_skill_package.py "<package-root>" --json --strict
 ```
 

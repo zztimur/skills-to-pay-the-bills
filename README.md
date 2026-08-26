@@ -28,13 +28,19 @@ FinCEN Form 114 and does not decide every filing obligation. See
 
 | Review artifact | What it establishes |
 | --- | --- |
-| <img src="docs/assets/demo/fbar-proof-summary-page-1.png" alt="Synthetic FBAR threshold summary showing no threshold crossing" width="430"> | A one-page JSON/CSV/PDF-backed threshold summary from a reviewed 365-day ledger. |
+| <img src="docs/assets/demo/fbar-proof-summary-page-1.png" alt="Synthetic FBAR threshold summary showing no threshold crossing" width="430"> | A one-page JSON/CSV/PDF-backed threshold summary from a reviewed 365-day ledger, sealed by a portable postflight manifest. |
 | <img src="docs/assets/demo/fbar-fx-proof-page-1.png" alt="Retained Treasury year-end COP to USD rate workpaper" width="430"> | The exact year-end rate, source URL, date, reciprocal, retained response, and provenance. |
 
 The happy path processes four fictional quarterly COP statements and retains a
 reviewed packet. The refusal path omits Q2 and proves the workflow returns
 `insufficient-records` / `not-determinable` and refuses ledger confirmation. It
 does not manufacture a confident annual answer from incomplete evidence.
+
+Readable-but-unsupported layouts are reported as parser coverage defects rather
+than missing data. Reviewed evidence stays visibly classified as formal
+extraction, diagnostic reconstruction, or user/preparer attestation. If an
+annual maximum has no known date, the result remains an explicit lower/upper
+interval instead of inventing a day.
 
 ## Install the kit
 
@@ -118,7 +124,7 @@ The run produces:
 - preflight JSON/CSV and a source-bound reviewed handoff;
 - a 365-row account ledger plus explicit review record;
 - a frozen Treasury/Fiscal Data response and year-end FX workpaper;
-- final threshold JSON, CSV, and PDF;
+- final threshold JSON, CSV, PDF, and portable postflight verification;
 - a missing-quarter refusal record, transcript, and SHA-256 manifest.
 
 Read the [demo guide](examples/fbar-proof-demo/README.md), inspect the
@@ -134,15 +140,18 @@ examples/fbar-proof-demo/run_demo.py --check
 1. `statement-intake-preflight` checks text layers, year and statement-period
    coverage, currency, account grouping, institution evidence, and review gates.
 2. A human reviews the flagged assumptions and creates a source-bound handoff.
-3. `fbar-threshold-check` extracts and reviews daily account ledgers; incomplete
-   coverage remains insufficient rather than silently carried through.
+3. `fbar-threshold-check` extracts or reconstructs reviewed account evidence;
+   parser defects remain visible and attested evidence never becomes formal.
 4. `get-year-end-fx-rate` retains the applicable public Treasury/Fiscal Data
    response, rate interpretation, reciprocal, source hash, and PDF workpaper.
-5. The reviewed ledgers and retained FX proof produce JSON, CSV, and PDF support
-   artifacts for both daily aggregate and FinCEN maximum-value views.
+5. The reviewed ledgers and retained FX proof produce interval-aware JSON, CSV,
+   and PDF views, then a portable postflight manifest binds and recomputes the
+   exact retained packet.
 
-No parser JSON contract or tax-calculation behavior is changed by the packaging,
-demo, or public documentation in this release.
+FBAR schema 1.4 and preflight schema 1.3 are additive. Safe schema 1.2 preflight
+handoffs and schema 1.3 confirmed ledgers remain readable, but stale or
+precision-unsafe artifacts must be regenerated. CSV consumers should select
+columns by header because interval and evidence fields add columns.
 
 ## Data boundary
 

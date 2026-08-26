@@ -8,7 +8,7 @@ Are these statement PDFs clean enough, scoped enough, and boring enough to hand 
 
 The point is not to extract interest, rebuild daily balances, choose FX rates, or answer an FBAR question. The point is to stop at the front door and ask whether the statement set looks like one coherent thing: one year, one account or institution, readable text, plausible currency, and no obvious trap hiding behind a tidy filename.
 
-Current package version: 1.4.6.
+Current package version: 1.5.0.
 
 It leaves behind a JSON/CSV handoff so the next skill does not have to rediscover the same intake facts from scratch.
 
@@ -35,6 +35,7 @@ human answer is needed, it uses these prompts:
 - Inferred period year: “We derived the displayed statement period from exact source-linked account evidence and directly adjacent source periods. Please review the listed source references.” Accepting this gate preserves the derived dates; it does not invite a replacement year or interval.
 - Contextual prior-year date with unclear period coverage: “We found `2024-12-31` in the Q1 statement. It appears to be a prior-year opening balance, while the statement period appears to be 2025. Please confirm that all supplied statements cover 2025 and that this date is contextual.”
 - Out-of-period generated-on metadata: “We found `2026-12-31` as the date the document was generated, not as a statement period. Please confirm that exact displayed date. We will retain it as document metadata and will not use it for statement-year coverage.”
+- Out-of-period certificate date: confirm the exact displayed issue date. It stays metadata; an optional migration/reissue attestation must match that date and remains user-confirmed but unverified.
 - Missing or incompletely linked account identity for an FBAR account set: “We could not extract a reliable account identifier from every supplied PDF. Please confirm that the supplied PDFs represent one account. You do not need to provide the account number.”
 - No extractable issuer for an interest set, or an FBAR `one-account --require-institution` run: “We could not extract a reliable institution name from these statements. Please confirm the institution name shown on the statements.”
 
@@ -59,6 +60,8 @@ The JSON includes:
 - detected statement titles and direct or source-linked inferred period intervals, with independently traceable source references for both endpoints;
 - stable opaque IDs for source-labelled periods whose year remains unresolved and needs one exact reviewed confirmation;
 - detected years and out-of-year hints, plus source-labelled generated-on metadata kept separate from coverage;
+- typed date-role evidence for statement periods, movements, opening boundaries, generated-on dates, and certificate-issued dates;
+- parser hints, compact month-name period headings, and conservative next-line account-label binding;
 - currency candidates it could back up with a nearby amount or name, the weaker ones it could not, and ambiguous `$` warnings;
 - account hints, source-linkage coverage across the supplied PDFs, and institution hints;
 - review gates such as low text, duplicate inputs, mixed years, out-of-period generated-on metadata, mixed currencies, possible mixed accounts, and possible mixed institutions.
@@ -92,7 +95,7 @@ Requires Python 3.11 or newer with `pdfplumber`.
 Preflight for FBAR account-ledger extraction:
 
 ```bash
-python3 statement-intake-preflight/scripts/statement_intake_preflight.py preflight \
+python3 -B statement-intake-preflight/scripts/statement_intake_preflight.py preflight \
   --pdf statement-01.pdf statement-02.pdf \
   --tax-year 2025 \
   --scope one-account \
@@ -103,7 +106,7 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py preflig
 Preflight for interest-income extraction:
 
 ```bash
-python3 statement-intake-preflight/scripts/statement_intake_preflight.py preflight \
+python3 -B statement-intake-preflight/scripts/statement_intake_preflight.py preflight \
   --pdf statement-01.pdf statement-02.pdf \
   --tax-year 2025 \
   --scope one-institution \
@@ -113,7 +116,7 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py preflig
 Then either pass a clean preflight JSON to the downstream skill, or create a reviewed handoff after explicit user confirmation of every non-structural review gate:
 
 ```bash
-python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-handoff \
+python3 -B statement-intake-preflight/scripts/statement_intake_preflight.py review-handoff \
   --input work/statement-preflight.json \
   --accept-gate ambiguous-dollar \
   --confirm-currency COP \
@@ -121,12 +124,12 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-
   --out work/statement-preflight-reviewed.json
 ```
 
-Repeat `--accept-gate` for each gate. Structural `stop` gates cannot be accepted: correct the inputs and rerun preflight. For a reviewed handoff, use the new JSON path below:
+Repeat `--accept-gate` for each gate. Structural `stop` gates cannot be accepted: correct the inputs and rerun preflight. Schema 1.3 also supports exact certificate-date confirmation, a matching migration/reissue attestation plus note, and either exact-date or month-resolution account opening for a single leading gap. For a reviewed handoff, use the new JSON path below:
 
-Add only the resolution flags required by the source gates: `--confirm-period-year period-abc123=2025` once for every opaque ID in `coverage_hints.unresolved_periods`; `--confirm-currency COP` for weak or unknown currency evidence; `--confirm-one-account` when no account identifier can be extracted or the identifier is not source-linked across every supplied PDF; `--confirm-institution "Example Bank"` for an unknown one-institution issuer or an opt-in FBAR `one-account --require-institution` issuer gate; `--confirm-statement-year 2025` (plus `--classify-contextual-year 2024` when applicable) only for separately extracted contextual or unresolved year evidence; and `--confirm-generated-on-date 2026-12-31` once for each extracted out-of-period generated-on date. An `inferred-period-year` gate needs only its exact `--accept-gate`; the handoff keeps the preflight-derived interval unchanged. `--confirm-account-opened-on 2025-05-01` is permitted only for a `possible-missing-statement-period` gate with one continuous leading gap, no internal or trailing gap, and a first source-supported period that starts on that exact date. It keeps the raw coverage gap intact and records a separate reviewed resolution; it cannot excuse a missing middle or year-end statement. A generated-on confirmation binds the exact date and source reference but does not treat it as statement-year coverage. Do not provide a full account number by default. A genuine mixed statement year cannot be accepted. Conflicting issuer evidence can be resolved only for opt-in FBAR `one-account --require-institution` intake after explicit user review; the handoff preserves the original evidence and accepted gate. <!-- privacy-gate: allow -->
+Add only resolution flags required by source gates: exact period ID/year, ISO currency, one-account assertion, typed institution, contextual year, generated-on date, or certificate-issued date. A migration/reissue assertion must repeat the exact confirmed certificate date and include `--migration-note`; it stays unverified user evidence. An `inferred-period-year` gate takes only its exact acceptance. For one continuous leading gap, choose exact `--confirm-account-opened-on 2025-05-01` or lower-resolution `--confirm-account-opened-month 2025-05`, never both; neither excuses a missing middle or year-end statement. Metadata dates bind exact source references but never become coverage. Do not provide a full account number by default or accept a genuine mixed statement year. <!-- privacy-gate: allow -->
 
 ```bash
-python3 fbar-threshold-check/scripts/fbar_threshold_check.py extract-account \
+python3 -B fbar-threshold-check/scripts/fbar_threshold_check.py extract-account \
   --pdf statement-01.pdf statement-02.pdf \
   --tax-year 2025 \
   --preflight-json work/statement-preflight-reviewed.json \
@@ -134,7 +137,7 @@ python3 fbar-threshold-check/scripts/fbar_threshold_check.py extract-account \
 ```
 
 ```bash
-python3 statements-to-interest/scripts/statements_to_interest.py extract \
+python3 -B statements-to-interest/scripts/statements_to_interest.py extract \
   --pdf statement-01.pdf statement-02.pdf \
   --tax-year 2025 \
   --institution "Example Bank" \
@@ -165,9 +168,9 @@ This is the good kind of early annoyance. Finding a scope problem here is cheape
 After script changes:
 
 ```bash
-python3 statement-intake-preflight/scripts/statement_intake_preflight.py dependency-check
-python3 statement-intake-preflight/scripts/statement_intake_preflight.py self-test
-python3 statement-intake-preflight/scripts/statement_intake_preflight.py smoke-test
+python3 -B statement-intake-preflight/scripts/statement_intake_preflight.py dependency-check
+python3 -B statement-intake-preflight/scripts/statement_intake_preflight.py self-test
+python3 -B statement-intake-preflight/scripts/statement_intake_preflight.py smoke-test
 python3 -S skill-forge/scripts/inspect_skill_package.py statement-intake-preflight --json --strict
 ```
 
@@ -177,7 +180,7 @@ through the CLI to reproduce every failure mode past audits surfaced (needs
 `reportlab` + `pdfplumber`; it skips cleanly when they are absent):
 
 ```bash
-python3 statement-intake-preflight/tests/run_pressure_suite.py
+python3 -B statement-intake-preflight/tests/run_pressure_suite.py
 ```
 
 If Claude Code is available locally:

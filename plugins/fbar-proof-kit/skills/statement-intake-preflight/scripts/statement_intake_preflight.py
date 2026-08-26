@@ -34,13 +34,14 @@ except BaseException as _exc:  # noqa: BLE001 - see below  # pragma: no cover
 # Downstream skills (fbar-threshold-check, statements-to-interest) pin the set of
 # schema versions they accept, so bump this only on a breaking JSON change and
 # update those consumers in lockstep.
-SCHEMA_VERSION = "1.2"
+SCHEMA_VERSION = "1.3"
 PREFLIGHT_SKILL = "statement-intake-preflight"
 READY_STATUS = "ready-for-domain-extraction"
 REVIEW_REQUIRED_STATUS = "review-required"
 REVIEWED_HANDOFF_STATUS = "reviewed-for-domain-extraction"
 REVIEWED_HANDOFF_TYPE = "reviewed-handoff"
 OUT_OF_PERIOD_GENERATED_DATE_GATE = "out-of-period-generated-date"
+OUT_OF_PERIOD_CERTIFICATE_DATE_GATE = "out-of-period-certificate-date"
 UNRESOLVED_PERIOD_YEAR_GATE = "unresolved-period-year"
 MIN_TEXT_CHARS = 40
 MIN_TAX_YEAR = 1970
@@ -156,6 +157,10 @@ ACCOUNT_LABEL_RE = re.compile(
 ACCOUNT_BARE_RE = re.compile(
     r"\b(?:account|acct|a/c|cuenta|n[uú]mero de cuenta|"
     r"kontonummer|konto|compte|num[eé]ro de compte)\b[\s:#-]*([*Xx0-9][*Xx0-9.\- ]{3,33})",
+    re.I,
+)
+SPLIT_ACCOUNT_LABEL_ONLY_RE = re.compile(
+    r"^\s*(?:account|acct|a/c|cuenta)\s*(?:numbers?|nos?|nbrs?|nros?|n[uú]ms?|id)\b\.?\s*[:#-]?\s*$",
     re.I,
 )
 # Some Spanish statement headers split the product and identifier across two
@@ -565,6 +570,11 @@ DOCUMENT_GENERATED_ON_RE = re.compile(
     r"\baccount\s+(?:statement|extract)\s+generated\s+(?:on|at)\b",
     re.I,
 )
+DOCUMENT_CERTIFICATE_ISSUED_RE = re.compile(
+    r"\b(?:certificate|certification)\s+(?:issued|dated)\b|"
+    r"\b(?:certificado|certificaci[oó]n)\s+(?:emitid[oa]|expedid[oa]|con\s+fecha)\b",
+    re.I,
+)
 # This is evaluated only between two complete parsed dates. Include the Spanish
 # range connector ``a`` as well as ``al`` so a labelled ``YYYY/MM/DD a
 # YYYY/MM/DD`` period becomes source-bound coverage evidence instead of a
@@ -594,11 +604,11 @@ PERIOD_HEADER_MONTH_FIRST_RE = re.compile(
     re.I,
 )
 PERIOD_HEADER_DAY_FIRST_RE = re.compile(
-    rf"\b(?P<start_day>\d{{1,2}})(?:st|nd|rd|th)?\s+de\s+(?P<start_month>{_MONTH_TOKEN})\.?"
-    rf"(?:\s+de\s+(?P<start_year>19\d{{2}}|20\d{{2}}))?"
+    rf"\b(?P<start_day>\d{{1,2}})(?:st|nd|rd|th)?\s+(?:de\s+)?(?P<start_month>{_MONTH_TOKEN})\.?"
+    rf"(?:\s+(?:de\s+)?(?P<start_year>19\d{{2}}|20\d{{2}}))?"
     rf"\s*(?:[-–—]|a(?:l)?|hasta|bis|to|through)\s*"
-    rf"(?P<end_day>\d{{1,2}})(?:st|nd|rd|th)?\s+de\s+(?P<end_month>{_MONTH_TOKEN})\.?"
-    rf"(?:\s+de\s+(?P<end_year>19\d{{2}}|20\d{{2}}))?\b",
+    rf"(?P<end_day>\d{{1,2}})(?:st|nd|rd|th)?\s+(?:de\s+)?(?P<end_month>{_MONTH_TOKEN})\.?"
+    rf"(?:\s+(?:de\s+)?(?P<end_year>19\d{{2}}|20\d{{2}}))?\b",
     re.I,
 )
 # A year-anchor is useful only inside a labelled movement or balance-date table.
@@ -1180,8 +1190,19 @@ def detect_period_headers(page_lines: Iterable[object]) -> list[dict[str, object
         if page <= 0 or not isinstance(raw_lines, list):
             continue
         for line_number, raw_line in enumerate(raw_lines, start=1):
-            line = str(raw_line)
-            if not PERIOD_HEADING_PREFIX_RE.search(line):
+            line = clean_line(str(raw_line))
+            compact_range_match = next(
+                (match for pattern in (PERIOD_HEADER_MONTH_FIRST_RE, PERIOD_HEADER_DAY_FIRST_RE) if (match := pattern.search(line))),
+                None,
+            )
+            compact_unlabelled_heading = bool(
+                compact_range_match
+                and len(line) <= 80
+                and compact_range_match.start() <= 2
+                and len(line) - compact_range_match.end() <= 2
+                and not re.search(r"[$€£¥]|\d[.,]\d{2}", line)
+            )
+            if not PERIOD_HEADING_PREFIX_RE.search(line) and not compact_unlabelled_heading:
                 continue
             dates = line_dates(line)
             if len(dates) >= 2:
@@ -1257,8 +1278,42 @@ def detect_year_anchors(page_lines: Iterable[object]) -> list[dict[str, object]]
     return anchors
 
 
+def detect_parser_hints(page_lines: Iterable[object]) -> list[dict[str, object]]:
+    """Describe structured transaction-like pages without claiming extraction."""
+    hints: list[dict[str, object]] = []
+    for raw_page in page_lines:
+        if not isinstance(raw_page, dict):
+            continue
+        page = int(raw_page.get("page", 0) or 0)
+        raw_lines = raw_page.get("lines")
+        if page <= 0 or not isinstance(raw_lines, list):
+            continue
+        header_lines = [
+            index
+            for index, raw_line in enumerate(raw_lines, start=1)
+            if DATE_TABLE_HEADER_RE.search(str(raw_line))
+        ]
+        if not header_lines:
+            continue
+        dated_monetary_rows = sum(
+            1
+            for raw_line in raw_lines
+            if line_dates(str(raw_line))
+            and re.search(r"[$€£¥]|(?:\d[.,])?\d{2,}", str(raw_line))
+        )
+        hints.append(
+            {
+                "kind": "transaction-like-table",
+                "page": page,
+                "header_lines": header_lines,
+                "dated_monetary_row_count": dated_monetary_rows,
+            }
+        )
+    return hints
+
+
 def detect_document_metadata_dates(page_lines: Iterable[object]) -> list[dict[str, object]]:
-    """Return source-bound generated-on dates without promoting them to coverage.
+    """Return source-bound generated/certificate dates without promoting coverage.
 
     Only date tokens after a narrow document-generation label are retained. The
     compact artifact intentionally carries the parsed date and source anchor,
@@ -1276,6 +1331,10 @@ def detect_document_metadata_dates(page_lines: Iterable[object]) -> list[dict[st
         for line_number, raw_line in enumerate(raw_lines, start=1):
             line = str(raw_line)
             marker = DOCUMENT_GENERATED_ON_RE.search(line)
+            kind = "generated-on"
+            if not marker:
+                marker = DOCUMENT_CERTIFICATE_ISSUED_RE.search(line)
+                kind = "certificate-issued"
             if not marker:
                 continue
             for parsed, span, confidence in line_dates(line):
@@ -1287,7 +1346,7 @@ def detect_document_metadata_dates(page_lines: Iterable[object]) -> list[dict[st
                 seen.add(key)
                 evidence.append(
                     {
-                        "kind": "generated-on",
+                        "kind": kind,
                         "date": parsed.isoformat(),
                         "confidence": confidence,
                         "source_ref": {"page": page, "line": line_number},
@@ -2123,6 +2182,18 @@ def _collect_account_hint_records(lines: Iterable[str]) -> list[tuple[str, str, 
         if token:
             compact = _account_compact(token)
             raw.append((token, compact, "*" in compact or "X" in compact))
+    # Some text layers place an explicit label and its value on consecutive
+    # lines. Bind only the immediately following identifier-shaped line and
+    # reject transaction/counterparty, amount, phone, page, and reference zones.
+    for index, line in enumerate(cleaned_lines[:-1]):
+        if not SPLIT_ACCOUNT_LABEL_ONLY_RE.fullmatch(line):
+            continue
+        candidate_line = cleaned_lines[index + 1]
+        if COUNTERPARTY_RE.search(candidate_line):
+            continue
+        record = _columnar_account_candidate(candidate_line)
+        if record:
+            raw.append(record)
     return _dedupe_account_records(raw)
 
 
@@ -2486,6 +2557,7 @@ def build_preflight(
         years = detect_years(year_evidence_lines if parsed_page_lines else lines)
         period_headers = detect_period_headers(parsed_page_lines)
         year_anchors = detect_year_anchors(parsed_page_lines)
+        parser_hints = detect_parser_hints(parsed_page_lines)
         period_intervals = detect_period_intervals(parsed_page_lines)
         account_hint_records = _collect_account_hint_records(lines)
         if not account_hint_records and isinstance(page_words, list):
@@ -2503,6 +2575,7 @@ def build_preflight(
                 "detected_periods": detect_periods(lines),
                 "period_headers": period_headers,
                 "year_anchors": year_anchors,
+                "parser_hints": parser_hints,
                 "period_intervals": period_intervals,
                 "document_metadata_dates": document_metadata_dates,
                 "statement_titles": detect_statement_titles(lines),
@@ -2588,6 +2661,7 @@ def build_preflight(
     period_intervals: list[dict[str, object]] = []
     period_headers: list[dict[str, object]] = []
     year_anchors: list[dict[str, object]] = []
+    parser_hints: list[dict[str, object]] = []
     document_metadata_dates: list[dict[str, object]] = []
     contextual_date_evidence: list[dict[str, object]] = []
     for item in statement_files:
@@ -2606,6 +2680,10 @@ def build_preflight(
             source_ref = anchor.get("source_ref") if isinstance(anchor.get("source_ref"), dict) else {}
             copied["source_ref"] = {"file": source_file, **source_ref}
             year_anchors.append(copied)
+        for hint in item.get("parser_hints", []):
+            if not isinstance(hint, dict):
+                continue
+            parser_hints.append({"file": source_file, **hint})
         for interval in item.get("period_intervals", []):
             if not isinstance(interval, dict):
                 continue
@@ -2652,7 +2730,8 @@ def build_preflight(
     out_of_period_generated_dates = [
         evidence
         for evidence in document_metadata_dates
-        if str(evidence.get("date", ""))[:4] != str(tax_year)
+        if evidence.get("kind") == "generated-on"
+        and str(evidence.get("date", ""))[:4] != str(tax_year)
     ]
     if out_of_period_generated_dates:
         generated_dates = stable_unique(
@@ -2664,6 +2743,22 @@ def build_preflight(
         )
         warnings.append(message)
         add_gate(gates, OUT_OF_PERIOD_GENERATED_DATE_GATE, message)
+    out_of_period_certificate_dates = [
+        evidence
+        for evidence in document_metadata_dates
+        if evidence.get("kind") == "certificate-issued"
+        and str(evidence.get("date", ""))[:4] != str(tax_year)
+    ]
+    if out_of_period_certificate_dates:
+        certificate_dates = stable_unique(
+            str(evidence.get("date")) for evidence in out_of_period_certificate_dates if evidence.get("date")
+        )
+        message = (
+            f"Certificate issue date(s) outside requested tax year {tax_year}: {', '.join(certificate_dates)}. "
+            "They do not establish statement-period coverage or prior-year account existence."
+        )
+        warnings.append(message)
+        add_gate(gates, OUT_OF_PERIOD_CERTIFICATE_DATE_GATE, message)
     outside_years = [year for year in coverage_years if year != tax_year]
     if outside_years:
         message = f"Detected statement-period year(s) outside requested tax year {tax_year}: {', '.join(str(year) for year in outside_years)}."
@@ -2823,6 +2918,43 @@ def build_preflight(
     primary_institution = most_common_hint(institution_hints)
     status = REVIEW_REQUIRED_STATUS if gates else READY_STATUS
 
+    date_evidence: list[dict[str, object]] = []
+    for interval in period_intervals:
+        date_evidence.append(
+            {
+                "role": "statement-period",
+                "start": interval.get("start"),
+                "end": interval.get("end"),
+                "source_ref": interval.get("source_ref"),
+                "end_source_ref": interval.get("end_source_ref"),
+            }
+        )
+    for anchor in year_anchors:
+        date_evidence.append(
+            {
+                "role": "movement",
+                "date": anchor.get("date"),
+                "source_ref": anchor.get("source_ref"),
+            }
+        )
+    for evidence in contextual_date_evidence:
+        date_evidence.append(
+            {
+                "role": "opening-boundary",
+                "date": evidence.get("date"),
+                "year": evidence.get("year"),
+                "source_ref": evidence.get("source_ref"),
+            }
+        )
+    for evidence in document_metadata_dates:
+        date_evidence.append(
+            {
+                "role": evidence.get("kind"),
+                "date": evidence.get("date"),
+                "source_ref": evidence.get("source_ref"),
+            }
+        )
+
     for item in statement_files:
         item.pop("_account_hint_records", None)
 
@@ -2856,10 +2988,12 @@ def build_preflight(
             "detected_periods": period_values,
             "period_headers": period_headers,
             "year_anchors": year_anchors,
+            "parser_hints": parser_hints,
             "period_intervals": period_intervals,
             "unresolved_periods": unresolved_periods,
             "document_metadata_dates": document_metadata_dates,
             "contextual_date_evidence": contextual_date_evidence,
+            "date_evidence": date_evidence,
             "period_coverage_review": coverage_review,
             "low_text_files": [
                 str(item.get("file"))
@@ -2951,7 +3085,7 @@ def write_review_csv(path: Path, data: dict[str, object]) -> None:
         # e.g. --out points beneath an existing file, or an unwritable directory.
         raise PreflightError(f"Could not write {path}: {exc}") from exc
     with handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         for item in data.get("statement_files", []):
             if not isinstance(item, dict):
@@ -3276,6 +3410,49 @@ def source_out_of_period_generated_date_evidence(source: dict[str, object], tax_
     )
 
 
+def source_out_of_period_certificate_date_evidence(source: dict[str, object], tax_year: int) -> list[dict[str, object]]:
+    coverage = source.get("coverage_hints")
+    if not isinstance(coverage, dict) or not isinstance(coverage.get("document_metadata_dates"), list):
+        return []
+    normalized: list[dict[str, object]] = []
+    for raw_item in coverage["document_metadata_dates"]:
+        if not isinstance(raw_item, dict) or raw_item.get("kind") != "certificate-issued":
+            continue
+        try:
+            parsed_date = date.fromisoformat(str(raw_item.get("date") or ""))
+        except ValueError:
+            continue
+        if parsed_date.year == tax_year:
+            continue
+        source_ref = raw_item.get("source_ref")
+        if not isinstance(source_ref, dict):
+            continue
+        try:
+            page, line = int(source_ref.get("page")), int(source_ref.get("line"))
+        except (TypeError, ValueError):
+            continue
+        source_file = str(source_ref.get("file") or "").strip()
+        confidence = str(raw_item.get("confidence") or "")
+        if source_file and page > 0 and line > 0 and confidence in {"high", "medium"}:
+            normalized.append(
+                {
+                    "kind": "certificate-issued",
+                    "date": parsed_date.isoformat(),
+                    "confidence": confidence,
+                    "source_ref": {"file": source_file, "page": page, "line": line},
+                }
+            )
+    return sorted(
+        normalized,
+        key=lambda item: (
+            str(item["date"]),
+            str(item["source_ref"]["file"]),  # type: ignore[index]
+            int(item["source_ref"]["page"]),  # type: ignore[index]
+            int(item["source_ref"]["line"]),  # type: ignore[index]
+        ),
+    )
+
+
 def source_account_opening_evidence(source: dict[str, object], tax_year: int) -> dict[str, object] | None:
     """Return a single eligible leading gap without changing raw coverage.
 
@@ -3576,6 +3753,38 @@ def build_user_resolutions(
             "--confirm-generated-on-date is only allowed when preflight reports out-of-period-generated-date."
         )
 
+    certificate_date_gate_codes = {OUT_OF_PERIOD_CERTIFICATE_DATE_GATE} & gate_codes
+    confirmed_certificate_dates = _unique_iso_date_arguments(args, "confirm_certificate_issued_date")
+    certificate_date_evidence = source_out_of_period_certificate_date_evidence(source, tax_year)
+    expected_certificate_dates = sorted({str(item["date"]) for item in certificate_date_evidence})
+    if certificate_date_gate_codes:
+        if not certificate_date_evidence:
+            raise PreflightError(
+                "out-of-period-certificate-date requires source-bound certificate issue evidence; rerun preflight."
+            )
+        if confirmed_certificate_dates != expected_certificate_dates:
+            raise PreflightError(
+                "Pass --confirm-certificate-issued-date once for every extracted out-of-period certificate issue date: "
+                + ", ".join(expected_certificate_dates)
+                + "."
+            )
+    elif confirmed_certificate_dates:
+        raise PreflightError(
+            "--confirm-certificate-issued-date is only allowed when preflight reports out-of-period-certificate-date."
+        )
+
+    migrated_dates = _unique_iso_date_arguments(args, "confirm_account_migrated_or_reissued_on")
+    migration_note = clean_line(str(getattr(args, "migration_note", "") or ""))
+    if migrated_dates:
+        if migrated_dates != confirmed_certificate_dates:
+            raise PreflightError(
+                "--confirm-account-migrated-or-reissued-on must exactly match the confirmed source certificate issue date(s)."
+            )
+        if len(migration_note) < 16:
+            raise PreflightError("--migration-note must explain the user-attested migration/reissue in at least 16 characters.")
+    elif migration_note:
+        raise PreflightError("--migration-note requires --confirm-account-migrated-or-reissued-on.")
+
     confirmed_account_opened_on: str | None = None
     raw_account_opened_on = getattr(args, "confirm_account_opened_on", None)
     if raw_account_opened_on not in (None, ""):
@@ -3583,6 +3792,9 @@ def build_user_resolutions(
             confirmed_account_opened_on = date.fromisoformat(str(raw_account_opened_on)).isoformat()
         except (TypeError, ValueError) as exc:
             raise PreflightError("--confirm-account-opened-on must use an ISO calendar date (YYYY-MM-DD).") from exc
+    confirmed_account_opened_month = str(getattr(args, "confirm_account_opened_month", "") or "").strip()
+    if confirmed_account_opened_on and confirmed_account_opened_month:
+        raise PreflightError("Use only one of --confirm-account-opened-on or --confirm-account-opened-month.")
     account_opening_evidence = source_account_opening_evidence(source, tax_year)
     if confirmed_account_opened_on:
         if "possible-missing-statement-period" not in gate_codes:
@@ -3598,6 +3810,21 @@ def build_user_resolutions(
             raise PreflightError(
                 "--confirm-account-opened-on must exactly match the first source-supported period start "
                 f"({first_source_period['start']})."
+            )
+    if confirmed_account_opened_month:
+        if "possible-missing-statement-period" not in gate_codes:
+            raise PreflightError(
+                "--confirm-account-opened-month is only allowed when preflight reports possible-missing-statement-period."
+            )
+        if account_opening_evidence is None:
+            raise PreflightError(
+                "--confirm-account-opened-month can resolve only one leading coverage gap with no internal or trailing gaps. Obtain the missing statements instead."
+            )
+        first_source_period = account_opening_evidence["first_source_period"]
+        if confirmed_account_opened_month != str(first_source_period["start"])[:7]:
+            raise PreflightError(
+                "--confirm-account-opened-month must match the month containing the first source-supported period start "
+                f"({str(first_source_period['start'])[:7]})."
             )
 
     currency = source.get("currency") if isinstance(source.get("currency"), dict) else {}
@@ -3682,6 +3909,26 @@ def build_user_resolutions(
             if generated_date_gate_codes
             else {"status": "not-required"}
         ),
+        "certificate_issued_dates": (
+            {
+                "status": "user-confirmed",
+                "confirmed_dates": confirmed_certificate_dates,
+                "source_date_evidence": certificate_date_evidence,
+                "resolved_gate_codes": sorted(certificate_date_gate_codes),
+            }
+            if certificate_date_gate_codes
+            else {"status": "not-required"}
+        ),
+        "account_migrated_or_reissued": (
+            {
+                "status": "user-confirmed-unverified",
+                "dates": migrated_dates,
+                "note": migration_note,
+                "source_date_evidence": certificate_date_evidence,
+            }
+            if migrated_dates
+            else {"status": "not-required"}
+        ),
         "account_opened_on": (
             {
                 "status": "user-confirmed",
@@ -3690,6 +3937,16 @@ def build_user_resolutions(
                 "resolved_gate_codes": ["possible-missing-statement-period"],
             }
             if confirmed_account_opened_on and account_opening_evidence is not None
+            else {"status": "not-required"}
+        ),
+        "account_opened_month": (
+            {
+                "status": "user-confirmed",
+                "month": confirmed_account_opened_month,
+                **account_opening_evidence,
+                "resolved_gate_codes": ["possible-missing-statement-period"],
+            }
+            if confirmed_account_opened_month and account_opening_evidence is not None
             else {"status": "not-required"}
         ),
         "currency": (
@@ -3764,6 +4021,9 @@ def command_review_handoff(args: argparse.Namespace) -> int:
     account_opened_on = user_resolutions.get("account_opened_on")
     if isinstance(account_opened_on, dict) and account_opened_on.get("status") == "user-confirmed":
         account_opened_on["source_preflight_sha256"] = source_sha256
+    account_opened_month = user_resolutions.get("account_opened_month")
+    if isinstance(account_opened_month, dict) and account_opened_month.get("status") == "user-confirmed":
+        account_opened_month["source_preflight_sha256"] = source_sha256
     statement_files = source.get("statement_files")
     if not isinstance(statement_files, list):
         raise PreflightError("Preflight JSON has no statement_files list; rerun preflight.")
@@ -5642,6 +5902,16 @@ def _iso_date_arg(raw: str) -> str:
         raise argparse.ArgumentTypeError(f"date {raw!r} must use YYYY-MM-DD.") from None
 
 
+def _year_month_arg(raw: str) -> str:
+    if not re.fullmatch(r"\d{4}-\d{2}", raw):
+        raise argparse.ArgumentTypeError(f"month {raw!r} must use YYYY-MM.")
+    try:
+        date.fromisoformat(raw + "-01")
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"month {raw!r} must be a real calendar month.") from None
+    return raw
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -5707,10 +5977,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Confirm one extracted out-of-period generated-on date; repeat only for dates shown in the source preflight.",
     )
     handoff.add_argument(
+        "--confirm-certificate-issued-date",
+        action="append",
+        metavar="YYYY-MM-DD",
+        type=_iso_date_arg,
+        help="Confirm one extracted out-of-period certificate issue date; repeat only for dates shown in preflight.",
+    )
+    handoff.add_argument(
+        "--confirm-account-migrated-or-reissued-on",
+        action="append",
+        metavar="YYYY-MM-DD",
+        type=_iso_date_arg,
+        help="Record a user-attested migration/reissue date that exactly matches a confirmed certificate issue date.",
+    )
+    handoff.add_argument(
+        "--migration-note",
+        help="Required explanation for a user-attested account migration/reissue; retained separately from source evidence.",
+    )
+    handoff.add_argument(
         "--confirm-account-opened-on",
         metavar="YYYY-MM-DD",
         type=_iso_date_arg,
         help="Confirm an account-opening date only for one continuous leading coverage gap that ends immediately before the first source period.",
+    )
+    handoff.add_argument(
+        "--confirm-account-opened-month",
+        metavar="YYYY-MM",
+        type=_year_month_arg,
+        help="Confirm only the opening month for one continuous leading gap whose first source period begins in that month.",
     )
     handoff.add_argument(
         "--confirm-currency",

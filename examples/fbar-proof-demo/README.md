@@ -26,11 +26,13 @@ proof workflow without regenerating media.
 The demo deliberately uses the frozen
 `get-year-end-fx-rate/tests/fixtures/treasury-2025-12-31.json` response. It does
 not call the network. Source PDFs are generated deterministically; the workflow
-CLIs still record the current run time and absolute local artifact paths in
-their normal provenance fields. After the full pipeline and all contract checks
-pass, the committed text samples replace the private checkout prefix with the
-literal `${REPO_ROOT}` token and rebind the reviewed handoff's source-preflight
-hash. The generated PDF evidence is unchanged.
+CLIs still record the current run time and local artifact paths in their normal
+provenance fields. Before the final packet is sealed, the committed text samples
+replace any private checkout prefix with the literal `${REPO_ROOT}` token and
+rebind the reviewed handoff's source-preflight hash. Aggregation then records
+safe packet-relative paths, binds the final published bytes, and successfully
+reverifies the packet after relocation. The generated PDF evidence is unchanged
+by path sanitization.
 
 ## What it proves
 
@@ -48,9 +50,11 @@ The happy path:
    2025-10-10.
 5. Retains the frozen Treasury/Fiscal Data source response and workpaper for
    `1 USD = 3773.62 COP` on 2025-12-31.
-6. Confirms the reviewed synthetic ledger, then writes the real aggregate JSON,
-   CSV, and PDF. Both the daily threshold and FinCEN maximum-value views are
-   `no` for this fixture.
+6. Confirms the reviewed synthetic ledger, then writes the schema 1.4 aggregate
+   JSON, interval-aware CSV, PDF, and portable postflight manifest. It reruns
+   `verify-packet` against the published bytes. Both the daily threshold and
+   FinCEN maximum-value views are `no` for this fixture, with lower/upper answers
+   both `no` and an integrity result of `pass`.
 
 The refusal path omits Q2, then asserts all fail-closed behavior:
 
@@ -72,6 +76,8 @@ Key happy-path outputs:
 - [`fbar-2025-summary.json`](artifacts/happy-path/fbar-2025-summary.json)
 - [`fbar-2025-summary.csv`](artifacts/happy-path/fbar-2025-summary.csv)
 - [`fbar-2025-summary.pdf`](artifacts/happy-path/fbar-2025-summary.pdf)
+- [`fbar-2025-summary-postflight.json`](artifacts/happy-path/fbar-2025-summary-postflight.json)
+- [`fbar-2025-summary-verification.json`](artifacts/happy-path/fbar-2025-summary-verification.json)
 - [`account-ledger.csv`](artifacts/happy-path/account-ledger.csv)
 - [`statement-preflight-reviewed.json`](artifacts/happy-path/statement-preflight-reviewed.json)
 - [`FX workpaper.json`](artifacts/happy-path/fx-proof/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.json)
@@ -93,6 +99,9 @@ Run-level evidence:
 - [rendered summary page](../../docs/assets/demo/fbar-proof-summary-page-1.png)
 - [rendered FX proof page](../../docs/assets/demo/fbar-fx-proof-page-1.png)
 
-The checksum manifest covers the statement fixtures, retained workflow packet,
-run transcript, demo manifest, and public media. It intentionally excludes both
-copies of the checksum manifest itself.
+The checksum manifest covers the statement fixtures, retained workflow packet
+including postflight/verification JSON, run transcript, demo manifest, and
+public media. It intentionally excludes both copies of the checksum manifest
+itself. `run_demo.py --check` runs the current code in scratch and independently
+rechecks that the committed sample schemas, artifact inventory, and portable
+postflight result are current.

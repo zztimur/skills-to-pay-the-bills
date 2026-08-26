@@ -51,7 +51,7 @@ For a Treasury packet, the source note also says whether that JSON was fetched l
 
 ## When Treasury Is Offline
 
-If the lookup exits 5, use the exact API query URL printed in the error, save its raw JSON response, and rerun the same lookup with `--api-file /path/to/response.json`. Do not replace the response with a search snippet, screenshot, or copied number. The resulting workpaper states whether the JSON was fetched live or supplied from a local file and retains its SHA-256.
+If lookup exits 5, retain its classified cause (`tls-certificate-verification`, `dns-unavailable`, `timeout`, `http-error`, or `network-unavailable`). Run `fetch-plan --mode lookup --currency COP --year 2025` to print the exact API URL and offline replay command without making a request. Save the raw JSON response for that URL and rerun with `--api-file`. TLS verification stays strict; configure a valid trust bundle rather than bypassing it. Do not replace the response with a snippet, screenshot, or copied number.
 
 The JSON is the source of truth for machines. The PDF is for humans. The chat answer links everything because a plain path in chat is technically information and practically annoying.
 
@@ -80,7 +80,7 @@ Claude should use the same root `SKILL.md`, references, and script. The command 
 Treasury/Fiscal Data lookup:
 
 ```bash
-python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py lookup \
+python3 -B get-year-end-fx-rate/scripts/get_year_end_fx_rate.py lookup \
   --currency COP \
   --year 2025 \
   --output-root work/fbar-fx-rate-proof
@@ -91,7 +91,7 @@ python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py lookup \
 Manual workpaper for a verified year-end source:
 
 ```bash
-python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py manual \
+python3 -B get-year-end-fx-rate/scripts/get_year_end_fx_rate.py manual \
   --currency COP \
   --year 2025 \
   --rate 3900.00 \
@@ -135,9 +135,9 @@ This is the useful kind of friction. A missing rate is better than a tidy-lookin
 After script changes:
 
 ```bash
-python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py self-test
-python3 get-year-end-fx-rate/tests/run_regressions.py
-python3 get-year-end-fx-rate/scripts/get_year_end_fx_rate.py map-check --year 2025 --currency AED --strict
+python3 -B get-year-end-fx-rate/scripts/get_year_end_fx_rate.py self-test
+python3 -B get-year-end-fx-rate/tests/run_regressions.py
+python3 -B get-year-end-fx-rate/scripts/get_year_end_fx_rate.py map-check --year 2025 --currency AED --strict
 ```
 
 The script keeps a Treasury row-to-ISO map because Fiscal Data uses labels like `United Arab Emirates-Dirham`, not ISO codes like `AED`. Use targeted `map-check --currency <ISO>` when adding a currency. Untargeted strict `map-check` must classify every row as mapped or explicitly excepted; an unexplained row is a map-maintenance failure, not proof that Treasury lacks a rate. The frozen 2025 Treasury response in `tests/fixtures/` keeps that test deterministic.

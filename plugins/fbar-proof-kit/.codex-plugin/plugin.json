@@ -1,6 +1,6 @@
 {
   "name": "fbar-proof-kit",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Build a local, source-linked, review-ready FBAR threshold support packet from machine-readable foreign-bank statements.",
   "author": {
     "name": "zztimur",
@@ -26,7 +26,7 @@
     "capabilities": [
       "Local files",
       "Human review gates",
-      "JSON CSV PDF artifacts"
+      "Portable verified artifacts"
     ],
     "websiteURL": "https://zztimur.github.io/skills-to-pay-the-bills/",
     "privacyPolicyURL": "https://github.com/zztimur/skills-to-pay-the-bills/blob/main/PRIVACY.md",

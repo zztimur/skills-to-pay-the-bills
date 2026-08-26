@@ -35,7 +35,7 @@ Treasury Reporting Rates are quarterly U.S. government reporting rates. For this
 
 The requested year-end date must exist before a packet is created. If today is before the requested `YYYY-12-31`, stop. A retrieval date, saved proof file, source note, or `--year-end-confirmed` flag cannot override the calendar.
 
-If the Treasury API call fails with exit code 5, retain the raw JSON response for the exact query URL in the error and rerun the same lookup with `--api-file`. Treat that local JSON as source proof, not as a substitute rate: do not use search snippets, screenshots, or copied values. Record whether the response was fetched live or supplied locally.
+If the Treasury API call fails with exit code 5, record the emitted `fetch_failure_class`, use `fetch-plan` to preserve the exact query URL and offline replay command, retain the raw JSON response for that URL, and rerun the same lookup with `--api-file`. TLS remains verified; configure an existing trust bundle when necessary rather than disabling certificate checks. Treat local JSON as source proof, not as a substitute rate: do not use search snippets, screenshots, or copied values. Record whether the response was fetched live or supplied locally.
 
 If Fiscal Data has a row for the requested currency/year but the helper says the ISO code is unmapped, treat that as a script map-maintenance issue, not as Treasury unavailability. Update `TREASURY_ROWS_BY_CODE`, a documented alternate mapping, or the explicit exception registry, then rerun strict `map-check`. The frozen `tests/fixtures/treasury-2025-12-31.json` fixture must have no unexplained rows.
 

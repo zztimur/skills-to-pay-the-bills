@@ -1751,6 +1751,79 @@ for label, candidate in columnar_decoys:
           d and d["account_hints"] == [] and "unknown-account" in gates_of(d),
           f"accounts={d['account_hints'] if d else '?'} gates={gates_of(d)}")
 
+# Compact period headers, text-layer split account labels, opening-month
+# attestations, and certificate dates are source shapes observed outside the
+# original synthetic corpus. Keep their semantics locked independently from the
+# downstream FBAR parser.
+p = make_pdf("postmortem-compact-period.pdf", [
+    "Northwind Ledger Cooperative Statement",
+    "Account 42424242",  # privacy-gate: allow (synthetic account fixture)
+    "1 SEP - 30 SEP",
+    "Currency USD",
+    "Date | Description",
+    "15/09/2025 Synthetic movement",
+])
+proc, d = run("postmortem-compact-period", [str(p)])
+check("PM-1 compact '1 SEP - 30 SEP' header retains source-bound September coverage",
+      proc.returncode == 0 and d
+      and interval_summary(d) == [("2025-09-01", "2025-09-30", "high", "direct-anchor")],
+      f"coverage={d.get('coverage_hints') if d else '?'}")
+
+p = make_pdf("postmortem-split-account.pdf", [
+    "Northwind Ledger Cooperative Statement",
+    "Account No.",
+    "42424242",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to December 31 2025",
+    "Currency USD",
+])
+proc, d = run("postmortem-split-account", [str(p)])
+check("PM-2 immediate next-line account identifier binds to its explicit label",
+      proc.returncode == 0 and d and d.get("account_hints") == ["42424242"],
+      f"accounts={d.get('account_hints') if d else '?'} gates={gates_of(d)}")
+
+proc, month_handoff = run_handoff(
+    "postmortem-opened-month-reviewed",
+    opened_source,
+    opened_gates,
+    ["--confirm-account-opened-month", "2025-05"],
+)
+month_resolution = month_handoff.get("user_resolutions", {}).get("account_opened_month", {}) if month_handoff else {}
+check("PM-3 opening-month attestation is source-bound and separate from an exact date",
+      proc.returncode == 0 and month_resolution.get("status") == "user-confirmed"
+      and month_resolution.get("month") == "2025-05"
+      and month_handoff.get("user_resolutions", {}).get("account_opened_on") == {"status": "not-required"},
+      f"exit={proc.returncode} stderr={proc.stderr.strip()} resolution={month_resolution}")
+
+p = make_pdf("postmortem-certificate-date.pdf", [
+    "Northwind Ledger Cooperative Statement",
+    "Account 42424242",  # privacy-gate: allow (synthetic account fixture)
+    "Statement period January 1 2025 to December 31 2025",
+    "Currency USD",
+    "Certificate issued August 1 2026",
+])
+proc, cert_data = run("postmortem-certificate-date", [str(p)])
+cert_source = WORK / "postmortem-certificate-date.json"
+cert_gates = gates_of(cert_data)
+proc, cert_handoff = run_handoff(
+    "postmortem-certificate-date-reviewed",
+    cert_source,
+    cert_gates,
+    [
+        "--confirm-certificate-issued-date", "2026-08-01",
+        "--confirm-account-migrated-or-reissued-on", "2026-08-01",
+        "--migration-note", "User confirms the account was reissued on the certificate date.",
+    ],
+)
+date_roles = cert_data.get("coverage_hints", {}).get("date_evidence", []) if cert_data else []
+cert_resolution = cert_handoff.get("user_resolutions", {}).get("certificate_issued_dates", {}) if cert_handoff else {}
+migration_resolution = cert_handoff.get("user_resolutions", {}).get("account_migrated_or_reissued", {}) if cert_handoff else {}
+check("PM-4 certificate issue dates remain metadata and can bind an explicit migration attestation",
+      proc.returncode == 0 and cert_gates == ["out-of-period-certificate-date"]
+      and any(item.get("role") == "certificate-issued" and item.get("date") == "2026-08-01" for item in date_roles)
+      and cert_resolution.get("confirmed_dates") == ["2026-08-01"]
+      and migration_resolution.get("status") == "user-confirmed-unverified",
+      f"gates={cert_gates} date_roles={date_roles} stderr={proc.stderr.strip()}")
+
 # --------------------------------------------------------------------------- #
 # Report
 # --------------------------------------------------------------------------- #

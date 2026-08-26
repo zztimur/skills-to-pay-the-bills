@@ -8,7 +8,7 @@ Did my foreign accounts cross the FBAR threshold, and can we show the work?
 
 The point is not to file FinCEN Form 114 or give legal advice. The point is to turn statement PDFs and confirmed account ledgers into a support packet that separates what the records show from what still needs review.
 
-Current package version: 1.8.7.
+Current package version: 1.9.0.
 
 ## The Rule
 
@@ -28,7 +28,8 @@ The final aggregate command writes:
 
 - a JSON decision file;
 - a CSV for day-by-day review;
-- a concise PDF summary for human review.
+- a concise PDF summary for human review;
+- a portable SHA-256 postflight manifest.
 
 The result reports two views separately:
 
@@ -37,7 +38,9 @@ The result reports two views separately:
 
 Those are related but not identical. The skill keeps them separate so the support packet does not blur a daily reconstruction into a maximum-value filing concept.
 
-The extraction JSON also carries `review_summary.same_day_balance_candidates` and a `data_sufficiency` card. The card distinguishes `transaction-rows`, `period-end-only`, mixed evidence, and no observations; it reports `daily_threshold: insufficient-records` and `maximum_account_value: not-determinable` when missing opening coverage or long carry-forward gaps prevent a reliable answer. It does not replace account confirmation. Every JSON/CSV ledger row has an `evidence_class`: `transaction`, `period-end-summary`, `carried-forward`, or `missing-opening`. When a labelled closing summary is source-bound to a verified statement period, it records that separately in `review_summary.period_end_summaries`, including the summary and exact period-end references. A period-end summary is an exact-date observation only: it never fills intervening days or proves the annual maximum. For a user-confirmed COP account, a re-verified page period plus either the exact transaction-table header or the compact `Fecha | Descripción | Saldo` PDF-column layout can establish that comma groups are whole COP only in the final `Saldo` column; bare grouped amounts elsewhere stay flagged for review. The compact form also needs a left-column `DD/MM` date and exactly one final monetary cell per visual row. The console only reports how many dates need review; inspect the retained artifacts for the actual candidate values and source references.
+The extraction JSON carries explicit evidence, integrity, value-model, time-alignment, parser-coverage, and data-sufficiency cards. Its currency-agnostic geometry parser identifies Date/Description/Debit/Credit/Balance roles, supports source-resolved full dates and ISO timestamps, ignores description numbers, and selects only the final Balance/Saldo column. A debit/credit-only table can reconstruct balances from a labelled opening through signed movements only when it reconciles to a labelled close; it remains diagnostic. Omitted dated rows or failed reconciliation become a visible `parser-coverage-defect`, never a quiet partial success.
+
+When statements cannot support formal extraction, `attest-account` accepts explicitly reviewed daily values, an all-year zero assertion, or a reported annual maximum while preserving the source PDFs/preflight and permanently labelling the evidence non-formal. Undated maxima flow into known/possible daily intervals instead of invented dates. Aggregation reports lower/upper threshold answers, exact and whole-dollar views, and rounding sensitivity. Its postflight manifest binds the complete ledger/FX/output set with safe packet-relative paths; `verify-packet` rejects missing, replaced, duplicated, or unsafe artifacts, validates retained FX proof, and recomputes the decision after the packet is copied.
 
 ## Use It In Codex
 
@@ -67,7 +70,7 @@ This workflow requires Python 3.11 or newer with `pdfplumber`. Before balance
 extraction, check the parser runtime:
 
 ```bash
-python3 fbar-threshold-check/scripts/fbar_threshold_check.py dependency-check
+python3 -B fbar-threshold-check/scripts/fbar_threshold_check.py dependency-check
 ```
 
 If it reports `pdfplumber missing` in Codex Desktop, use the bundled Python runtime after `load_workspace_dependencies`; otherwise use a Python runtime that includes `pdfplumber`.
@@ -75,7 +78,7 @@ If it reports `pdfplumber missing` in Codex Desktop, use the bundled Python runt
 Preflight one account:
 
 ```bash
-python3 statement-intake-preflight/scripts/statement_intake_preflight.py preflight \
+python3 -B statement-intake-preflight/scripts/statement_intake_preflight.py preflight \
   --pdf statement-01.pdf statement-02.pdf \
   --tax-year 2025 \
   --scope one-account \
@@ -86,7 +89,7 @@ python3 statement-intake-preflight/scripts/statement_intake_preflight.py preflig
 Extract one account:
 
 ```bash
-python3 fbar-threshold-check/scripts/fbar_threshold_check.py extract-account \
+python3 -B fbar-threshold-check/scripts/fbar_threshold_check.py extract-account \
   --pdf statement-01.pdf statement-02.pdf \
   --tax-year 2025 \
   --preflight-json work/statement-preflight.json \
@@ -96,7 +99,7 @@ python3 fbar-threshold-check/scripts/fbar_threshold_check.py extract-account \
 If preflight reports review gates, do not run extraction yet. After the user reviews every non-structural gate, create and use a separate handoff instead:
 
 ```bash
-python3 statement-intake-preflight/scripts/statement_intake_preflight.py review-handoff \
+python3 -B statement-intake-preflight/scripts/statement_intake_preflight.py review-handoff \
   --input work/statement-preflight.json \
   --accept-gate ambiguous-dollar \
   --confirm-currency COP \
@@ -111,7 +114,7 @@ Extraction rejects a missing, duplicated, reordered, or modified statement PDF, 
 Confirm the reviewed account:
 
 ```bash
-python3 fbar-threshold-check/scripts/fbar_threshold_check.py confirm-account \
+python3 -B fbar-threshold-check/scripts/fbar_threshold_check.py confirm-account \
   --input work/account-1.json \
   --balances-confirmed \
   --out work/account-1-confirmed.json
@@ -126,7 +129,7 @@ the final daily-threshold answer remains `insufficient-records`.
 Confirm a non-USD account with retained year-end FX proof:
 
 ```bash
-python3 fbar-threshold-check/scripts/fbar_threshold_check.py confirm-account \
+python3 -B fbar-threshold-check/scripts/fbar_threshold_check.py confirm-account \
   --input work/account-1.json \
   --balances-confirmed \
   --fx-workpaper-json work/fbar-fx-rate-proof/cop-2025-source/workpaper.json \
@@ -136,10 +139,13 @@ python3 fbar-threshold-check/scripts/fbar_threshold_check.py confirm-account \
 Aggregate all confirmed accounts:
 
 ```bash
-python3 fbar-threshold-check/scripts/fbar_threshold_check.py aggregate \
+python3 -B fbar-threshold-check/scripts/fbar_threshold_check.py aggregate \
   --account-ledger work/account-1-confirmed.json work/account-2-confirmed.json \
+  --packet-root . \
   --out outputs/fbar-2025-summary.json
 ```
+
+`--packet-root` must contain every confirmed ledger, FX workpaper, and generated output. The command also writes `fbar-2025-summary-postflight.json`; copy that root as a unit, then verify it with `verify-packet --summary ... --manifest ...`. When the option is omitted, the command uses the artifacts' safe common ancestor and refuses a filesystem-root-only packet. For certificate or preparer evidence, see `attest-account --help`; use it only after explicit review and never describe its output as formal statement extraction.
 
 ## Failure Modes
 
@@ -160,7 +166,8 @@ This is useful friction. An incomplete support packet should say it is incomplet
 After script changes:
 
 ```bash
-python3 fbar-threshold-check/scripts/fbar_threshold_check.py self-test
+python3 -B fbar-threshold-check/scripts/fbar_threshold_check.py self-test
+python3 -B fbar-threshold-check/tests/run_postmortem_regressions.py
 python3 -S skill-forge/scripts/inspect_skill_package.py fbar-threshold-check --json --strict
 ```
 
@@ -170,7 +177,7 @@ FBAR CLIs together, including reviewed handoffs, resolution consumption, coverag
 (needs `reportlab` + `pdfplumber`; it skips cleanly when they are absent):
 
 ```bash
-python3 fbar-threshold-check/tests/run_preflight_integration.py
+python3 -B fbar-threshold-check/tests/run_preflight_integration.py
 ```
 
 If Claude Code is available locally:

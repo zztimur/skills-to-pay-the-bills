@@ -9,7 +9,7 @@
     <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <meta
       name="description"
-      content="A local-first chain of agent skills for building reviewable FBAR support evidence from statement preflight through FX proof and threshold summary."
+      content="A local-first chain of agent skills for building reviewable, portable FBAR support evidence from statement preflight through FX proof, interval-aware aggregation, and postflight verification."
     >
     <link rel="canonical" href="https://zztimur.github.io/skills-to-pay-the-bills/">
 
@@ -123,14 +123,14 @@
                 </li>
                 <li>
                   <span class="step-check" aria-hidden="true">✓</span>
-                  <div><strong>Ledgers confirmed</strong><small>daily view · maximum-value view</small></div>
-                  <span class="step-status">REVIEWED</span>
+                  <div><strong>Evidence classified and verified</strong><small>formal · reconstructed · attested · interval-aware</small></div>
+                  <span class="step-status">VERIFIED</span>
                 </li>
               </ol>
               <div class="packet-output">
                 <span>Output</span>
-                <strong>JSON + CSV + PDF</strong>
-                <span>with checksums</span>
+                <strong>JSON + CSV + PDF + SHA</strong>
+                <span>portable postflight receipt</span>
               </div>
             </div>
           </div>
@@ -164,7 +164,7 @@
             <article>
               <span class="problem-number">03</span>
               <h3>One total hides the path that made it.</h3>
-              <p>Ledgers, review gates, and separate daily and maximum-value views preserve the reasoning for later review.</p>
+              <p>Evidence classes, lower/upper daily bounds, separate maximum-value views, and recomputation preserve what is known and what still depends on review.</p>
             </article>
           </div>
         </div>
@@ -205,8 +205,8 @@
             <li>
               <span class="workflow-number">04</span>
               <div>
-                <h3>Review ledgers, then aggregate</h3>
-                <p>Confirm extracted balances and assumptions account by account. The final packet keeps daily-threshold evidence separate from the maximum-value view.</p>
+                <h3>Classify, aggregate, then verify</h3>
+                <p>Keep formal extraction distinct from reconstructed or attested evidence. Report lower/upper answers when dates are unknown, then bind and recompute the portable packet.</p>
               </div>
               <span class="output-tag">decision JSON · CSV · PDF</span>
             </li>
@@ -288,9 +288,19 @@
               <span><strong>Audit the daily view</strong><small>Spreadsheet-friendly review artifact</small></span>
               <span aria-hidden="true">↗</span>
             </a>
+            <a href="https://github.com/zztimur/skills-to-pay-the-bills/blob/main/examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary-postflight.json">
+              <span class="artifact-type">SHA</span>
+              <span><strong>Inspect the postflight manifest</strong><small>Portable bindings for ledgers, FX proof, JSON, CSV, and PDF</small></span>
+              <span aria-hidden="true">↗</span>
+            </a>
+            <a href="https://github.com/zztimur/skills-to-pay-the-bills/blob/main/examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary-verification.json">
+              <span class="artifact-type">OK</span>
+              <span><strong>Review the verification result</strong><small>Exact artifact set and recomputed decision contract</small></span>
+              <span aria-hidden="true">↗</span>
+            </a>
             <a href="assets/demo/checksums.sha256">
               <span class="artifact-type">SHA</span>
-              <span><strong>Verify the artifacts</strong><small>Checksums for the published demo</small></span>
+              <span><strong>Verify the published downloads</strong><small>Checksums for the demo and public media</small></span>
               <span aria-hidden="true">↗</span>
             </a>
           </div>

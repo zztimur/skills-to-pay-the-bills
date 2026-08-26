@@ -4,55 +4,105 @@
     {
       "account_id": "synthetic-demo-account-0042",
       "currency": "COP",
+      "evidence_class": "formal-extracted",
       "institution": "Fictional Orbit Bank - Synthetic Demo Only",
+      "ledger_binding": {
+        "account_id": "synthetic-demo-account-0042",
+        "bytes": 220837,
+        "evidence_class": "formal-extracted",
+        "path": "account-confirmed.json",
+        "schema_version": "1.4",
+        "sha256": "39075fe80562910e0dfa127c299014ffd489b4965ac7fbbf702f637997d6f0b2"
+      },
+      "max_date": "2025-10-10",
       "max_usd_value": "2782.474123",
+      "max_usd_value_exact": "2782.474123",
       "max_usd_value_whole_dollars": 2783,
-      "source_json": {
-        "confirmed_csv": "${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/account-confirmed.csv",
-        "review_csv": "${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/account-ledger.csv"
+      "maximum_date_known": true,
+      "value_model": {
+        "maximum_date_known": true,
+        "type": "exact-daily"
       }
     }
   ],
   "artifacts": {
-    "combined_csv": "${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.csv",
-    "summary_pdf": "${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/fbar-2025-summary.pdf"
+    "combined_csv": "fbar-2025-summary.csv",
+    "postflight_manifest": "fbar-2025-summary-postflight.json",
+    "summary_pdf": "fbar-2025-summary.pdf"
   },
-  "created_at": "2026-07-18T10:22:06+00:00",
+  "created_at": "2026-08-26T16:22:52+00:00",
   "daily_threshold": {
     "answer": "no",
+    "answer_lower_bound": "no",
+    "answer_sensitivity": "not-sensitive",
+    "answer_upper_bound": "no",
     "exceeded": false,
     "max_combined_date": "2025-10-10",
     "max_combined_usd_value": "2782.474123",
+    "max_upper_bound_date": "2025-10-10",
+    "max_upper_bound_usd_value": "2782.474123",
     "over_limit_dates": [],
+    "possibly_over_limit_dates": [],
     "records_complete": true,
-    "threshold_usd": "10000"
+    "threshold_usd": "10000",
+    "time_alignment": "date-only-upper-bound"
   },
+  "evidence_status": "sufficient",
   "fincen_max_value_view": {
     "account_maxima": [
       {
         "account_id": "synthetic-demo-account-0042",
         "currency": "COP",
+        "evidence_class": "formal-extracted",
         "institution": "Fictional Orbit Bank - Synthetic Demo Only",
+        "ledger_binding": {
+          "account_id": "synthetic-demo-account-0042",
+          "bytes": 220837,
+          "evidence_class": "formal-extracted",
+          "path": "account-confirmed.json",
+          "schema_version": "1.4",
+          "sha256": "39075fe80562910e0dfa127c299014ffd489b4965ac7fbbf702f637997d6f0b2"
+        },
+        "max_date": "2025-10-10",
         "max_usd_value": "2782.474123",
+        "max_usd_value_exact": "2782.474123",
         "max_usd_value_whole_dollars": 2783,
-        "source_json": {
-          "confirmed_csv": "${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/account-confirmed.csv",
-          "review_csv": "${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/account-ledger.csv"
+        "maximum_date_known": true,
+        "value_model": {
+          "maximum_date_known": true,
+          "type": "exact-daily"
         }
       }
     ],
+    "aggregate_account_max_exact_usd": "2782.474123",
     "aggregate_account_max_whole_dollars": 2783,
+    "aggregate_sum_exact_then_round_whole_dollars": 2783,
     "exceeded": false,
+    "rounding_policy": "round-each-account-up-then-sum",
+    "rounding_policy_dependency": false,
     "threshold_usd": "10000"
   },
   "fx_workpapers": [
-    "${REPO_ROOT}/examples/fbar-proof-demo/artifacts/happy-path/fx-proof/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.json"
+    {
+      "account_id": "synthetic-demo-account-0042",
+      "bytes": 3155,
+      "path": "fx-proof/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.json",
+      "sha256": "613d21b18c85b49ee93d35320b5ddf2057fc21dee1f25f9a38e710abc05d3af1"
+    }
   ],
-  "schema_version": "1.3",
+  "integrity_status": "pass",
+  "package_version": "1.9.0",
+  "path_contract": {
+    "manifest_path": "fbar-2025-summary-postflight.json",
+    "mode": "manifest-relative-v1"
+  },
+  "schema_version": "1.4",
   "skill": "fbar-threshold-check",
   "status": "aggregated",
   "tax_year": 2025,
+  "threshold_status": "no",
   "warnings": [
+    "Daily totals are a conservative day-level upper bound because account values are date-aligned, not synchronized intraday observations.",
     "synthetic-demo-account-0042: Preflight gate unknown-institution: No institution hint was found in early statement text; a graphical logo or filename is not automatic institution evidence, so verify the institution manually.",
     "synthetic-demo-account-0042: Preflight reviewed handoff accepted gate(s): unknown-institution",
     "synthetic-demo-account-0042: Preflight: No institution hint was found in early statement text; a graphical logo or filename is not automatic institution evidence, so verify the institution manually."

@@ -1,0 +1,49 @@
+{
+  "account_ledger_bindings": [
+    {
+      "account_id": "synthetic-demo-account-0042",
+      "bytes": 220837,
+      "evidence_class": "formal-extracted",
+      "path": "account-confirmed.json",
+      "schema_version": "1.4",
+      "sha256": "39075fe80562910e0dfa127c299014ffd489b4965ac7fbbf702f637997d6f0b2"
+    }
+  ],
+  "artifact_type": "fbar-proof-postflight",
+  "created_at": "2026-08-26T16:22:52+00:00",
+  "evidence_status": "sufficient",
+  "fx_workpaper_bindings": [
+    {
+      "account_id": "synthetic-demo-account-0042",
+      "bytes": 3155,
+      "path": "fx-proof/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.json",
+      "sha256": "613d21b18c85b49ee93d35320b5ddf2057fc21dee1f25f9a38e710abc05d3af1"
+    }
+  ],
+  "integrity_status": "pass",
+  "output_bindings": {
+    "combined_csv": {
+      "bytes": 30382,
+      "path": "fbar-2025-summary.csv",
+      "sha256": "3c1b4120b7cfc059855bfb98e492b17d3c33562cd01e484b36483363e0061dfc"
+    },
+    "summary_pdf": {
+      "bytes": 2254,
+      "path": "fbar-2025-summary.pdf",
+      "sha256": "a92717427fbd33f926c0909abc094bdc1aec60c58ad7ea04984ec32506e9fd4b"
+    }
+  },
+  "package_version": "1.9.0",
+  "path_contract": {
+    "manifest_path": "fbar-2025-summary-postflight.json",
+    "mode": "manifest-relative-v1"
+  },
+  "schema_version": "1.4",
+  "skill": "fbar-threshold-check",
+  "summary_binding": {
+    "bytes": 4164,
+    "path": "fbar-2025-summary.json",
+    "sha256": "71184e46d48ee3f9c69b956d1dace00f9c380fd970cfcc69e1dcf39961d5debb"
+  },
+  "threshold_status": "no"
+}

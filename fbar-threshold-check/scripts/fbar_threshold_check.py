@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -21,12 +23,13 @@ from typing import Callable, Iterable
 
 getcontext().prec = 28
 
-SCHEMA_VERSION = "1.3"
+SCHEMA_VERSION = "1.4"
+SKILL_VERSION = "1.9.0"
 # Ledgers older than 1.1 predate carry-gap coverage fields and would silently
 # bypass the confirmation gates; refuse them instead. 1.3 stores native balances
 # at their full parsed precision (see fmt_native); 1.1/1.2 ledgers remain
 # readable but carry the older cent-rounded native balances.
-SUPPORTED_SCHEMA_VERSIONS = {"1.1", "1.2", "1.3"}
+SUPPORTED_SCHEMA_VERSIONS = {"1.1", "1.2", "1.3", "1.4"}
 THRESHOLD_USD = Decimal("10000")
 MIN_TEXT_CHARS = 40
 # Longest carry-forward run that is still routine for monthly statement cycles.
@@ -37,12 +40,13 @@ MAX_FINITE_DECIMAL_EXPONENT = 18
 MAX_FX_RECIPROCAL_DRIFT = Decimal("0.000001")
 ACCEPTED_FX_SKILLS = ("get-year-end-fx-rate",)
 PREFLIGHT_SKILL = "statement-intake-preflight"
-PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0", "1.1", "1.2"}
+PREFLIGHT_SUPPORTED_SCHEMA_VERSIONS = {"1.0", "1.1", "1.2", "1.3"}
 PREFLIGHT_READY_STATUS = "ready-for-domain-extraction"
 PREFLIGHT_REVIEW_REQUIRED_STATUS = "review-required"
 PREFLIGHT_REVIEWED_HANDOFF_STATUS = "reviewed-for-domain-extraction"
 PREFLIGHT_REVIEWED_HANDOFF_TYPE = "reviewed-handoff"
 OUT_OF_PERIOD_GENERATED_DATE_GATE = "out-of-period-generated-date"
+OUT_OF_PERIOD_CERTIFICATE_DATE_GATE = "out-of-period-certificate-date"
 
 CURRENCY_CODES = {
     "AED",
@@ -233,6 +237,25 @@ COMPACT_COP_SALDO_COLUMN_TOLERANCE = 24.0
 PDF_WORD_ROW_TOLERANCE = 1.5
 ISO_TIMESTAMP_RE = re.compile(r"\b20\d{2}[-/.]\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?\b")
 
+# Shared geometry parser aliases. Column roles are identified before any
+# currency-specific amount normalization so the same table family behaves the
+# same way in USD and non-USD statements.
+STRUCTURED_COLUMN_ALIASES = {
+    "date": {"date", "fecha", "datum"},
+    "description": {"description", "descripcion", "descripción", "details", "detalle", "concepto"},
+    "debit": {"debit", "debito", "débito", "withdrawal", "cargo", "retiro"},
+    "credit": {"credit", "credito", "crédito", "deposit", "abono"},
+    "balance": {"balance", "saldo", "solde"},
+}
+STRUCTURED_HEADER_MIN_GAP = 18.0
+STRUCTURED_AMOUNT_COLUMN_TOLERANCE = 8.0
+THREE_DECIMAL_CURRENCIES = {"BHD", "JOD", "KWD", "OMR"}
+OPENING_BALANCE_RE = re.compile(r"\b(?:opening|starting|beginning|initial)\s+balance\b|\bsaldo\s+inicial\b", re.I)
+CLOSING_BALANCE_RE = re.compile(
+    r"\b(?:closing|ending|final)\s+balance\b|\bsaldo\s+(?:final|de\s+cierre)\b|\bbalance\s+at\s+(?:period|statement)\s+end\b",
+    re.I,
+)
+
 # One monetary token. Whitespace bridges digit groups only in the explicit
 # space-grouped form (French/NBSP thousands like "500 000" or "1 234,56"). A
 # decimal point breaks the run of 3-digit groups, so decimal-bearing columns
@@ -300,6 +323,15 @@ class InferredShortDate:
     value: date
     note: str
     span: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class StructuredMovement:
+    movement_date: date
+    debit: Decimal
+    credit: Decimal
+    source: SourceRef
+    row_number: int
 
 
 def clean_text(value: object) -> str:
@@ -785,6 +817,342 @@ def extract_compact_cop_table_candidates(
     return candidates, handled_pages, warnings
 
 
+def _structured_header_columns(
+    visual_rows: list[list[dict[str, object]]],
+) -> tuple[int, dict[str, dict[str, object]]] | None:
+    """Return one ordered Date/.../Balance or Date/.../Debit/Credit header."""
+    for row_index, row in enumerate(visual_rows):
+        roles: dict[str, dict[str, object]] = {}
+        for word in row:
+            label = clean_text(word.get("text")).casefold().strip(".:")
+            for role, aliases in STRUCTURED_COLUMN_ALIASES.items():
+                if label in aliases:
+                    # The last Balance header is authoritative when a statement
+                    # repeats balance-like columns.
+                    if role != "balance" or role not in roles or float(word.get("x0", 0)) > float(roles[role].get("x0", 0)):
+                        roles[role] = word
+                    break
+        has_value_columns = "balance" in roles or ({"debit", "credit"} <= set(roles))
+        if "date" not in roles or not has_value_columns:
+            continue
+        ordered = sorted((float(word.get("x0", 0)), role) for role, word in roles.items())
+        if any(right[0] - left[0] < STRUCTURED_HEADER_MIN_GAP for left, right in zip(ordered, ordered[1:])):
+            continue
+        if "balance" in roles and float(roles["balance"].get("x0", 0)) != max(value for value, _role in ordered):
+            continue
+        return row_index, roles
+    return None
+
+
+def _structured_cells(
+    row: list[dict[str, object]], columns: dict[str, dict[str, object]]
+) -> dict[str, str]:
+    ordered = sorted((float(word.get("x0", 0)), role) for role, word in columns.items())
+    boundaries = [
+        (ordered[index][0] + ordered[index + 1][0]) / 2
+        for index in range(len(ordered) - 1)
+    ]
+    cells: dict[str, list[dict[str, object]]] = {role: [] for _x, role in ordered}
+    for word in sorted(row, key=lambda value: float(value.get("x0", 0))):
+        center = (float(word.get("x0", 0)) + float(word.get("x1", word.get("x0", 0)))) / 2
+        column_index = 0
+        while column_index < len(boundaries) and center >= boundaries[column_index]:
+            column_index += 1
+        cells[ordered[column_index][1]].append(word)
+    return {
+        role: clean_text(" ".join(clean_text(word.get("text")) for word in words))
+        for role, words in cells.items()
+    }
+
+
+def _structured_date(
+    raw: str, contexts: tuple[PagePeriodContext, ...], *, day_first_header: bool
+) -> tuple[date, str] | None:
+    """Resolve a table date without guessing DD/MM versus MM/DD."""
+    value = clean_text(raw)
+    iso_match = DATE_PATTERNS[0].search(value)
+    if iso_match:
+        try:
+            parsed = date(int(iso_match.group(1)), int(iso_match.group(2)), int(iso_match.group(3)))
+        except ValueError:
+            return None
+        return parsed, "ISO/date-first numeric date"
+
+    full_match = DATE_PATTERNS[1].search(value)
+    if full_match:
+        first, second, year = int(full_match.group(1)), int(full_match.group(2)), int(full_match.group(3))
+        possibilities: set[date] = set()
+        if first > 12:
+            pairs = ((first, second),)
+        elif second > 12:
+            pairs = ((second, first),)
+        else:
+            pairs = ((first, second), (second, first))
+        for day, month in pairs:
+            try:
+                candidate = date(year, month, day)
+            except ValueError:
+                continue
+            if not contexts or any(context.start <= candidate <= context.end for context in contexts):
+                possibilities.add(candidate)
+        if len(possibilities) == 1:
+            return next(iter(possibilities)), "full numeric date resolved from the source-bound statement period"
+        return None
+
+    inferred = infer_short_transaction_date(value, contexts, day_first=day_first_header)
+    if inferred is not None:
+        return inferred.value, inferred.note
+    return None
+
+
+def _looks_like_structured_date(raw: str) -> bool:
+    """Identify date-shaped cells so unresolved ambiguity becomes a defect."""
+    value = clean_text(raw)
+    return bool(
+        ISO_TIMESTAMP_RE.search(value)
+        or DATE_PATTERNS[0].search(value)
+        or DATE_PATTERNS[1].search(value)
+        or SHORT_TRANSACTION_DATE_RE.search(value)
+    )
+
+
+def _isolated_amount(raw: str) -> tuple[Decimal, str, tuple[str, ...]] | None:
+    values = parse_money_values(raw)
+    if len(values) != 1:
+        return None
+    amount, token, _position, notes = values[0]
+    return amount, token, notes
+
+
+def _bind_structured_source_ref(
+    source_rows: list[tuple[SourceRef, str]], date_cell: str, amount_tokens: Iterable[str], used: set[int]
+) -> SourceRef | None:
+    date_anchor = clean_text(date_cell).split()[0]
+    tokens = [clean_text(token) for token in amount_tokens if clean_text(token)]
+    for ref, line in source_rows:
+        if ref.line in used or date_anchor not in line:
+            continue
+        if tokens and not any(token in line for token in tokens):
+            continue
+        used.add(ref.line)
+        return ref
+    return None
+
+
+def _labelled_page_balance(
+    source_rows: list[tuple[SourceRef, str]], pattern: re.Pattern[str]
+) -> tuple[Decimal, SourceRef] | None:
+    matches: list[tuple[Decimal, SourceRef]] = []
+    for ref, line in source_rows:
+        if not pattern.search(line):
+            continue
+        values = parse_money_values(mask_date_spans(line))
+        if len(values) == 1:
+            matches.append((values[0][0], ref))
+    return matches[0] if len(matches) == 1 else None
+
+
+def extract_structured_table_candidates(
+    pdf_paths: list[str],
+    lines: list[tuple[SourceRef, str]],
+    tax_year: int,
+    currency: str,
+    page_period_contexts: dict[tuple[str, int], tuple[PagePeriodContext, ...]],
+    *,
+    excluded_page_keys: set[tuple[str, int]] | None = None,
+    mode: str = "auto",
+) -> tuple[list[BalanceCandidate], set[tuple[str, int]], list[str], list[dict[str, object]]]:
+    """Parse structured tables by column role, with an optional reconciliation lane."""
+    try:
+        import pdfplumber  # type: ignore
+    except ImportError as exc:  # pragma: no cover - environment-specific.
+        raise FbarError("pdfplumber is required for extract-account. Install/use a runtime with pdfplumber.", 2) from exc
+
+    excluded = excluded_page_keys or set()
+    source_rows_by_page: dict[tuple[str, int], list[tuple[SourceRef, str]]] = defaultdict(list)
+    for ref, line in lines:
+        source_rows_by_page[(normalize_preflight_path(ref.file), ref.page)].append((ref, line))
+
+    candidates: list[BalanceCandidate] = []
+    handled_pages: set[tuple[str, int]] = set()
+    warnings: list[str] = []
+    profiles: list[dict[str, object]] = []
+    for raw_path in pdf_paths:
+        path = Path(raw_path)
+        try:
+            with pdfplumber.open(str(path)) as pdf:
+                for page_number, page in enumerate(pdf.pages, start=1):
+                    page_key = (normalize_preflight_path(path), page_number)
+                    if page_key in excluded:
+                        continue
+                    contexts = page_period_contexts.get(page_key, ())
+                    visual_rows = visual_word_rows(page.extract_words(use_text_flow=True, keep_blank_chars=False))
+                    header = _structured_header_columns(visual_rows)
+                    if header is None:
+                        continue
+                    header_index, columns = header
+                    has_balance = "balance" in columns
+                    if mode == "transaction-balances" and not has_balance:
+                        continue
+                    if mode == "reconcile-movements" and has_balance:
+                        continue
+                    handled_pages.add(page_key)
+                    source_rows = source_rows_by_page.get(page_key, [])
+                    used_source_lines: set[int] = set()
+                    row_candidates: list[BalanceCandidate] = []
+                    movements: list[StructuredMovement] = []
+                    visible_rows = 0
+                    omitted_rows = 0
+                    day_first_header = clean_text(columns["date"].get("text")).casefold() == "fecha"
+                    for row_number, row in enumerate(visual_rows[header_index + 1 :], start=header_index + 2):
+                        cells = _structured_cells(row, columns)
+                        raw_date = cells.get("date", "")
+                        parsed_date = _structured_date(raw_date, contexts, day_first_header=day_first_header)
+                        if parsed_date is None:
+                            if _looks_like_structured_date(raw_date):
+                                visible_rows += 1
+                                omitted_rows += 1
+                            continue
+                        visible_rows += 1
+                        movement_date, date_note = parsed_date
+                        if movement_date.year != tax_year:
+                            omitted_rows += 1
+                            continue
+                        if has_balance:
+                            parsed_balance = _isolated_amount(cells.get("balance", ""))
+                            if parsed_balance is None:
+                                omitted_rows += 1
+                                continue
+                            amount, token, amount_notes = parsed_balance
+                            source_ref = _bind_structured_source_ref(source_rows, raw_date, [token], used_source_lines)
+                            if source_ref is None:
+                                omitted_rows += 1
+                                continue
+                            notes = [
+                                "Structured-table parser selected the final Balance column by PDF coordinates.",
+                                date_note,
+                            ]
+                            notes.extend(amount_notes)
+                            row_candidates.append(
+                                BalanceCandidate(
+                                    balance_date=movement_date,
+                                    amount=amount,
+                                    currency=currency,
+                                    confidence="high" if not amount_notes else "medium",
+                                    source=source_ref,
+                                    notes=tuple(notes),
+                                )
+                            )
+                        else:
+                            debit_value = _isolated_amount(cells.get("debit", "")) if cells.get("debit") else None
+                            credit_value = _isolated_amount(cells.get("credit", "")) if cells.get("credit") else None
+                            if debit_value is None and credit_value is None:
+                                omitted_rows += 1
+                                continue
+                            debit = debit_value[0] if debit_value else Decimal("0")
+                            credit = credit_value[0] if credit_value else Decimal("0")
+                            tokens = [item[1] for item in (debit_value, credit_value) if item is not None]
+                            source_ref = _bind_structured_source_ref(source_rows, raw_date, tokens, used_source_lines)
+                            if source_ref is None:
+                                omitted_rows += 1
+                                continue
+                            movements.append(StructuredMovement(movement_date, debit, credit, source_ref, row_number))
+
+                    reconciliation: dict[str, object] = {"status": "not-applicable"}
+                    if has_balance:
+                        candidates.extend(row_candidates)
+                    else:
+                        opening = _labelled_page_balance(source_rows, OPENING_BALANCE_RE)
+                        closing = _labelled_page_balance(source_rows, CLOSING_BALANCE_RE)
+                        tolerance = Decimal("0.0005") if currency in THREE_DECIMAL_CURRENCIES else Decimal("0.005")
+                        if opening is None or closing is None or not contexts or not movements:
+                            reconciliation = {
+                                "status": "failed",
+                                "reason": "missing-source-bound-opening-closing-or-movements",
+                            }
+                        else:
+                            running = opening[0]
+                            reconstructed: list[BalanceCandidate] = [
+                                BalanceCandidate(
+                                    balance_date=contexts[0].start,
+                                    amount=running,
+                                    currency=currency,
+                                    confidence="high",
+                                    source=opening[1],
+                                    notes=("Source-bound opening balance for movement reconciliation.",),
+                                    candidate_type="reconstructed-from-movements",
+                                )
+                            ]
+                            for movement in sorted(movements, key=lambda item: (item.movement_date, item.row_number)):
+                                running = running - movement.debit + movement.credit
+                                reconstructed.append(
+                                    BalanceCandidate(
+                                        balance_date=movement.movement_date,
+                                        amount=running,
+                                        currency=currency,
+                                        confidence="high",
+                                        source=movement.source,
+                                        notes=(
+                                            "Reconstructed from source-bound opening balance plus signed Debit/Credit movement.",
+                                            f"Equation: prior balance - {fmt_native(movement.debit)} + {fmt_native(movement.credit)} = {fmt_native(running)}.",
+                                        ),
+                                        candidate_type="reconstructed-from-movements",
+                                    )
+                                )
+                            difference = running - closing[0]
+                            if abs(difference) <= tolerance:
+                                candidates.extend(reconstructed)
+                                reconciliation = {
+                                    "status": "passed",
+                                    "opening_native": fmt_native(opening[0]),
+                                    "computed_closing_native": fmt_native(running),
+                                    "source_closing_native": fmt_native(closing[0]),
+                                    "difference_native": fmt_native(difference),
+                                    "movement_count": len(movements),
+                                    "opening_source_ref": source_ref_to_string(opening[1]),
+                                    "closing_source_ref": source_ref_to_string(closing[1]),
+                                }
+                            else:
+                                reconciliation = {
+                                    "status": "failed",
+                                    "reason": "closing-checkpoint-mismatch",
+                                    "computed_closing_native": fmt_native(running),
+                                    "source_closing_native": fmt_native(closing[0]),
+                                    "difference_native": fmt_native(difference),
+                                    "first_broken_checkpoint_source_ref": source_ref_to_string(closing[1]),
+                                }
+                        if reconciliation["status"] != "passed":
+                            warnings.append(
+                                f"Parser coverage defect on {path.name} page {page_number}: the opening-plus-movements table could not reconcile to its source-bound closing checkpoint."
+                            )
+                    extracted_rows = len(row_candidates) if has_balance else (len(movements) if reconciliation.get("status") == "passed" else 0)
+                    if visible_rows and extracted_rows == 0 and has_balance:
+                        warnings.append(
+                            f"Parser coverage defect on {path.name} page {page_number}: {visible_rows} structured date row(s) were visible but none bound to the final Balance column."
+                        )
+                    elif omitted_rows:
+                        warnings.append(
+                            f"Structured table on {path.name} page {page_number} omitted {omitted_rows} of {visible_rows} visible dated row(s) that could not be source-bound without guessing."
+                        )
+                    profiles.append(
+                        {
+                            "file": path.name,
+                            "page": page_number,
+                            "parser_profile": "column-role-balance" if has_balance else "opening-plus-movements",
+                            "column_roles": sorted(columns),
+                            "visible_dated_rows": visible_rows,
+                            "extracted_rows": extracted_rows,
+                            "omitted_rows": omitted_rows,
+                            "reconciliation": reconciliation,
+                        }
+                    )
+        except FbarError:
+            raise
+        except Exception as exc:
+            raise FbarError(f"Could not read {path} as a PDF: {exc}", 2) from exc
+    return candidates, handled_pages, warnings, profiles
+
+
 def infer_currency(text: str, override: str | None, warnings: list[str]) -> str:
     if override:
         code = normalize_currency(override)
@@ -1101,7 +1469,13 @@ def extract_balance_candidates(
     return candidates, warnings
 
 
-def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandidate]) -> tuple[list[dict[str, object]], dict[str, object], list[str]]:
+def build_daily_rows(
+    tax_year: int,
+    currency: str,
+    candidates: list[BalanceCandidate],
+    *,
+    leading_zero_until: date | None = None,
+) -> tuple[list[dict[str, object]], dict[str, object], list[str]]:
     warnings: list[str] = []
     by_day: dict[date, list[BalanceCandidate]] = defaultdict(list)
     for candidate in candidates:
@@ -1114,7 +1488,9 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
     rows: list[dict[str, object]] = []
     observed_days = 0
     transaction_observed_days = 0
+    reconstructed_observed_days = 0
     period_end_summary_days = 0
+    user_attested_zero_days = 0
     carried_days = 0
     missing_days = 0
     low_confidence_days = 0
@@ -1194,6 +1570,8 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
             observed_days += 1
             if selected.candidate_type == "period-end-summary":
                 period_end_summary_days += 1
+            elif selected.candidate_type == "reconstructed-from-movements":
+                reconstructed_observed_days += 1
             else:
                 transaction_observed_days += 1
             if confidence == "low":
@@ -1203,6 +1581,13 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                 end_source_ref = source_ref_to_string(selected.period_end_source)
                 if end_source_ref and end_source_ref not in source_refs:
                     source_refs.append(end_source_ref)
+            selected_evidence_class = (
+                "period-end-summary"
+                if selected.candidate_type == "period-end-summary"
+                else "reconstructed-from-movements"
+                if selected.candidate_type == "reconstructed-from-movements"
+                else "transaction"
+            )
             rows.append(
                 {
                     "date": iso_day(day),
@@ -1211,7 +1596,7 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                     "usd_balance": None,
                     "threshold_usd_value": None,
                     "balance_source": "period-end-summary" if selected.candidate_type == "period-end-summary" else "observed",
-                    "evidence_class": "period-end-summary" if selected.candidate_type == "period-end-summary" else "transaction",
+                    "evidence_class": selected_evidence_class,
                     "confidence": confidence,
                     "source_refs": source_refs,
                     "notes": notes,
@@ -1235,6 +1620,25 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
                     "confidence": "medium",
                     "source_refs": [source_ref_to_string(last_ref)] if last_ref else [],
                     "notes": ["No same-day balance found; carried forward most recent observed account balance."],
+                    "review_flags": [],
+                }
+            )
+        elif leading_zero_until is not None and day < leading_zero_until:
+            user_attested_zero_days += 1
+            rows.append(
+                {
+                    "date": iso_day(day),
+                    "currency": currency,
+                    "native_balance": "0",
+                    "usd_balance": None,
+                    "threshold_usd_value": None,
+                    "balance_source": "user-attested-pre-opening-zero",
+                    "evidence_class": "user-attested-zero",
+                    "confidence": "user-attested",
+                    "source_refs": [],
+                    "notes": [
+                        f"User attested that the account was not open before {leading_zero_until.isoformat()}; pre-opening days are zero and are not source-extracted balances."
+                    ],
                     "review_flags": [],
                 }
             )
@@ -1289,7 +1693,9 @@ def build_daily_rows(tax_year: int, currency: str, candidates: list[BalanceCandi
         # equivalent transaction-row evidence in a review artifact.
         "observed_days": observed_days,
         "transaction_observed_days": transaction_observed_days,
+        "reconstructed_observed_days": reconstructed_observed_days,
         "period_end_summary_days": period_end_summary_days,
+        "user_attested_zero_days": user_attested_zero_days,
         "carried_forward_days": carried_days,
         "missing_days": missing_days,
         "complete_year": missing_days == 0,
@@ -1316,13 +1722,20 @@ def build_data_sufficiency(coverage: dict[str, object]) -> dict[str, object]:
     transaction_observed_days = as_int(
         coverage.get("transaction_observed_days", 0), "coverage.transaction_observed_days"
     )
+    reconstructed_observed_days = as_int(
+        coverage.get("reconstructed_observed_days", 0), "coverage.reconstructed_observed_days"
+    )
     period_end_summary_days = as_int(
         coverage.get("period_end_summary_days", 0), "coverage.period_end_summary_days"
     )
     missing_days = as_int(coverage.get("missing_days", 0), "coverage.missing_days")
     carry_gaps = coverage.get("carry_gaps") if isinstance(coverage.get("carry_gaps"), list) else []
 
-    if transaction_observed_days and period_end_summary_days:
+    if reconstructed_observed_days and (transaction_observed_days or period_end_summary_days):
+        evidence_profile = "mixed-formal-and-reconstructed"
+    elif reconstructed_observed_days:
+        evidence_profile = "reconstructed-from-movements"
+    elif transaction_observed_days and period_end_summary_days:
         evidence_profile = "mixed-transaction-and-period-end"
     elif transaction_observed_days:
         evidence_profile = "transaction-rows"
@@ -1569,7 +1982,7 @@ def write_account_csv(path: Path, account_data: dict[str, object]) -> None:
     if not isinstance(account, dict):
         account = {}
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         for row in rows:
             if not isinstance(row, dict):
@@ -1891,6 +2304,49 @@ def source_out_of_period_generated_date_evidence(source: dict[str, object], tax_
     )
 
 
+def source_out_of_period_certificate_date_evidence(source: dict[str, object], tax_year: int) -> list[dict[str, object]]:
+    coverage = source.get("coverage_hints")
+    if not isinstance(coverage, dict) or not isinstance(coverage.get("document_metadata_dates"), list):
+        return []
+    normalized: list[dict[str, object]] = []
+    for raw_item in coverage["document_metadata_dates"]:
+        if not isinstance(raw_item, dict) or raw_item.get("kind") != "certificate-issued":
+            continue
+        try:
+            parsed_date = date.fromisoformat(str(raw_item.get("date") or ""))
+        except ValueError:
+            continue
+        if parsed_date.year == tax_year:
+            continue
+        source_ref = raw_item.get("source_ref")
+        if not isinstance(source_ref, dict):
+            continue
+        try:
+            page, line = int(source_ref.get("page")), int(source_ref.get("line"))
+        except (TypeError, ValueError):
+            continue
+        source_file = str(source_ref.get("file") or "").strip()
+        confidence = str(raw_item.get("confidence") or "")
+        if source_file and page > 0 and line > 0 and confidence in {"high", "medium"}:
+            normalized.append(
+                {
+                    "kind": "certificate-issued",
+                    "date": parsed_date.isoformat(),
+                    "confidence": confidence,
+                    "source_ref": {"file": source_file, "page": page, "line": line},
+                }
+            )
+    return sorted(
+        normalized,
+        key=lambda item: (
+            str(item["date"]),
+            str(item["source_ref"]["file"]),  # type: ignore[index]
+            int(item["source_ref"]["page"]),  # type: ignore[index]
+            int(item["source_ref"]["line"]),  # type: ignore[index]
+        ),
+    )
+
+
 def _period_source_ref(value: object, label: str, source_file: str, aggregate: bool) -> dict[str, object]:
     """Normalize a source location while binding it to its statement file."""
     if not isinstance(value, dict):
@@ -1987,7 +2443,7 @@ def _normalized_period_interval(
 
 def preflight_v12_period_contract(source: dict[str, object]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Validate schema-1.2 period provenance and its aggregate mirror exactly."""
-    if str(source.get("schema_version") or "") != "1.2":
+    if str(source.get("schema_version") or "") not in {"1.2", "1.3"}:
         return [], []
     raw_files = source.get("statement_files")
     coverage = source.get("coverage_hints")
@@ -2101,7 +2557,7 @@ def validate_reviewed_v12_period_resolutions(
 ) -> None:
     """Bind reviewed period and account-opening decisions to exact source evidence."""
     periods, unresolved = preflight_v12_period_contract(source)
-    if str(source.get("schema_version") or "") != "1.2":
+    if str(source.get("schema_version") or "") not in {"1.2", "1.3"}:
         return
     tax_year = as_int(source.get("tax_year", 0), "source preflight tax_year")
     period_gate = {"unresolved-period-year"} & gate_codes
@@ -2140,6 +2596,29 @@ def validate_reviewed_v12_period_resolutions(
     elif opening != {"status": "not-required"}:
         raise FbarError("Reviewed handoff has an invalid account-opening resolution.", 2)
 
+    opening_month = resolutions.get("account_opened_month")
+    if opening_month is None and str(source.get("schema_version") or "") != "1.3":
+        return
+    if not isinstance(opening_month, dict):
+        raise FbarError("Reviewed handoff user_resolutions.account_opened_month must be an object.", 2)
+    if opening.get("status") == "user-confirmed" and opening_month.get("status") == "user-confirmed":
+        raise FbarError("Reviewed handoff cannot confirm both an exact account-opening date and an opening month.", 2)
+    if opening_month.get("status") == "user-confirmed":
+        if not opening_gate or evidence is None:
+            raise FbarError("Reviewed handoff opening-month resolution is not supported by one leading source coverage gap.", 2)
+        expected_month = str(evidence["first_source_period"]["start"])[:7]  # type: ignore[index]
+        expected_opening_month = {
+            "status": "user-confirmed",
+            "month": expected_month,
+            **evidence,
+            "resolved_gate_codes": ["possible-missing-statement-period"],
+            "source_preflight_sha256": source_sha256,
+        }
+        if opening_month != expected_opening_month:
+            raise FbarError("Reviewed handoff opening-month resolution does not exactly match source coverage evidence.", 2)
+    elif opening_month != {"status": "not-required"}:
+        raise FbarError("Reviewed handoff has an invalid account-opening-month resolution.", 2)
+
 
 def validate_reviewed_user_resolutions(
     handoff: dict[str, object], source: dict[str, object], source_sha256: str, gates: list[dict[str, str]]
@@ -2160,9 +2639,10 @@ def validate_reviewed_user_resolutions(
     )
     institution_gate_codes = {"unknown-institution", "possible-mixed-institutions"} & gate_codes
     generated_date_gate_codes = {OUT_OF_PERIOD_GENERATED_DATE_GATE} & gate_codes
+    certificate_date_gate_codes = {OUT_OF_PERIOD_CERTIFICATE_DATE_GATE} & gate_codes
     raw_resolutions = handoff.get("user_resolutions")
     if raw_resolutions is None:
-        if currency_gate_codes or account_gate_codes or year_gate_codes or institution_gate_codes or generated_date_gate_codes:
+        if currency_gate_codes or account_gate_codes or year_gate_codes or institution_gate_codes or generated_date_gate_codes or certificate_date_gate_codes:
             raise FbarError(
                 "Reviewed handoff is missing structured user resolutions for its currency, account, year, institution, or generated-date review gates.",
                 2,
@@ -2239,6 +2719,41 @@ def validate_reviewed_user_resolutions(
         if generated_on_dates is not None:
             if not isinstance(generated_on_dates, dict) or generated_on_dates.get("status") != "not-required":
                 raise FbarError("Reviewed handoff has an unexpected generated-on date resolution.", 2)
+
+    expected_certificate_evidence = source_out_of_period_certificate_date_evidence(source, tax_year)
+    expected_certificate_dates = sorted({str(item["date"]) for item in expected_certificate_evidence})
+    raw_certificate_dates = resolutions.get("certificate_issued_dates")
+    certificate_dates = (
+        {"status": "not-required"}
+        if raw_certificate_dates is None and str(source.get("schema_version") or "") != "1.3"
+        else reviewed_resolution_object(resolutions, "certificate_issued_dates")
+    )
+    if certificate_date_gate_codes:
+        if certificate_dates.get("status") != "user-confirmed":
+            raise FbarError("Reviewed handoff does not contain a user-confirmed certificate issue date resolution.", 2)
+        reviewed_resolution_gate_codes(certificate_dates, certificate_date_gate_codes, "certificate_issued_dates")
+        if certificate_dates.get("confirmed_dates") != expected_certificate_dates:
+            raise FbarError("Reviewed handoff certificate issue dates do not exactly match source evidence.", 2)
+        if certificate_dates.get("source_date_evidence") != expected_certificate_evidence:
+            raise FbarError("Reviewed handoff certificate date evidence does not exactly match source anchors.", 2)
+    elif certificate_dates.get("status") != "not-required":
+        raise FbarError("Reviewed handoff has an unexpected certificate issue date resolution.", 2)
+
+    raw_migration = resolutions.get("account_migrated_or_reissued")
+    migration = (
+        {"status": "not-required"}
+        if raw_migration is None and str(source.get("schema_version") or "") != "1.3"
+        else reviewed_resolution_object(resolutions, "account_migrated_or_reissued")
+    )
+    if migration.get("status") == "user-confirmed-unverified":
+        if not certificate_date_gate_codes or migration.get("dates") != expected_certificate_dates:
+            raise FbarError("Reviewed handoff migration/reissue resolution is not bound to confirmed certificate issue dates.", 2)
+        if migration.get("source_date_evidence") != expected_certificate_evidence:
+            raise FbarError("Reviewed handoff migration/reissue evidence does not preserve source certificate anchors.", 2)
+        if len(clean_text(migration.get("note"))) < 16:
+            raise FbarError("Reviewed handoff migration/reissue note is missing or too short.", 2)
+    elif migration.get("status") != "not-required":
+        raise FbarError("Reviewed handoff has an invalid migration/reissue resolution.", 2)
 
     currency = reviewed_resolution_object(resolutions, "currency")
     source_currency = source.get("currency") if isinstance(source.get("currency"), dict) else {}
@@ -2531,17 +3046,33 @@ def command_extract_account(
         page_period_contexts,
         currency_confirmed=currency_corroborated_or_confirmed,
     )
+    exact_cop_text_pages = {
+        (normalize_preflight_path(ref.file), ref.page)
+        for ref, line in lines
+        if currency == "COP" and currency_corroborated_or_confirmed and is_confirmed_cop_table_header(line)
+    }
+    structured_candidates, structured_page_keys, structured_warnings, parser_profiles = extract_structured_table_candidates(
+        args.pdf,
+        lines,
+        args.tax_year,
+        currency,
+        page_period_contexts,
+        excluded_page_keys=compact_page_keys | exact_cop_text_pages,
+        mode=str(getattr(args, "mode", "auto")),
+    )
+    handled_page_keys = compact_page_keys | structured_page_keys
     fallback_candidates, candidate_warnings = extract_balance_candidates(
         lines,
         args.tax_year,
         currency,
         page_period_contexts=page_period_contexts,
         currency_confirmed=currency_corroborated_or_confirmed,
-        excluded_page_keys=compact_page_keys,
-        external_candidate_count=len(compact_candidates),
+        excluded_page_keys=handled_page_keys,
+        external_candidate_count=len(compact_candidates) + len(structured_candidates),
     )
-    candidates = [*compact_candidates, *fallback_candidates]
+    candidates = [*compact_candidates, *structured_candidates, *fallback_candidates]
     warnings.extend(compact_warnings)
+    warnings.extend(structured_warnings)
     warnings.extend(candidate_warnings)
     if before_final_fingerprint_check is not None:
         before_final_fingerprint_check()
@@ -2549,8 +3080,63 @@ def command_extract_account(
     # fingerprint check. Re-check now so every extraction pass is bound to the
     # exact preflighted bytes, not merely the initial text-layer pass.
     verify_preflight_statement_fingerprints(preflight, args.pdf)
-    daily_rows, coverage, coverage_warnings = build_daily_rows(args.tax_year, currency, candidates)
+    opened_resolution = user_resolutions.get("account_opened_on")
+    opened_month_resolution = user_resolutions.get("account_opened_month")
+    leading_zero_until: date | None = None
+    for resolution in (opened_resolution, opened_month_resolution):
+        if not isinstance(resolution, dict) or resolution.get("status") != "user-confirmed":
+            continue
+        first_period = resolution.get("first_source_period")
+        if isinstance(first_period, dict) and first_period.get("start"):
+            try:
+                leading_zero_until = date.fromisoformat(str(first_period["start"]))
+            except ValueError:
+                leading_zero_until = None
+            break
+    daily_rows, coverage, coverage_warnings = build_daily_rows(
+        args.tax_year,
+        currency,
+        candidates,
+        leading_zero_until=leading_zero_until,
+    )
     warnings.extend(coverage_warnings)
+
+    parser_defects = [
+        profile
+        for profile in parser_profiles
+        if (
+            int(profile.get("visible_dated_rows", 0) or 0) > 0
+            and int(profile.get("extracted_rows", 0) or 0) == 0
+        )
+        or (
+            isinstance(profile.get("reconciliation"), dict)
+            and profile["reconciliation"].get("status") == "failed"  # type: ignore[index]
+        )
+    ]
+    reconstructed = any(candidate.candidate_type == "reconstructed-from-movements" for candidate in candidates)
+    attested_opening = leading_zero_until is not None
+    if reconstructed:
+        evidence_class = "diagnostic-reconstructed"
+        value_type = "reconstructed-daily"
+    elif attested_opening:
+        evidence_class = "user-attested-daily"
+        value_type = "exact-daily"
+    else:
+        evidence_class = "formal-extracted"
+        value_type = "exact-daily"
+    reconciliation_states = [
+        profile.get("reconciliation")
+        for profile in parser_profiles
+        if isinstance(profile.get("reconciliation"), dict)
+        and profile["reconciliation"].get("status") != "not-applicable"  # type: ignore[index]
+    ]
+    reconciliation_status = (
+        "failed"
+        if any(item.get("status") == "failed" for item in reconciliation_states if isinstance(item, dict))
+        else "passed"
+        if reconciliation_states
+        else "not-applicable"
+    )
 
     reviewed_one_account = user_resolutions.get("one_account") if isinstance(user_resolutions.get("one_account"), dict) else {}
     if args.account_id:
@@ -2567,7 +3153,7 @@ def command_extract_account(
     data: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "skill": "fbar-threshold-check",
-        "status": "extracted-review-required",
+        "status": "parser-coverage-defect" if parser_defects else "extracted-review-required",
         "tax_year": args.tax_year,
         "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "account": {
@@ -2581,6 +3167,26 @@ def command_extract_account(
         "statement_files": file_profiles,
         "coverage": coverage,
         "data_sufficiency": build_data_sufficiency(coverage),
+        "evidence_status": {
+            "class": evidence_class,
+            "confirmation": "unreviewed",
+            "formal_eligibility": evidence_class == "formal-extracted",
+        },
+        "integrity_status": {
+            "source_files_hash_bound": True,
+            "reconciliation": reconciliation_status,
+            "unresolved_items": ["parser-coverage-defect"] if parser_defects else [],
+        },
+        "value_model": {
+            "type": value_type,
+            "maximum_date_known": True,
+        },
+        "time_alignment": "date-only-upper-bound",
+        "parser_coverage": {
+            "status": "defect" if parser_defects else "covered",
+            "profiles": parser_profiles,
+            "defects": parser_defects,
+        },
         "fx": {
             "required": currency not in {"USD", "UNKNOWN", "MIXED"},
             "workpaper_json": None,
@@ -2617,8 +3223,6 @@ def require_account_data(path: Path) -> dict[str, object]:
     data = load_json(path)
     if data.get("skill") != "fbar-threshold-check":
         raise FbarError(f"{path} is not an fbar-threshold-check account ledger.", 2)
-    if "daily_ledger" not in data:
-        raise FbarError(f"{path} has no daily_ledger.", 2)
     version = str(data.get("schema_version") or "missing")
     if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise FbarError(
@@ -2626,6 +3230,10 @@ def require_account_data(path: Path) -> dict[str, object]:
             f"(schema {SCHEMA_VERSION}) so coverage gating applies.",
             2,
         )
+    value_model = data.get("value_model")
+    max_only = isinstance(value_model, dict) and value_model.get("type") == "annual-maximum-only"
+    if "daily_ledger" not in data and not (schema_tuple(version) >= (1, 4) and max_only):
+        raise FbarError(f"{path} has no daily_ledger.", 2)
     return data
 
 
@@ -2816,6 +3424,14 @@ def command_confirm_account(args: argparse.Namespace) -> int:
         inputs,
     )
     data = require_account_data(input_path)
+    parser_coverage = data.get("parser_coverage")
+    if data.get("status") == "parser-coverage-defect" or (
+        isinstance(parser_coverage, dict) and parser_coverage.get("status") == "defect"
+    ):
+        raise FbarError(
+            "Account extraction reports parser-coverage-defect; inspect the named source pages or use a supported reconstructed/attested evidence lane before confirmation.",
+            2,
+        )
     coverage = data.get("coverage", {})
     if not isinstance(coverage, dict):
         raise FbarError("Account ledger has no coverage object.", 2)
@@ -2881,6 +3497,14 @@ def command_confirm_account(args: argparse.Namespace) -> int:
         "fx_confirmed": currency == "USD" or fx_workpaper is not None,
         "carry_forward_accepted": bool(carry_gaps),
     }
+    evidence_status = data.get("evidence_status")
+    if not isinstance(evidence_status, dict):
+        evidence_status = {
+            "class": "formal-extracted",
+            "formal_eligibility": True,
+        }
+    evidence_status["confirmation"] = "user-confirmed"
+    data["evidence_status"] = evidence_status
     if carry_gaps:
         # Surface the acceptance so it propagates into the aggregate summary.
         existing_warnings = data.get("warnings")
@@ -2908,6 +3532,217 @@ def command_confirm_account(args: argparse.Namespace) -> int:
     write_account_csv(csv_path, data)
     print(f"Wrote confirmed account JSON: {out_path}")
     print(f"Wrote confirmed CSV: {csv_path}")
+    return 0
+
+
+def _load_attestation_source(args: argparse.Namespace) -> dict[str, object]:
+    path = Path(args.preflight_json)
+    artifact = read_preflight_json(path, "preflight")
+    if artifact.get("artifact_type") == PREFLIGHT_REVIEWED_HANDOFF_TYPE:
+        source = resolve_reviewed_handoff(artifact, path)
+    else:
+        source = artifact
+    validate_preflight_identity(source, "one-account", args.tax_year, args.pdf)
+    gates = validated_review_gates(source) if source.get("status") == PREFLIGHT_REVIEW_REQUIRED_STATUS else []
+    stop_codes = {gate["code"] for gate in gates if gate["severity"] == "stop"}
+    if stop_codes:
+        raise FbarError(
+            "Attested evidence cannot consume a structural preflight stop gate: " + ", ".join(sorted(stop_codes)),
+            2,
+        )
+    expected = {gate["code"] for gate in gates}
+    accepted = {str(code).strip() for code in (args.accept_gate or []) if str(code).strip()}
+    if accepted != expected:
+        raise FbarError(
+            "--accept-gate must exactly match every non-structural preflight gate for an attested artifact. "
+            f"Expected {sorted(expected)}, got {sorted(accepted)}.",
+            2,
+        )
+    return source
+
+
+def _attested_daily_rows(args: argparse.Namespace, currency: str) -> tuple[list[dict[str, object]], Decimal, date | None]:
+    if args.evidence_class == "user-attested-zero":
+        rows = [
+            {
+                "date": iso_day(day),
+                "currency": currency,
+                "native_balance": "0",
+                "usd_balance": None,
+                "threshold_usd_value": None,
+                "balance_source": "user-attested-zero",
+                "evidence_class": "user-attested-zero",
+                "confidence": "user-attested",
+                "source_refs": [],
+                "notes": ["User attested that the account balance and annual maximum were zero throughout the calendar year."],
+                "review_flags": [],
+            }
+            for day in calendar_dates(args.tax_year)
+        ]
+        return rows, Decimal("0"), None
+    if args.evidence_class == "user-attested-maximum":
+        maximum = as_decimal(args.maximum_native, "--maximum-native")
+        if maximum < 0:
+            raise FbarError("--maximum-native cannot be negative for user-attested-maximum.", 2)
+        maximum_date = date.fromisoformat(args.maximum_date) if args.maximum_date else None
+        if maximum_date is not None and maximum_date.year != args.tax_year:
+            raise FbarError("--maximum-date must be inside --tax-year.", 2)
+        return [], maximum, maximum_date
+
+    if not args.daily_csv:
+        raise FbarError("user-attested-daily requires --daily-csv with date,native_balance columns.", 2)
+    daily_path = require_fx_regular_file(args.daily_csv, "attested daily CSV")
+    rows_by_date: dict[str, dict[str, object]] = {}
+    try:
+        with daily_path.open(encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames is None or not {"date", "native_balance"} <= set(reader.fieldnames):
+                raise FbarError("Attested daily CSV must contain date and native_balance columns.", 2)
+            for index, source_row in enumerate(reader, start=2):
+                try:
+                    row_date = date.fromisoformat(str(source_row.get("date") or ""))
+                except ValueError as exc:
+                    raise FbarError(f"Attested daily CSV row {index} has an invalid ISO date.", 2) from exc
+                if row_date.year != args.tax_year or row_date.isoformat() in rows_by_date:
+                    raise FbarError(f"Attested daily CSV row {index} has an out-of-year or duplicate date.", 2)
+                native = as_decimal(source_row.get("native_balance"), f"attested daily CSV row {index}")
+                rows_by_date[row_date.isoformat()] = {
+                    "date": row_date.isoformat(),
+                    "currency": currency,
+                    "native_balance": fmt_native(native),
+                    "usd_balance": None,
+                    "threshold_usd_value": None,
+                    "balance_source": "user-attested-daily",
+                    "evidence_class": "user-attested-daily",
+                    "confidence": "user-attested",
+                    "source_refs": [],
+                    "notes": ["Daily value supplied in a separately retained user/preparer attestation CSV."],
+                    "review_flags": [],
+                }
+    except OSError as exc:
+        raise FbarError(f"Could not read attested daily CSV: {exc}", 2) from exc
+    expected_dates = [iso_day(day) for day in calendar_dates(args.tax_year)]
+    missing = [day for day in expected_dates if day not in rows_by_date]
+    if missing:
+        raise FbarError(f"Attested daily CSV is incomplete; {len(missing)} calendar day(s) are missing.", 2)
+    rows = [rows_by_date[day] for day in expected_dates]
+    maximum_row = max(rows, key=lambda row: as_decimal(row["native_balance"], "attested native balance"))
+    return rows, as_decimal(maximum_row["native_balance"], "attested maximum"), date.fromisoformat(str(maximum_row["date"]))
+
+
+def command_attest_account(args: argparse.Namespace) -> int:
+    if not args.user_attestation_confirmed:
+        raise FbarError("Pass --user-attestation-confirmed only after the user/preparer reviewed and supplied the attested values.", 2)
+    if args.evidence_class == "user-attested-maximum" and args.maximum_native in (None, ""):
+        raise FbarError("user-attested-maximum requires --maximum-native.", 2)
+    if args.evidence_class != "user-attested-maximum" and (args.maximum_native not in (None, "") or args.maximum_date):
+        raise FbarError("--maximum-native/--maximum-date are available only for user-attested-maximum.", 2)
+    if args.evidence_class != "user-attested-daily" and args.daily_csv:
+        raise FbarError("--daily-csv is available only for user-attested-daily.", 2)
+    out_path = Path(args.out)
+    csv_path = Path(args.csv) if args.csv else account_csv_path(out_path, confirmed=True)
+    inputs: list[tuple[str, str | Path]] = [("statement/certificate PDF", path) for path in args.pdf]
+    inputs.append(("preflight JSON", args.preflight_json))
+    if args.daily_csv:
+        inputs.append(("attested daily CSV", args.daily_csv))
+    if args.fx_workpaper_json:
+        inputs.append(("FX workpaper", args.fx_workpaper_json))
+    outputs = [("attested account JSON", out_path)]
+    if args.evidence_class != "user-attested-maximum":
+        outputs.append(("attested account CSV", csv_path))
+    validate_artifact_paths("attest-account", outputs, inputs)
+    source = _load_attestation_source(args)
+    currency = normalize_currency(args.account_currency)
+    if currency in {"UNKNOWN", "MIXED"}:
+        raise FbarError("--account-currency must be one supported ISO currency code.", 2)
+    rows, maximum_native, maximum_date = _attested_daily_rows(args, currency)
+    fx_workpaper: dict[str, object] | None = None
+    if currency != "USD":
+        if not args.fx_workpaper_json:
+            raise FbarError("Non-USD attested evidence requires --fx-workpaper-json from get-year-end-fx-rate.", 2)
+        fx_workpaper = validate_fx_workpaper(Path(args.fx_workpaper_json), currency, args.tax_year)
+    elif args.fx_workpaper_json:
+        raise FbarError("Do not pass an FX workpaper for a USD attested account.", 2)
+    for row in rows:
+        native = as_decimal(row.get("native_balance"), f"{row.get('date')} native_balance")
+        usd = convert_to_usd(native, currency, fx_workpaper)
+        row["usd_balance"] = fmt_decimal(usd)
+        row["threshold_usd_value"] = fmt_decimal(max(usd, Decimal("0")), "0.000001")
+    maximum_usd = max(convert_to_usd(maximum_native, currency, fx_workpaper), Decimal("0"))
+    maximum_date_known = maximum_date is not None
+    account_hints = source.get("account_hints") if isinstance(source.get("account_hints"), list) else []
+    evidence_class = str(args.evidence_class)
+    data: dict[str, object] = {
+        "schema_version": SCHEMA_VERSION,
+        "skill": "fbar-threshold-check",
+        "status": "confirmed",
+        "tax_year": args.tax_year,
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "confirmed_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "account": {
+            "account_id": args.account_id,
+            "institution": clean_text(args.institution),
+            "currency": currency,
+            "account_number_hints": account_hints,
+            "account_id_source": "user-supplied",
+        },
+        "preflight": preflight_profile({**source, "verified_statement_files": verify_preflight_statement_fingerprints(source, args.pdf)}, args.preflight_json),
+        "evidence_status": {
+            "class": evidence_class,
+            "confirmation": args.confirmation,
+            "formal_eligibility": False,
+        },
+        "integrity_status": {
+            "source_files_hash_bound": True,
+            "reconciliation": "not-applicable",
+            "unresolved_items": [] if evidence_class != "user-attested-maximum" or maximum_date_known else ["maximum-date-unknown"],
+        },
+        "value_model": {
+            "type": "annual-maximum-only" if evidence_class == "user-attested-maximum" else "exact-daily",
+            "maximum_date_known": maximum_date_known,
+            "maximum_native": fmt_native(maximum_native),
+            "maximum_usd_value": fmt_native(maximum_usd),
+            "maximum_date": maximum_date.isoformat() if maximum_date else None,
+        },
+        "time_alignment": "date-only-upper-bound",
+        "daily_ledger": rows,
+        "coverage": {
+            "year": args.tax_year,
+            "calendar_days": len(rows),
+            "observed_days": 0,
+            "transaction_observed_days": 0,
+            "reconstructed_observed_days": 0,
+            "period_end_summary_days": 0,
+            "user_attested_zero_days": len(rows) if evidence_class == "user-attested-zero" else 0,
+            "carried_forward_days": 0,
+            "missing_days": 0 if rows else len(calendar_dates(args.tax_year)),
+            "complete_year": bool(rows),
+            "low_confidence_days": 0,
+            "carry_gaps": [],
+        },
+        "confirmation": {
+            "balances_confirmed": True,
+            "fx_confirmed": currency == "USD" or fx_workpaper is not None,
+            "carry_forward_accepted": False,
+        },
+        "fx": {
+            "required": currency != "USD",
+            "workpaper_json": str(Path(args.fx_workpaper_json)) if args.fx_workpaper_json else None,
+            "workpaper": summarize_fx_workpaper(fx_workpaper) if fx_workpaper else None,
+        },
+        "warnings": [
+            "Values are user/preparer-attested evidence and are not source-extracted daily balances or a filing determination."
+        ],
+        "review_summary": {"same_day_balance_candidates": {"count": 0, "requires_user_review": False, "items": []}, "period_end_summaries": {"count": 0, "requires_user_review": False, "items": []}},
+        "artifacts": {"confirmed_csv": str(csv_path) if rows else None},
+    }
+    verify_preflight_statement_fingerprints(source, args.pdf)
+    write_json(out_path, data)
+    if rows:
+        write_account_csv(csv_path, data)
+    print(f"Wrote attested account JSON: {out_path}")
+    if rows:
+        print(f"Wrote attested account CSV: {csv_path}")
     return 0
 
 
@@ -2959,25 +3794,171 @@ def load_confirmed_account(path: Path) -> dict[str, object]:
             "before aggregating so 3-decimal currencies and boundary values stay exact.",
             2,
         )
+    evidence_status = data.get("evidence_status")
+    if schema_tuple(version) >= (1, 4):
+        if not isinstance(evidence_status, dict):
+            raise FbarError(f"{path} schema 1.4 is missing evidence_status.", 2)
+        evidence_class = str(evidence_status.get("class") or "")
+        if evidence_class not in {
+            "formal-extracted",
+            "diagnostic-reconstructed",
+            "user-attested-daily",
+            "user-attested-zero",
+            "user-attested-maximum",
+        }:
+            raise FbarError(f"{path} has unsupported evidence_status.class {evidence_class!r}.", 2)
+        if evidence_status.get("confirmation") not in {"user-confirmed", "preparer-confirmed"}:
+            raise FbarError(f"{path} has unconfirmed evidence; review and confirm it before aggregation.", 2)
+        if evidence_class != "formal-extracted" and evidence_status.get("formal_eligibility") is not False:
+            raise FbarError(f"{path} diagnostic/attested evidence must keep formal_eligibility false.", 2)
+    value_model = data.get("value_model")
+    max_only = isinstance(value_model, dict) and value_model.get("type") == "annual-maximum-only"
     coverage = data.get("coverage", {})
-    if isinstance(coverage, dict) and as_int(coverage.get("missing_days", 0), "coverage.missing_days") > 0:
-        raise FbarError(f"{path} has incomplete coverage and cannot be aggregated.", 2)
+    if (
+        not max_only
+        and isinstance(coverage, dict)
+        and as_int(coverage.get("missing_days", 0), "coverage.missing_days") > 0
+    ):
+        raise FbarError(f"{path} has incomplete unbounded coverage and cannot be aggregated.", 2)
     rows = data.get("daily_ledger", [])
     if not isinstance(rows, list):
         raise FbarError(f"{path} has no daily_ledger list.", 2)
+    if max_only:
+        maximum_usd = value_model.get("maximum_usd_value") if isinstance(value_model, dict) else None
+        if as_decimal(maximum_usd, "value_model.maximum_usd_value") < 0:
+            raise FbarError(f"{path} has a negative maximum-only USD value.", 2)
+        return data
     for row in rows:
         if isinstance(row, dict) and row.get("threshold_usd_value") is None:
             raise FbarError(f"{path} has unconverted rows. Run confirm-account again.", 2)
     return data
 
 
+def packet_relative_path(path: str | Path, packet_root: Path, label: str = "artifact") -> str:
+    """Return one safe POSIX path rooted in the portable packet directory."""
+    resolved = resolved_artifact_path(path, label)
+    try:
+        relative = resolved.relative_to(packet_root)
+    except ValueError as exc:
+        raise FbarError(f"{label} {resolved} is outside packet root {packet_root}.", 2) from exc
+    pure = PurePosixPath(relative.as_posix())
+    if pure.is_absolute() or not pure.parts or any(part in {"", ".", ".."} for part in pure.parts):
+        raise FbarError(f"{label} has an unsafe packet-relative path: {relative}.", 2)
+    return pure.as_posix()
+
+
+def choose_packet_root(paths: Iterable[str | Path], requested_root: str | Path | None = None) -> Path:
+    """Choose a portable common root, or enforce the caller's explicit root."""
+    resolved_paths = [resolved_artifact_path(path, "packet artifact") for path in paths]
+    if not resolved_paths:
+        raise FbarError("A packet root requires at least one artifact path.", 2)
+    if requested_root:
+        root = resolved_artifact_path(requested_root, "packet root")
+        if not root.is_dir():
+            raise FbarError(f"Packet root must be an existing directory: {root}.", 2)
+    else:
+        try:
+            root = Path(os.path.commonpath([str(path) for path in resolved_paths]))
+        except ValueError as exc:
+            raise FbarError("Packet artifacts do not share a filesystem root; pass --packet-root.", 2) from exc
+        if root in resolved_paths or not root.is_dir():
+            root = root.parent
+    if root == Path(root.anchor):
+        raise FbarError(
+            "Packet artifacts share only the filesystem root; place them under one packet directory or pass --packet-root.",
+            2,
+        )
+    for path in resolved_paths:
+        packet_relative_path(path, root, "packet artifact")
+    return root
+
+
+def packet_path_contract(packet_root: Path, manifest_path: Path) -> dict[str, object]:
+    return {
+        "mode": "manifest-relative-v1",
+        "manifest_path": packet_relative_path(manifest_path, packet_root, "postflight manifest"),
+    }
+
+
+def infer_packet_root(manifest_path: Path, contract: object) -> Path:
+    """Infer a relocated packet root from the manifest's own safe relative path."""
+    if not isinstance(contract, dict) or contract.get("mode") != "manifest-relative-v1":
+        raise FbarError("Postflight manifest has no supported portable path contract.", 2)
+    relative_raw = contract.get("manifest_path")
+    if not isinstance(relative_raw, str) or not relative_raw.strip():
+        raise FbarError("Postflight path contract is missing manifest_path.", 2)
+    relative = PurePosixPath(relative_raw)
+    if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise FbarError("Postflight path contract has an unsafe manifest_path.", 2)
+    resolved_manifest = resolved_artifact_path(manifest_path, "postflight manifest")
+    root = resolved_manifest
+    for _part in relative.parts:
+        root = root.parent
+    expected = (root / Path(*relative.parts)).resolve(strict=False)
+    if expected != resolved_manifest:
+        raise FbarError("Postflight manifest location does not match its portable path contract.", 2)
+    return root
+
+
+def resolve_packet_binding(binding: object, packet_root: Path, label: str) -> Path:
+    """Resolve one safe manifest binding inside the inferred packet root."""
+    if not isinstance(binding, dict):
+        raise FbarError(f"{label} binding must be an object.", 2)
+    relative_raw = binding.get("path")
+    if not isinstance(relative_raw, str) or not relative_raw.strip():
+        raise FbarError(f"{label} binding must include a path.", 2)
+    relative = PurePosixPath(relative_raw)
+    if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise FbarError(f"{label} binding has an unsafe packet-relative path.", 2)
+    candidate = packet_root / Path(*relative.parts)
+    if candidate.is_symlink():
+        raise FbarError(f"{label} binding must not reference a symlink: {relative_raw}.", 2)
+    resolved = candidate.resolve(strict=False)
+    try:
+        resolved.relative_to(packet_root)
+    except ValueError as exc:
+        raise FbarError(f"{label} binding escapes the packet root.", 2) from exc
+    if not resolved.is_file():
+        raise FbarError(f"{label} binding is missing or not a regular file: {relative_raw}.", 2)
+    return resolved
+
+
+def file_binding(path: Path, packet_root: Path | None = None) -> dict[str, object]:
+    candidate = Path(path).expanduser()
+    if candidate.is_symlink():
+        raise FbarError(f"Artifact binding must not reference a symlink: {candidate}.", 2)
+    resolved = resolved_artifact_path(candidate, "artifact")
+    try:
+        size = resolved.stat().st_size
+    except OSError as exc:
+        raise FbarError(f"Could not stat artifact {resolved}: {exc}", 2) from exc
+    return {
+        "path": packet_relative_path(resolved, packet_root) if packet_root else str(resolved),
+        "bytes": size,
+        "sha256": preflight_file_sha256(resolved),
+    }
+
+
+def _max_only_model(account_data: dict[str, object]) -> dict[str, object] | None:
+    model = account_data.get("value_model")
+    if isinstance(model, dict) and model.get("type") == "annual-maximum-only":
+        return model
+    return None
+
+
 def command_aggregate(args: argparse.Namespace) -> int:
     out_path = Path(args.out)
     csv_path = Path(args.csv) if args.csv else combined_csv_path(out_path)
     pdf_path = Path(args.pdf) if args.pdf else summary_pdf_path(out_path)
+    postflight_path = Path(args.postflight) if getattr(args, "postflight", None) else out_path.with_name(out_path.stem + "-postflight.json")
     validate_artifact_paths(
         "aggregate",
-        [("summary JSON", out_path), ("combined CSV", csv_path), ("summary PDF", pdf_path)],
+        [
+            ("summary JSON", out_path),
+            ("combined CSV", csv_path),
+            ("summary PDF", pdf_path),
+            ("postflight manifest", postflight_path),
+        ],
         [("confirmed account ledger", path) for path in args.account_ledger],
     )
     resolved_paths = [resolved_artifact_path(path, "confirmed account ledger") for path in args.account_ledger]
@@ -2986,6 +3967,17 @@ def command_aggregate(args: argparse.Namespace) -> int:
     accounts = [load_confirmed_account(path) for path in resolved_paths]
     if not accounts:
         raise FbarError("At least one --account-ledger is required.", 2)
+
+    bound_fx_paths: list[Path] = []
+    for account_data in accounts:
+        fx = account_data.get("fx")
+        if isinstance(fx, dict) and fx.get("workpaper_json"):
+            bound_fx_paths.append(resolved_artifact_path(str(fx["workpaper_json"]), "FX workpaper"))
+    packet_root = choose_packet_root(
+        [out_path, csv_path, pdf_path, postflight_path, *resolved_paths, *bound_fx_paths],
+        getattr(args, "packet_root", None),
+    )
+    path_contract = packet_path_contract(packet_root, postflight_path)
 
     seen_identities: set[tuple[object, ...]] = set()
     for account_data, ledger_path in zip(accounts, resolved_paths, strict=True):
@@ -3016,74 +4008,141 @@ def command_aggregate(args: argparse.Namespace) -> int:
     account_summaries: list[dict[str, object]] = []
     warnings: list[str] = []
     fx_workpapers: list[object] = []
-    records_complete = True
+    evidence_limited = False
+    alignment_values: set[str] = set()
 
-    for label, account_data in zip(account_labels, accounts, strict=True):
+    for label, account_data, ledger_path in zip(account_labels, accounts, resolved_paths, strict=True):
         account_coverage = account_data.get("coverage", {})
         if not isinstance(account_coverage, dict):
             account_coverage = {}
-        if as_int(account_coverage.get("missing_days", 0), "coverage.missing_days") > 0 or account_coverage.get("carry_gaps"):
-            records_complete = False
-        rows = account_data["daily_ledger"]
+        rows = account_data.get("daily_ledger", [])
         assert isinstance(rows, list)
         by_date = {str(row.get("date")): row for row in rows if isinstance(row, dict)}
         account_rows[label] = by_date
         account = account_data.get("account", {})
         if not isinstance(account, dict):
             account = {}
+        max_only = _max_only_model(account_data)
         values = [as_decimal(row.get("threshold_usd_value"), f"{label} {row.get('date')} threshold") for row in by_date.values()]
-        max_value = max(values) if values else Decimal("0")
+        if max_only is not None:
+            max_value = as_decimal(max_only.get("maximum_usd_value"), f"{label} maximum_usd_value")
+            max_date = str(max_only.get("maximum_date") or "") or None
+        else:
+            max_value = max(values) if values else Decimal("0")
+            max_dates = [
+                day for day, row in by_date.items()
+                if as_decimal(row.get("threshold_usd_value"), f"{label} {day} threshold") == max_value
+            ]
+            max_date = min(max_dates) if max_dates else None
         max_whole = ceil_nonnegative(max_value)
+        evidence = account_data.get("evidence_status")
+        evidence_class = str(evidence.get("class")) if isinstance(evidence, dict) else "legacy-formal-extracted"
+        if evidence_class not in {"formal-extracted", "legacy-formal-extracted"} or max_only is not None:
+            evidence_limited = True
+        alignment_values.add(str(account_data.get("time_alignment") or "date-only-upper-bound"))
+        binding = file_binding(ledger_path, packet_root)
+        binding.update(
+            {
+                "schema_version": account_data.get("schema_version"),
+                "account_id": account.get("account_id"),
+                "evidence_class": evidence_class,
+            }
+        )
         account_summaries.append(
             {
                 "account_id": label,
                 "institution": account.get("institution"),
                 "currency": account.get("currency"),
                 "max_usd_value": fmt_native(max_value),
+                "max_usd_value_exact": fmt_native(max_value),
                 "max_usd_value_whole_dollars": max_whole,
-                "source_json": account_data.get("artifacts", {}),
+                "max_date": max_date,
+                "maximum_date_known": max_date is not None,
+                "evidence_class": evidence_class,
+                "value_model": account_data.get("value_model") or {"type": "exact-daily", "maximum_date_known": True},
+                "ledger_binding": binding,
             }
         )
         fx = account_data.get("fx", {})
         if isinstance(fx, dict) and fx.get("workpaper_json"):
-            fx_workpapers.append(fx.get("workpaper_json"))
+            fx_binding = file_binding(Path(str(fx.get("workpaper_json"))), packet_root)
+            fx_binding["account_id"] = label
+            fx_workpapers.append(fx_binding)
         if account_data.get("warnings"):
             warnings.extend(f"{label}: {warning}" for warning in account_data.get("warnings", []) if isinstance(warning, str))
 
     combined_rows: list[dict[str, object]] = []
     over_limit_dates: list[str] = []
+    possible_over_limit_dates: list[str] = []
     max_combined = Decimal("0")
     max_combined_date: str | None = None
+    max_upper_bound = Decimal("0")
+    max_upper_bound_date: str | None = None
 
     for day in days:
-        combined = Decimal("0")
+        known_total = Decimal("0")
+        upper_total = Decimal("0")
         row: dict[str, object] = {"date": day}
-        for label in account_labels:
+        for label, account_summary in zip(account_labels, account_summaries, strict=True):
             account_day = account_rows[label].get(day)
-            if account_day is None:
-                raise FbarError(f"Account {label} is missing day {day}.", 2)
-            value = as_decimal(account_day.get("threshold_usd_value"), f"{label} {day} threshold")
-            row[label] = fmt_native(value)
-            combined += value
-        row["combined_usd_value"] = fmt_native(combined)
-        row["over_10000"] = combined > THRESHOLD_USD
-        if combined > THRESHOLD_USD:
+            if account_day is not None:
+                known_value = as_decimal(account_day.get("threshold_usd_value"), f"{label} {day} threshold")
+                upper_value = known_value
+            else:
+                maximum = as_decimal(account_summary.get("max_usd_value_exact"), f"{label} maximum")
+                known_value = maximum if account_summary.get("max_date") == day else Decimal("0")
+                upper_value = maximum
+            row[label] = fmt_native(known_value)
+            row[f"{label}__upper_bound"] = fmt_native(upper_value)
+            known_total += known_value
+            upper_total += upper_value
+        row["known_total_usd"] = fmt_native(known_total)
+        row["upper_bound_total_usd"] = fmt_native(upper_total)
+        row["combined_usd_value"] = fmt_native(known_total)
+        row["over_10000"] = known_total > THRESHOLD_USD
+        row["possibly_over_10000"] = upper_total > THRESHOLD_USD
+        if known_total > THRESHOLD_USD:
             over_limit_dates.append(day)
-        if combined > max_combined:
-            max_combined = combined
+        if upper_total > THRESHOLD_USD:
+            possible_over_limit_dates.append(day)
+        if known_total > max_combined:
+            max_combined = known_total
             max_combined_date = day
+        if upper_total > max_upper_bound:
+            max_upper_bound = upper_total
+            max_upper_bound_date = day
         combined_rows.append(row)
 
     aggregate_max_whole = sum(int(item["max_usd_value_whole_dollars"]) for item in account_summaries)
-    if over_limit_dates:
+    aggregate_exact_max = sum(as_decimal(item["max_usd_value_exact"], "account exact maximum") for item in account_summaries)
+    aggregate_sum_then_round = ceil_nonnegative(aggregate_exact_max)
+    rounding_policy_dependency = (aggregate_max_whole > 10000) != (aggregate_sum_then_round > 10000)
+    lower_answer = "yes" if over_limit_dates else "no"
+    upper_answer = "yes" if possible_over_limit_dates else "no"
+    if lower_answer == "yes":
         daily_answer = "yes"
-    elif records_complete:
+    elif upper_answer == "no":
         daily_answer = "no"
     else:
-        daily_answer = "insufficient-records"
+        daily_answer = "review-required"
+    answer_sensitivity = "not-sensitive" if lower_answer == upper_answer else "sensitive-to-undated-evidence"
+    time_alignment = (
+        next(iter(alignment_values))
+        if len(alignment_values) == 1 and next(iter(alignment_values)) in {"synchronized", "end-of-day"}
+        else "date-only-upper-bound"
+    )
+    if time_alignment == "date-only-upper-bound":
+        warnings.append(
+            "Daily totals are a conservative day-level upper bound because account values are date-aligned, not synchronized intraday observations."
+        )
+    if rounding_policy_dependency:
+        warnings.append(
+            "The FinCEN maximum-value threshold result depends on whether each account is rounded before summing or the exact maxima are summed before rounding; preparer review is required."
+        )
 
     summary: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
+        "package_version": SKILL_VERSION,
         "skill": "fbar-threshold-check",
         "status": "aggregated",
         "tax_year": tax_year,
@@ -3092,30 +4151,48 @@ def command_aggregate(args: argparse.Namespace) -> int:
         "daily_threshold": {
             "threshold_usd": "10000",
             "answer": daily_answer,
-            "exceeded": bool(over_limit_dates),
+            "answer_lower_bound": lower_answer,
+            "answer_upper_bound": upper_answer,
+            "answer_sensitivity": answer_sensitivity,
+            "exceeded": lower_answer == "yes",
             "over_limit_dates": over_limit_dates,
+            "possibly_over_limit_dates": possible_over_limit_dates,
             "max_combined_usd_value": fmt_native(max_combined),
             "max_combined_date": max_combined_date,
-            "records_complete": records_complete,
+            "max_upper_bound_usd_value": fmt_native(max_upper_bound),
+            "max_upper_bound_date": max_upper_bound_date,
+            "records_complete": not evidence_limited,
+            "time_alignment": time_alignment,
         },
         "fincen_max_value_view": {
             "threshold_usd": "10000",
             "exceeded": aggregate_max_whole > 10000,
+            "rounding_policy": "round-each-account-up-then-sum",
+            "aggregate_account_max_exact_usd": fmt_native(aggregate_exact_max),
             "aggregate_account_max_whole_dollars": aggregate_max_whole,
+            "aggregate_sum_exact_then_round_whole_dollars": aggregate_sum_then_round,
+            "rounding_policy_dependency": rounding_policy_dependency,
             "account_maxima": account_summaries,
         },
+        "integrity_status": "pass",
+        "evidence_status": "limited" if evidence_limited else "sufficient",
+        "threshold_status": daily_answer,
         "accounts": account_summaries,
         "fx_workpapers": fx_workpapers,
         "warnings": sorted(set(warnings)),
+        "path_contract": path_contract,
         "artifacts": {
-            "combined_csv": str(csv_path),
-            "summary_pdf": str(pdf_path),
+            "combined_csv": packet_relative_path(csv_path, packet_root, "combined CSV"),
+            "summary_pdf": packet_relative_path(pdf_path, packet_root, "summary PDF"),
+            "postflight_manifest": packet_relative_path(postflight_path, packet_root, "postflight manifest"),
         },
     }
 
     write_combined_csv(csv_path, account_labels, combined_rows)
     write_summary_pdf(pdf_path, summary)
     write_json(out_path, summary)
+    manifest = build_postflight_manifest(out_path, summary, postflight_path, packet_root)
+    write_json(postflight_path, manifest)
 
     print(f"Daily threshold answer: {daily_answer}")
     print(f"FinCEN max-value view exceeded: {'yes' if aggregate_max_whole > 10000 else 'no'}")
@@ -3124,6 +4201,387 @@ def command_aggregate(args: argparse.Namespace) -> int:
     print(f"Wrote final JSON: {out_path}")
     print(f"Wrote final CSV: {csv_path}")
     print(f"Wrote summary PDF: {pdf_path}")
+    print(f"Wrote postflight manifest: {postflight_path}")
+    return 0
+
+
+def build_postflight_manifest(
+    summary_path: Path,
+    summary: dict[str, object],
+    manifest_path: Path,
+    packet_root: Path,
+) -> dict[str, object]:
+    account_bindings = [
+        account.get("ledger_binding")
+        for account in summary.get("accounts", [])
+        if isinstance(account, dict) and isinstance(account.get("ledger_binding"), dict)
+    ]
+    artifacts = summary.get("artifacts") if isinstance(summary.get("artifacts"), dict) else {}
+    output_bindings: dict[str, object] = {}
+    for key in ("combined_csv", "summary_pdf"):
+        relative = artifacts.get(key)
+        if not isinstance(relative, str):
+            raise FbarError(f"Summary artifact {key} is missing its packet-relative path.", 2)
+        path = resolve_packet_binding({"path": relative}, packet_root, key)
+        output_bindings[key] = file_binding(path, packet_root)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "package_version": SKILL_VERSION,
+        "skill": "fbar-threshold-check",
+        "artifact_type": "fbar-proof-postflight",
+        "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "path_contract": packet_path_contract(packet_root, manifest_path),
+        "summary_binding": file_binding(summary_path, packet_root),
+        "account_ledger_bindings": account_bindings,
+        "fx_workpaper_bindings": summary.get("fx_workpapers", []),
+        "output_bindings": output_bindings,
+        "integrity_status": "pass",
+        "evidence_status": summary.get("evidence_status"),
+        "threshold_status": summary.get("threshold_status"),
+    }
+
+
+def _binding_matches(binding: object, packet_root: Path, label: str) -> bool:
+    try:
+        resolved = resolve_packet_binding(binding, packet_root, label)
+        current = file_binding(resolved, packet_root)
+    except FbarError:
+        return False
+    return (
+        current["path"] == binding.get("path")
+        and current["bytes"] == binding.get("bytes")
+        and current["sha256"] == binding.get("sha256")
+    )
+
+
+def validate_portable_fx_workpaper(path: Path, currency: str, year: int) -> dict[str, object]:
+    """Validate a relocated FX packet from sibling/packet-relative proof paths."""
+    if path.name != "workpaper.json":
+        raise FbarError("FX workpaper binding must reference workpaper.json.", 2)
+    workpaper = load_json(path)
+    if workpaper.get("skill") not in ACCEPTED_FX_SKILLS:
+        raise FbarError("FX workpaper must come from get-year-end-fx-rate.", 2)
+    if str(workpaper.get("currency", "")).upper() != currency:
+        raise FbarError("FX workpaper currency does not match its bound account.", 2)
+    if as_int(workpaper.get("year", 0), "FX workpaper year") != year:
+        raise FbarError("FX workpaper year does not match its bound account.", 2)
+    if workpaper.get("year_end_date") != f"{year}-12-31":
+        raise FbarError("FX workpaper year_end_date does not match the account tax year.", 2)
+    source = workpaper.get("source")
+    proof = workpaper.get("proof")
+    if not isinstance(source, dict) or not all(source.get(key) for key in ("title", "url", "retrieved")):
+        raise FbarError("FX workpaper source metadata is incomplete.", 2)
+    if source.get("year_end_confirmed") is not True:
+        raise FbarError("FX workpaper source does not confirm year-end support.", 2)
+    if not isinstance(proof, dict):
+        raise FbarError("FX workpaper proof metadata is missing.", 2)
+
+    packet_root = path.parent
+    for filename in ("workpaper.json", "workpaper.md", "workpaper.pdf"):
+        candidate = packet_root / filename
+        if candidate.is_symlink() or not candidate.is_file():
+            raise FbarError(f"FX packet is missing regular file {filename}.", 2)
+    validate_fx_file_hash(packet_root / "workpaper.pdf", proof.get("workpaper_pdf_sha256"), "workpaper_pdf")
+
+    saved_files = proof.get("saved_files")
+    limitations = proof.get("limitations")
+    if not isinstance(saved_files, list):
+        raise FbarError("FX workpaper proof.saved_files must be a list.", 2)
+    if not saved_files and not (
+        isinstance(limitations, list) and any(isinstance(item, str) and item.strip() for item in limitations)
+    ):
+        raise FbarError("FX workpaper without retained source proof must record a limitation.", 2)
+    for index, item in enumerate(saved_files, start=1):
+        if not isinstance(item, dict):
+            raise FbarError(f"FX saved proof {index} must be an object.", 2)
+        relative_raw = item.get("packet_relative_path")
+        relative = PurePosixPath(str(relative_raw or ""))
+        if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+            raise FbarError(f"FX saved proof {index} has an unsafe packet_relative_path.", 2)
+        if item.get("filename") != relative.name:
+            raise FbarError(f"FX saved proof {index} filename does not match packet_relative_path.", 2)
+        candidate = packet_root / Path(*relative.parts)
+        if candidate.is_symlink() or not candidate.is_file():
+            raise FbarError(f"FX saved proof {index} is missing or is a symlink.", 2)
+        resolved = candidate.resolve(strict=False)
+        try:
+            resolved.relative_to(packet_root)
+        except ValueError as exc:
+            raise FbarError(f"FX saved proof {index} escapes its retained packet.", 2) from exc
+        validate_fx_file_hash(resolved, item.get("sha256"), f"saved proof {index}")
+
+    foreign_rate = as_decimal(workpaper.get("foreign_per_usd"), "foreign_per_usd")
+    usd_rate = as_decimal(workpaper.get("usd_per_foreign"), "usd_per_foreign")
+    if foreign_rate <= 0 or usd_rate <= 0:
+        raise FbarError("FX workpaper rates must be positive.", 2)
+    if abs((foreign_rate * usd_rate) - Decimal("1")) > MAX_FX_RECIPROCAL_DRIFT:
+        raise FbarError("FX workpaper rates are not reciprocal.", 2)
+    direction = workpaper.get("rate_direction")
+    if direction not in {"foreign-per-usd", "usd-per-foreign"}:
+        raise FbarError("FX workpaper rate_direction is invalid.", 2)
+    declared = as_decimal(workpaper.get("rate"), "rate")
+    expected = foreign_rate if direction == "foreign-per-usd" else usd_rate
+    if declared != expected:
+        raise FbarError("FX workpaper rate does not match rate_direction.", 2)
+    return workpaper
+
+
+def validate_account_conversion(account_data: dict[str, object], workpaper: dict[str, object] | None) -> None:
+    account = account_data.get("account")
+    if not isinstance(account, dict):
+        raise FbarError("Confirmed ledger has no account object.", 2)
+    currency = str(account.get("currency") or "UNKNOWN").upper()
+    if currency != "USD" and workpaper is None:
+        raise FbarError("Non-USD confirmed ledger has no bound FX workpaper.", 2)
+    value_model = account_data.get("value_model")
+    if isinstance(value_model, dict) and value_model.get("type") == "annual-maximum-only":
+        native = as_decimal(value_model.get("maximum_native"), "maximum_native")
+        expected = convert_to_usd(native, currency, workpaper)
+        actual = as_decimal(value_model.get("maximum_usd_value"), "maximum_usd_value")
+        if actual != expected:
+            raise FbarError("Maximum-only USD value does not recompute from its native value and FX proof.", 2)
+        return
+    rows = account_data.get("daily_ledger")
+    if not isinstance(rows, list):
+        raise FbarError("Confirmed ledger has no daily_ledger list.", 2)
+    for row in rows:
+        if not isinstance(row, dict):
+            raise FbarError("Confirmed ledger contains a non-object daily row.", 2)
+        native = as_decimal(row.get("native_balance"), f"{row.get('date')} native_balance")
+        expected_raw = convert_to_usd(native, currency, workpaper)
+        expected = as_decimal(fmt_decimal(expected_raw if expected_raw > 0 else Decimal("0"), "0.000001"), "expected threshold")
+        actual = as_decimal(row.get("threshold_usd_value"), f"{row.get('date')} threshold_usd_value")
+        if actual != expected:
+            raise FbarError(f"{row.get('date')} threshold value does not recompute from native value and FX proof.", 2)
+
+
+def semantic_summary_projection(summary: dict[str, object]) -> dict[str, object]:
+    """Select deterministic decision fields and remove only byte/path bindings."""
+    cloned = json.loads(json.dumps(summary))
+
+    def clean_accounts(value: object) -> object:
+        if not isinstance(value, list):
+            return value
+        cleaned: list[object] = []
+        for item in value:
+            if isinstance(item, dict):
+                item = dict(item)
+                item.pop("ledger_binding", None)
+            cleaned.append(item)
+        return cleaned
+
+    accounts = clean_accounts(cloned.get("accounts"))
+    max_view = cloned.get("fincen_max_value_view")
+    if isinstance(max_view, dict):
+        max_view = dict(max_view)
+        max_view["account_maxima"] = clean_accounts(max_view.get("account_maxima"))
+    return {
+        "schema_version": cloned.get("schema_version"),
+        "package_version": cloned.get("package_version"),
+        "skill": cloned.get("skill"),
+        "status": cloned.get("status"),
+        "tax_year": cloned.get("tax_year"),
+        "account_count": cloned.get("account_count"),
+        "daily_threshold": cloned.get("daily_threshold"),
+        "fincen_max_value_view": max_view,
+        "integrity_status": cloned.get("integrity_status"),
+        "evidence_status": cloned.get("evidence_status"),
+        "threshold_status": cloned.get("threshold_status"),
+        "accounts": accounts,
+        "warnings": cloned.get("warnings"),
+    }
+
+
+def recompute_packet_semantics(
+    summary: dict[str, object],
+    ledger_paths: list[Path],
+    fx_by_account: dict[str, Path],
+) -> dict[str, object]:
+    """Re-run aggregation from bound ledger bytes in scratch and return its decision projection."""
+    accounts = [load_confirmed_account(path) for path in ledger_paths]
+    labels = unique_account_labels(accounts)
+    with tempfile.TemporaryDirectory(prefix="fbar-postflight-recompute-") as temp_text:
+        temp_root = Path(temp_text)
+        copied_ledgers: list[Path] = []
+        for index, (label, account_data) in enumerate(zip(labels, accounts, strict=True), start=1):
+            copied = json.loads(json.dumps(account_data))
+            fx = copied.get("fx")
+            if isinstance(fx, dict) and fx.get("required"):
+                source = fx_by_account.get(label)
+                if source is None:
+                    raise FbarError(f"No FX workpaper binding exists for account {label}.", 2)
+                copied_fx = temp_root / f"fx-{index}" / "workpaper.json"
+                copied_fx.parent.mkdir(parents=True, exist_ok=True)
+                copied_fx.write_bytes(source.read_bytes())
+                fx["workpaper_json"] = str(copied_fx)
+            copied_path = temp_root / f"ledger-{index}.json"
+            write_json(copied_path, copied)
+            copied_ledgers.append(copied_path)
+        out = temp_root / "summary.json"
+        args = argparse.Namespace(
+            account_ledger=[str(path) for path in copied_ledgers],
+            out=str(out),
+            csv=None,
+            pdf=None,
+            postflight=None,
+            packet_root=str(temp_root),
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            command_aggregate(args)
+        recomputed = load_json(out)
+    return semantic_summary_projection(recomputed)
+
+
+def command_verify_packet(args: argparse.Namespace) -> int:
+    summary_path = resolved_artifact_path(args.summary, "summary JSON")
+    manifest_path = resolved_artifact_path(args.manifest, "postflight manifest")
+    summary = load_json(summary_path)
+    manifest = load_json(manifest_path)
+    failures: list[str] = []
+    if summary.get("schema_version") != SCHEMA_VERSION or manifest.get("schema_version") != SCHEMA_VERSION:
+        failures.append("schema-version")
+    if summary.get("package_version") != SKILL_VERSION or manifest.get("package_version") != SKILL_VERSION:
+        failures.append("package-version")
+    if manifest.get("artifact_type") != "fbar-proof-postflight":
+        failures.append("manifest-type")
+    if manifest.get("skill") != "fbar-threshold-check" or summary.get("skill") != "fbar-threshold-check":
+        failures.append("skill-identity")
+    if summary.get("path_contract") != manifest.get("path_contract"):
+        failures.append("path-contract-mismatch")
+    packet_root = infer_packet_root(manifest_path, manifest.get("path_contract"))
+    expected_summary_binding = file_binding(summary_path, packet_root)
+    if manifest.get("summary_binding") != expected_summary_binding or not _binding_matches(
+        manifest.get("summary_binding"), packet_root, "summary"
+    ):
+        failures.append("summary-binding")
+
+    accounts = summary.get("accounts")
+    expected_ledgers = [
+        item.get("ledger_binding") for item in accounts if isinstance(item, dict)
+    ] if isinstance(accounts, list) else []
+    manifest_ledgers = manifest.get("account_ledger_bindings")
+    if not expected_ledgers or manifest_ledgers != expected_ledgers:
+        failures.append("account-ledger-binding-set")
+    expected_fx = summary.get("fx_workpapers")
+    manifest_fx = manifest.get("fx_workpaper_bindings")
+    if not isinstance(expected_fx, list) or manifest_fx != expected_fx:
+        failures.append("fx-workpaper-binding-set")
+
+    ledger_paths: list[Path] = []
+    if isinstance(manifest_ledgers, list):
+        for index, binding in enumerate(manifest_ledgers, start=1):
+            if not _binding_matches(binding, packet_root, f"account ledger {index}"):
+                failures.append(f"account-ledger-binding-{index}")
+                continue
+            ledger_paths.append(resolve_packet_binding(binding, packet_root, f"account ledger {index}"))
+
+    fx_by_account: dict[str, Path] = {}
+    if isinstance(manifest_fx, list):
+        for index, binding in enumerate(manifest_fx, start=1):
+            if not _binding_matches(binding, packet_root, f"FX workpaper {index}"):
+                failures.append(f"fx-workpaper-binding-{index}")
+                continue
+            assert isinstance(binding, dict)
+            account_id = str(binding.get("account_id") or "")
+            if not account_id or account_id in fx_by_account:
+                failures.append(f"fx-workpaper-account-{index}")
+                continue
+            fx_by_account[account_id] = resolve_packet_binding(binding, packet_root, f"FX workpaper {index}")
+
+    outputs = manifest.get("output_bindings")
+    artifacts = summary.get("artifacts")
+    expected_output_keys = {"combined_csv", "summary_pdf"}
+    expected_outputs: dict[str, object] = {}
+    verified_output_paths: list[Path] = []
+    if not isinstance(artifacts, dict):
+        failures.append("summary-artifact-map")
+        artifacts = {}
+    for key in sorted(expected_output_keys):
+        relative = artifacts.get(key)
+        if not isinstance(relative, str):
+            failures.append(f"summary-artifact-{key}")
+            continue
+        try:
+            path = resolve_packet_binding({"path": relative}, packet_root, key)
+            expected_outputs[key] = file_binding(path, packet_root)
+            verified_output_paths.append(path)
+        except FbarError:
+            failures.append(f"summary-artifact-{key}")
+    if artifacts.get("postflight_manifest") != packet_relative_path(manifest_path, packet_root, "postflight manifest"):
+        failures.append("summary-artifact-postflight-manifest")
+    if not isinstance(outputs, dict) or set(outputs) != expected_output_keys or outputs != expected_outputs:
+        failures.append("output-binding-map")
+    if isinstance(outputs, dict):
+        for key, binding in outputs.items():
+            if not _binding_matches(binding, packet_root, f"output {key}"):
+                failures.append(f"output-binding-{key}")
+
+    ledger_binding_items = manifest_ledgers if isinstance(manifest_ledgers, list) else []
+    fx_binding_items = manifest_fx if isinstance(manifest_fx, list) else []
+    output_binding_items = list(outputs.values()) if isinstance(outputs, dict) else []
+    bound_paths: list[str] = []
+    for binding in [manifest.get("summary_binding"), *ledger_binding_items, *fx_binding_items, *output_binding_items]:
+        if isinstance(binding, dict) and isinstance(binding.get("path"), str):
+            bound_paths.append(str(binding["path"]))
+    if len(bound_paths) != len(set(bound_paths)):
+        failures.append("duplicate-binding-path")
+    if manifest.get("integrity_status") != summary.get("integrity_status"):
+        failures.append("integrity-status")
+    if manifest.get("evidence_status") != summary.get("evidence_status"):
+        failures.append("evidence-status")
+    if manifest.get("threshold_status") != summary.get("threshold_status"):
+        failures.append("threshold-status")
+
+    if not failures and len(ledger_paths) == len(expected_ledgers):
+        try:
+            loaded_accounts = [load_confirmed_account(path) for path in ledger_paths]
+            labels = unique_account_labels(loaded_accounts)
+            for label, account_data in zip(labels, loaded_accounts, strict=True):
+                account = account_data.get("account")
+                currency = str(account.get("currency") or "UNKNOWN").upper() if isinstance(account, dict) else "UNKNOWN"
+                workpaper = None
+                if currency != "USD":
+                    fx_path = fx_by_account.get(label)
+                    if fx_path is None:
+                        raise FbarError(f"Missing FX workpaper for account {label}.", 2)
+                    workpaper = validate_portable_fx_workpaper(
+                        fx_path, currency, as_int(account_data.get("tax_year"), "tax_year")
+                    )
+                validate_account_conversion(account_data, workpaper)
+            if recompute_packet_semantics(summary, ledger_paths, fx_by_account) != semantic_summary_projection(summary):
+                failures.append("semantic-recompute")
+        except FbarError:
+            failures.append("semantic-recompute")
+    result = {
+        "schema_version": SCHEMA_VERSION,
+        "package_version": SKILL_VERSION,
+        "skill": "fbar-threshold-check",
+        "artifact_type": "fbar-proof-postflight-verification",
+        "verified_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "integrity_status": "fail" if failures else "pass",
+        "evidence_status": summary.get("evidence_status", manifest.get("evidence_status")),
+        "threshold_status": summary.get("threshold_status", manifest.get("threshold_status")),
+        "failures": failures,
+    }
+    if args.out:
+        out_path = Path(args.out)
+        validate_artifact_paths(
+            "verify-packet",
+            [("verification JSON", out_path)],
+            [
+                ("summary JSON", summary_path),
+                ("postflight manifest", manifest_path),
+                *((f"account ledger {index}", path) for index, path in enumerate(ledger_paths, start=1)),
+                *((f"FX workpaper {index}", path) for index, path in enumerate(fx_by_account.values(), start=1)),
+                *((f"packet output {index}", path) for index, path in enumerate(verified_output_paths, start=1)),
+            ],
+        )
+        write_json(out_path, result)
+        print(f"Wrote verification JSON: {out_path}")
+    print(f"Packet integrity: {result['integrity_status']}")
+    if failures:
+        print("Failed binding(s): " + ", ".join(failures))
+        return 2
     return 0
 
 
@@ -3160,9 +4618,19 @@ def ceil_nonnegative(value: Decimal) -> int:
 
 def write_combined_csv(path: Path, account_labels: list[str], rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["date", *account_labels, "combined_usd_value", "over_10000"]
+    upper_fields = [f"{label}__upper_bound" for label in account_labels]
+    fields = [
+        "date",
+        *account_labels,
+        *upper_fields,
+        "known_total_usd",
+        "upper_bound_total_usd",
+        "combined_usd_value",
+        "over_10000",
+        "possibly_over_10000",
+    ]
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         for row in rows:
             writer.writerow({field: row.get(field) for field in fields})
@@ -3179,14 +4647,20 @@ def write_summary_pdf(path: Path, summary: dict[str, object]) -> None:
         "yes": "YES",
         "no": "NO",
         "insufficient-records": "INSUFFICIENT RECORDS FOR A CONFIDENT NO",
+        "review-required": "REVIEW REQUIRED - RESULT DEPENDS ON UNDATED EVIDENCE",
     }
     lines = [
         f"FBAR Threshold Check - {summary['tax_year']}",
         "",
         f"Daily threshold: {daily_labels.get(daily_answer, daily_answer.upper())}",
-        f"Maximum combined daily USD value: {daily.get('max_combined_usd_value')} on {daily.get('max_combined_date')}",
+        f"Known maximum combined daily USD value: {daily.get('max_combined_usd_value')} on {daily.get('max_combined_date')}",
+        f"Conservative upper-bound maximum: {daily.get('max_upper_bound_usd_value')} on {daily.get('max_upper_bound_date')}",
+        f"Answer range: {daily.get('answer_lower_bound')} to {daily.get('answer_upper_bound')} ({daily.get('answer_sensitivity')})",
+        f"Time alignment: {daily.get('time_alignment')}",
         f"FinCEN maximum-value view: {'YES' if max_view['exceeded'] else 'NO'}",
-        f"Aggregate account maximums, rounded up to whole dollars: {max_view.get('aggregate_account_max_whole_dollars')}",
+        f"Aggregate exact account maximums: {max_view.get('aggregate_account_max_exact_usd')}",
+        f"Aggregate account maximums, each rounded up then summed: {max_view.get('aggregate_account_max_whole_dollars')}",
+        f"Sum exact maximums then round: {max_view.get('aggregate_sum_exact_then_round_whole_dollars')}",
         "",
         "Over-$10,000 dates:",
     ]
@@ -3205,7 +4679,8 @@ def write_summary_pdf(path: Path, summary: dict[str, object]) -> None:
             if isinstance(account, dict):
                 lines.append(
                     f"- {account.get('account_id')}: max USD {account.get('max_usd_value')} "
-                    f"(whole dollars {account.get('max_usd_value_whole_dollars')})"
+                    f"(whole dollars {account.get('max_usd_value_whole_dollars')}; evidence {account.get('evidence_class')}; "
+                    f"maximum date {account.get('max_date') or 'unknown'})"
                 )
 
     warnings = summary.get("warnings", [])
@@ -3306,6 +4781,11 @@ def command_dependency_check(_args: argparse.Namespace) -> int:
 
 
 def command_self_test(_args: argparse.Namespace) -> int:
+    package_metadata = load_json(Path(__file__).resolve().parents[1] / ".claude-plugin" / "plugin.json")
+    assert package_metadata.get("version") == SKILL_VERSION, (
+        "SKILL_VERSION must match .claude-plugin/plugin.json: "
+        f"{SKILL_VERSION!r} != {package_metadata.get('version')!r}"
+    )
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         test_decimal_parsing()
@@ -4955,6 +6435,12 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--institution", help="Optional institution label.")
     extract.add_argument("--account-currency", help="Optional ISO currency code when statement text is ambiguous.")
     extract.add_argument(
+        "--mode",
+        choices=["auto", "transaction-balances", "reconcile-movements"],
+        default="auto",
+        help="Use shared Balance-column parsing, opening-plus-movements reconciliation, or automatic role detection.",
+    )
+    extract.add_argument(
         "--preflight-json",
         required=True,
         help="Ready preflight JSON or reviewed-handoff JSON from statement-intake-preflight.",
@@ -4977,12 +6463,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     confirm.set_defaults(func=command_confirm_account)
 
+    attest = subparsers.add_parser(
+        "attest-account",
+        help="Create a source-bound, visibly non-formal zero, maximum-only, or complete daily attestation artifact.",
+    )
+    attest.add_argument("--pdf", nargs="+", required=True, help="Source statement/certificate PDFs for one account.")
+    attest.add_argument("--tax-year", type=int, required=True, help="Calendar year represented by the attestation.")
+    attest.add_argument("--preflight-json", required=True, help="Source preflight or reviewed-handoff JSON.")
+    attest.add_argument("--accept-gate", action="append", help="Acknowledge each non-structural raw preflight gate exactly once.")
+    attest.add_argument(
+        "--evidence-class",
+        choices=["user-attested-daily", "user-attested-zero", "user-attested-maximum"],
+        required=True,
+    )
+    attest.add_argument("--account-id", required=True, help="Stable local account identifier.")
+    attest.add_argument("--institution", required=True, help="User/preparer-confirmed institution label.")
+    attest.add_argument("--account-currency", required=True, help="User/preparer-confirmed ISO currency code.")
+    attest.add_argument("--maximum-native", help="Annual maximum in native currency for user-attested-maximum.")
+    attest.add_argument("--maximum-date", help="Optional known date of the annual maximum (YYYY-MM-DD).")
+    attest.add_argument("--daily-csv", help="Complete date,native_balance CSV for user-attested-daily.")
+    attest.add_argument("--fx-workpaper-json", help="Required year-end FX workpaper for non-USD evidence.")
+    attest.add_argument("--confirmation", choices=["user-confirmed", "preparer-confirmed"], default="user-confirmed")
+    attest.add_argument("--user-attestation-confirmed", action="store_true", help="Required after explicit review of the attested values.")
+    attest.add_argument("--out", required=True, help="Output confirmed attested account JSON.")
+    attest.add_argument("--csv", help="Optional output CSV for daily/zero evidence.")
+    attest.set_defaults(func=command_attest_account)
+
     aggregate = subparsers.add_parser("aggregate", help="Aggregate confirmed account ledgers into final FBAR threshold artifacts.")
     aggregate.add_argument("--account-ledger", nargs="+", required=True, help="Confirmed account JSON ledgers.")
     aggregate.add_argument("--out", required=True, help="Final summary JSON path.")
     aggregate.add_argument("--csv", help="Optional final combined daily CSV path.")
     aggregate.add_argument("--pdf", help="Optional final human summary PDF path.")
+    aggregate.add_argument("--postflight", help="Optional provenance/integrity manifest path.")
+    aggregate.add_argument(
+        "--packet-root",
+        help="Optional existing root containing every ledger, FX workpaper, and output; bindings are stored relative to it.",
+    )
     aggregate.set_defaults(func=command_aggregate)
+
+    verify = subparsers.add_parser("verify-packet", help="Recompute and verify a retained aggregate postflight manifest.")
+    verify.add_argument("--summary", required=True, help="Aggregate summary JSON.")
+    verify.add_argument("--manifest", required=True, help="Postflight manifest created with the aggregate.")
+    verify.add_argument("--out", help="Optional verification-result JSON.")
+    verify.set_defaults(func=command_verify_packet)
 
     dependency = subparsers.add_parser("dependency-check", help="Check extraction dependency availability.")
     dependency.set_defaults(func=command_dependency_check)

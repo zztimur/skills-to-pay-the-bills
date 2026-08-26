@@ -216,6 +216,15 @@ class PrivacyGateTests(unittest.TestCase):
         self.assertIn("private_phone", codes)
         self.assertTrue(all(item.severity == "warning" for item in findings))
 
+    def test_hex_digest_is_not_a_phone_number(self):
+        digest = "6df65f617afd8b29c27cf05f76bf1448592425ab3ce528013f3ee8867607847b"
+        phone = "-".join(["415", "555", "1212"])
+        digest_only = self.scan_text("checksums.sha256", f"{digest}  artifact.json\n")
+        digest_and_phone = self.scan_text("notes.txt", f"{digest} contact {phone}\n")
+        self.assertNotIn("private_phone", {item.code for item in digest_only})
+        self.assertIn("private_phone", {item.code for item in digest_and_phone})
+        self.assertIn(digest, privacy_gate.redact_text(f"{digest}\n"))
+
     def test_sanitizer_redacts_text_pii(self):
         phone = "-".join(["415", "555", "1212"])
         text = "Email: " + "person" + "@" + "private.test\nPhone: " + phone + "\n"
