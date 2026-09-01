@@ -32,7 +32,7 @@ This skill reports both the day-by-day aggregate view and the FinCEN maximum-val
 Keep policy, evidence, and arithmetic separate:
 
 - `formal-extracted` means a supported statement parser captured source-bound balances; it does not decide reportability.
-- `diagnostic-reconstructed` means labelled opening balance plus signed movements reconciled to a labelled close; it remains a workpaper reconstruction.
+- `diagnostic-reconstructed` means a labelled opening balance plus source-bound Debit/Credit movements or explicitly signed Amount/Valor/Monto movements reconciled to a labelled close; it remains a workpaper reconstruction.
 - `user-attested-*` means the user/preparer confirmed values from certificate or other evidence; it is never relabelled as formal extraction.
 - An undated annual maximum has no defensible daily placement. Aggregate it as a possible daily upper bound and report `review-required` when it can change the threshold answer.
 - Statement dates do not establish intraday simultaneity. Label daily combinations `date-only-upper-bound` unless stronger timestamp evidence exists.

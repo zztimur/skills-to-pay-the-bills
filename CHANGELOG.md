@@ -14,8 +14,10 @@ The current repository version lives in [`VERSION`](VERSION), is tagged
 ### Changed
 
 - `fbar-threshold-check`: add currency-agnostic geometry parsing, reconciled movement reconstruction, explicit formal/reconstructed/attested evidence, interval-aware aggregation, and postflight verification.
+- `fbar-threshold-check`: support explicitly signed Amount/Valor/Monto movement columns and equal-checkpoint zero-activity periods; keep same-day maxima separate from end-of-day carry and classify zero-observation outputs as non-formal.
 - `fbar-threshold-check`: make postflight packets relocatable, require the exact bound artifact set, validate nested FX proof, and recompute threshold semantics from retained ledger bytes.
 - `statement-intake-preflight`: add compact-period and split-account parsing, typed date roles, certificate-date review, migration/reissue attestations, and month-resolution opening evidence.
+- `statement-intake-preflight`: accept decorative compact-period day counts and source-bind exact stacked `Número de cuenta` labels without weakening account-number decoy rejection.
 - `get-year-end-fx-rate`: classify network/TLS failures, add deterministic fetch plans, and prove read-only installed-runtime behavior.
 - `statements-to-interest`: accept and validate the additive preflight schema while retaining legacy handoff compatibility.
 - `repository`: gate CI on the real-run postmortem regressions and publish a current schema 1.4 synthetic packet with retained postflight verification.

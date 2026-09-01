@@ -80,6 +80,19 @@ def make_columnar_account_pdf(name: str, *, account: str) -> Path:
     return path
 
 
+def make_stacked_spanish_account_pdf(name: str, *, account: str) -> Path:
+    """Make an exact ``Número de cuenta`` label with its value beneath it."""
+    path = WORK / name
+    doc = canvas.Canvas(str(path))
+    doc.drawString(40, 800, "Northwind Ledger Cooperative Statement")
+    doc.drawString(40, 778, "Número de cuenta:")
+    doc.drawString(40, 764, account)  # privacy-gate: allow (synthetic account fixture)
+    doc.drawString(40, 742, "Statement period June 1 2025 to June 30 2025")
+    doc.drawString(40, 728, "Currency USD")
+    doc.save()
+    return path
+
+
 def run(tag: str, pdfs: list[str], year: str = "2025", scope: str = "one-account", extra=None):
     out = WORK / f"{tag}.json"
     cmd = [sys.executable, str(SCRIPT), "preflight", "--pdf", *pdfs,
@@ -1769,6 +1782,36 @@ check("PM-1 compact '1 SEP - 30 SEP' header retains source-bound September cover
       and interval_summary(d) == [("2025-09-01", "2025-09-30", "high", "direct-anchor")],
       f"coverage={d.get('coverage_hints') if d else '?'}")
 
+p = make_pdf("postmortem-compact-period-day-count.pdf", [
+    "Northwind Ledger Cooperative Statement",
+    "Account 42424242",  # privacy-gate: allow (synthetic account fixture)
+    "1 SEP - 30 SEP (30 días)",
+    "Currency USD",
+    "Fecha | Descripción | Valor",
+    "15/09/2025 Synthetic movement +$25.00",
+])
+proc, d = run("postmortem-compact-period-day-count", [str(p)])
+check("PM-1A compact period accepts a decorative parenthetical day count",
+      proc.returncode == 0 and d
+      and interval_summary(d) == [("2025-09-01", "2025-09-30", "high", "direct-anchor")]
+      and "1 SEP - 30 SEP (30 días)" in d.get("coverage_hints", {}).get("detected_periods", []),
+      f"coverage={d.get('coverage_hints') if d else '?'}")
+
+p = make_pdf("postmortem-compact-period-trailing-narrative.pdf", [
+    "Northwind Ledger Cooperative Statement",
+    "Account 42424242",  # privacy-gate: allow (synthetic account fixture)
+    "1 SEP - 30 SEP promotional offer",
+    "Currency USD",
+    "Fecha | Descripción | Valor",
+    "15/09/2025 Synthetic movement +$25.00",
+])
+proc, d = run("postmortem-compact-period-trailing-narrative", [str(p)])
+check("PM-1B unrelated trailing text cannot turn a compact range into coverage",
+      proc.returncode == 0 and d
+      and d.get("coverage_hints", {}).get("period_headers") == []
+      and d.get("coverage_hints", {}).get("period_intervals") == [],
+      f"coverage={d.get('coverage_hints') if d else '?'} gates={gates_of(d)}")
+
 p = make_pdf("postmortem-split-account.pdf", [
     "Northwind Ledger Cooperative Statement",
     "Account No.",
@@ -1780,6 +1823,27 @@ proc, d = run("postmortem-split-account", [str(p)])
 check("PM-2 immediate next-line account identifier binds to its explicit label",
       proc.returncode == 0 and d and d.get("account_hints") == ["42424242"],
       f"accounts={d.get('account_hints') if d else '?'} gates={gates_of(d)}")
+
+p = make_stacked_spanish_account_pdf(
+    "postmortem-stacked-spanish-account.pdf",
+    account="42424242",  # privacy-gate: allow (synthetic account fixture)
+)
+proc, d = run("postmortem-stacked-spanish-account", [str(p)])
+check("PM-2A stacked Número de cuenta binds only the aligned identifier beneath it",
+      proc.returncode == 0 and d and d.get("account_hints") == ["42424242"],
+      f"accounts={d.get('account_hints') if d else '?'} gates={gates_of(d)}")
+
+for label, candidate in [
+    ("money", "$1,234.56"),
+    ("phone", "555-010-2222"),  # privacy-gate: allow (synthetic phone fixture)
+    ("reference", "REF-99112233"),  # privacy-gate: allow (synthetic reference fixture)
+]:
+    p = make_stacked_spanish_account_pdf(f"postmortem-stacked-{label}.pdf", account=candidate)
+    proc, d = run(f"postmortem-stacked-{label}", [str(p)])
+    check(f"PM-2B stacked Spanish account fallback rejects {label}",
+          proc.returncode == 0 and d and d.get("account_hints") == []
+          and "unknown-account" in gates_of(d),
+          f"accounts={d.get('account_hints') if d else '?'} gates={gates_of(d)}")
 
 proc, month_handoff = run_handoff(
     "postmortem-opened-month-reviewed",

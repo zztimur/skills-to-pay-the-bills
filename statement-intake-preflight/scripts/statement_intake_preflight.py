@@ -160,7 +160,8 @@ ACCOUNT_BARE_RE = re.compile(
     re.I,
 )
 SPLIT_ACCOUNT_LABEL_ONLY_RE = re.compile(
-    r"^\s*(?:account|acct|a/c|cuenta)\s*(?:numbers?|nos?|nbrs?|nros?|n[uú]ms?|id)\b\.?\s*[:#-]?\s*$",
+    r"^\s*(?:(?:account|acct|a/c|cuenta)\s*(?:numbers?|nos?|nbrs?|nros?|n[uú]ms?|id)\b\.?|"
+    r"n[uú]mero\s+de\s+cuenta)\s*[:#-]?\s*$",
     re.I,
 )
 # Some Spanish statement headers split the product and identifier across two
@@ -611,11 +612,15 @@ PERIOD_HEADER_DAY_FIRST_RE = re.compile(
     rf"(?:\s+(?:de\s+)?(?P<end_year>19\d{{2}}|20\d{{2}}))?\b",
     re.I,
 )
+COMPACT_PERIOD_DAY_COUNT_SUFFIX_RE = re.compile(
+    r"^\s*\(\s*(?P<days>\d{1,3})\s+d[ií]as\s*\)\s*$",
+    re.I,
+)
 # A year-anchor is useful only inside a labelled movement or balance-date table.
 # The header requires a date column plus a second movement/balance column; this
 # prevents a lone narrative date from becoming a source anchor.
 DATE_TABLE_HEADER_RE = re.compile(
-    r"\b(?:date|fecha)\b.*\b(?:description|descripcion|movement|movimiento|"
+    r"\b(?:date|fecha)\b.*\b(?:description|descripci[oó]n|movement|movimiento|"
     r"transaction|details|amount|balance|saldo|debit|credito|credit|abono)\b",
     re.I,
 )
@@ -1077,9 +1082,33 @@ def detect_periods(lines: Iterable[str]) -> list[str]:
             or has_connected_period_dates(line)
             or (period_heading and has_year)
             or is_month_year_period_heading(line)
+            or _compact_unlabelled_period_match(line) is not None
         ):
             periods.append(line)
     return stable_unique(periods, limit=20)
+
+
+def _compact_unlabelled_period_match(line: str) -> re.Match[str] | None:
+    """Return a compact month/day range with only an optional day-count suffix.
+
+    The parenthetical count is decorative issuer text. It helps classify the
+    line as a heading, but never supplies a year or calendar interval.
+    """
+    match = next(
+        (candidate for pattern in (PERIOD_HEADER_MONTH_FIRST_RE, PERIOD_HEADER_DAY_FIRST_RE)
+         if (candidate := pattern.search(line))),
+        None,
+    )
+    if match is None or len(line) > 100 or match.start() > 2:
+        return None
+    suffix = line[match.end():]
+    if suffix.strip():
+        day_count = COMPACT_PERIOD_DAY_COUNT_SUFFIX_RE.fullmatch(suffix)
+        if day_count is None or not 1 <= int(day_count.group("days")) <= 366:
+            return None
+    if re.search(r"[$€£¥]|\d[.,]\d{2}", line):
+        return None
+    return match
 
 
 def _calendar_date(year: int, month: int, day: int) -> date | None:
@@ -1191,17 +1220,8 @@ def detect_period_headers(page_lines: Iterable[object]) -> list[dict[str, object
             continue
         for line_number, raw_line in enumerate(raw_lines, start=1):
             line = clean_line(str(raw_line))
-            compact_range_match = next(
-                (match for pattern in (PERIOD_HEADER_MONTH_FIRST_RE, PERIOD_HEADER_DAY_FIRST_RE) if (match := pattern.search(line))),
-                None,
-            )
-            compact_unlabelled_heading = bool(
-                compact_range_match
-                and len(line) <= 80
-                and compact_range_match.start() <= 2
-                and len(line) - compact_range_match.end() <= 2
-                and not re.search(r"[$€£¥]|\d[.,]\d{2}", line)
-            )
+            compact_range_match = _compact_unlabelled_period_match(line)
+            compact_unlabelled_heading = compact_range_match is not None
             if not PERIOD_HEADING_PREFIX_RE.search(line) and not compact_unlabelled_heading:
                 continue
             dates = line_dates(line)
@@ -2216,6 +2236,10 @@ COLUMNAR_PHONE_RE = re.compile(
 COLUMNAR_LABEL_ROW_TOLERANCE = 5.0
 COLUMNAR_IDENTIFIER_ROW_TOLERANCE = 20.0
 COLUMNAR_IDENTIFIER_MAX_GAP = 280.0
+STACKED_ACCOUNT_LABEL_ROW_TOLERANCE = 5.0
+STACKED_ACCOUNT_IDENTIFIER_X_TOLERANCE = 18.0
+STACKED_ACCOUNT_IDENTIFIER_MIN_VERTICAL_GAP = 2.0
+STACKED_ACCOUNT_IDENTIFIER_MAX_VERTICAL_GAP = 30.0
 
 
 def _columnar_account_candidate(raw: str) -> tuple[str, str, bool] | None:
@@ -2292,6 +2316,46 @@ def detect_columnar_account_hint_records(page_words: Iterable[object]) -> list[t
             # Treat only the first value-bearing column as the account value.
             # If it is a page marker, transaction reference, amount, or phone
             # number, do not skip ahead to an unrelated number later in the row.
+            if candidates:
+                record = _columnar_account_candidate(str(candidates[0]["text"]))
+                if record:
+                    raw_records.append(record)
+
+        # Some Spanish summaries print ``Número de cuenta:`` as a complete
+        # label and place the identifier directly beneath it in the same visual
+        # column. Bind only that exact three-word label and the nearest aligned
+        # identifier, preserving the same decoy rejection used above.
+        for number_index, number_word in enumerate(words):
+            if clean_line(str(number_word["text"])).casefold().strip(".:") not in {"numero", "número"}:
+                continue
+            label_top = float(number_word["top"])
+            label_x0 = float(number_word["x0"])
+            same_row = sorted(
+                (
+                    word
+                    for word in words[number_index + 1:]
+                    if float(word["x0"]) >= float(number_word["x1"]) - 2
+                    and abs(float(word["top"]) - label_top) <= STACKED_ACCOUNT_LABEL_ROW_TOLERANCE
+                ),
+                key=lambda word: float(word["x0"]),
+            )
+            if len(same_row) < 2:
+                continue
+            if clean_line(str(same_row[0]["text"])).casefold().strip(".:") != "de":
+                continue
+            if clean_line(str(same_row[1]["text"])).casefold().strip(".:") != "cuenta":
+                continue
+            candidates = sorted(
+                (
+                    word
+                    for word in words
+                    if STACKED_ACCOUNT_IDENTIFIER_MIN_VERTICAL_GAP
+                    <= float(word["top"]) - label_top
+                    <= STACKED_ACCOUNT_IDENTIFIER_MAX_VERTICAL_GAP
+                    and abs(float(word["x0"]) - label_x0) <= STACKED_ACCOUNT_IDENTIFIER_X_TOLERANCE
+                ),
+                key=lambda word: (float(word["top"]), float(word["x0"])),
+            )
             if candidates:
                 record = _columnar_account_candidate(str(candidates[0]["text"]))
                 if record:

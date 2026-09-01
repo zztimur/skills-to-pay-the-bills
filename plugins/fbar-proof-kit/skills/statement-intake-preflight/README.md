@@ -61,7 +61,7 @@ The JSON includes:
 - stable opaque IDs for source-labelled periods whose year remains unresolved and needs one exact reviewed confirmation;
 - detected years and out-of-year hints, plus source-labelled generated-on metadata kept separate from coverage;
 - typed date-role evidence for statement periods, movements, opening boundaries, generated-on dates, and certificate-issued dates;
-- parser hints, compact month-name period headings, and conservative next-line account-label binding;
+- parser hints, compact month-name period headings with optional decorative day counts, and conservative next-line or vertically stacked account-label binding;
 - currency candidates it could back up with a nearby amount or name, the weaker ones it could not, and ambiguous `$` warnings;
 - account hints, source-linkage coverage across the supplied PDFs, and institution hints;
 - review gates such as low text, duplicate inputs, mixed years, out-of-period generated-on metadata, mixed currencies, possible mixed accounts, and possible mixed institutions.

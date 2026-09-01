@@ -42,6 +42,11 @@ extraction, diagnostic reconstruction, or user/preparer attestation. If an
 annual maximum has no known date, the result remains an explicit lower/upper
 interval instead of inventing a day.
 
+The diagnostic reconstruction lane supports separate Debit/Credit columns and
+single explicitly signed Amount/Valor/Monto columns, including equal
+opening/closing zero-activity periods. Unsigned movements and unreconciled
+checkpoints fail closed.
+
 ## Install the kit
 
 ### Universal Agent Skills CLI

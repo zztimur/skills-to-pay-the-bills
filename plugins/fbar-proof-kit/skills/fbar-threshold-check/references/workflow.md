@@ -97,7 +97,7 @@ Optional flags:
 - `--institution`: optional institution label. When the reviewed preflight contains a typed issuer resolution, it must match that resolution; otherwise extraction rejects the override.
 - `--account-currency`: ISO code when a clean statement set cannot safely infer it. It cannot override a user-confirmed currency from a reviewed handoff; that handoff code is used instead of inferring a bare `$`.
 - `--preflight-json`: required ready JSON or reviewed-handoff JSON from `statement-intake-preflight`; the script rejects absent, review-required, stale, mismatched, incomplete, resolution-invalid, or file-identity-invalid handoffs.
-- `--mode auto|transaction-balances|reconcile-movements`: default `auto` selects a final Balance/Saldo column when present or the opening-plus-movements reconciliation lane otherwise. Use an explicit mode only to constrain a known source layout.
+- `--mode auto|transaction-balances|reconcile-movements`: default `auto` selects a final Balance/Saldo column when present or the opening-plus-movements reconciliation lane otherwise. The reconciliation lane accepts either separate Debit/Credit columns or one Amount/Valor/Monto column only when each movement carries an explicit leading `+` or `-`. Use an explicit mode only to constrain a known source layout.
 - `--csv`: review CSV output path.
 
 The script writes:
@@ -105,7 +105,7 @@ The script writes:
 - Account JSON at `--out`.
 - Review CSV beside the JSON unless `--csv` is supplied.
 
-The review CSV has one row per day with native balance, USD placeholder, evidence class, confidence, source references, notes, and review flags. The JSON separates `evidence_status`, `integrity_status`, `value_model`, `time_alignment`, and `parser_coverage`. The shared geometry parser identifies column roles before parsing amounts, treats ISO timestamps and source-resolved full dates consistently across currencies, ignores numbers in descriptions, and uses only the final Balance/Saldo column. A debit/credit table may reconstruct balances only from a labelled opening balance through signed movements to a matching labelled close; it remains `diagnostic-reconstructed`. If a visually dated row is omitted or reconciliation fails, `status` is `parser-coverage-defect` and the named source profile must be reviewed or replaced by supported attested evidence.
+The review CSV has one row per day with native balance, USD placeholder, evidence class, confidence, source references, notes, and review flags. The JSON separates `evidence_status`, `integrity_status`, `value_model`, `time_alignment`, and `parser_coverage`. The shared geometry parser identifies column roles before parsing amounts, treats ISO timestamps and source-resolved full dates consistently across currencies, ignores numbers in descriptions, and uses only the final Balance/Saldo column. A debit/credit or explicitly signed Amount/Valor/Monto table may reconstruct balances only from a labelled opening balance through source-bound movements to a matching labelled close; equal opening/closing checkpoints also permit a zero-movement period. It remains `diagnostic-reconstructed`. A same-day maximum is retained for threshold safety while subsequent dates carry the final reconciled same-day balance. If a visually dated row is unsigned, omitted, or has no supported profile, or reconciliation fails, `status` is `parser-coverage-defect` and the named source profile must be reviewed or replaced by supported attested evidence.
 
 ## 6. Review Gate
 
@@ -113,7 +113,7 @@ Open the JSON and CSV before confirming. Confirm these fields:
 
 - `preflight` summary, if present, matches the reviewed intake artifact. For reviewed handoffs, confirm its `user_resolutions`, `coverage_hints`, and `verified_statement_files` remain present and source-bound; an opt-in issuer gate must have its typed institution resolution.
 - `parser_coverage.status` is `covered`; stop on `parser-coverage-defect`.
-- `evidence_status.class` accurately says `formal-extracted`, `diagnostic-reconstructed`, or `user-attested-*`, and `integrity_status.reconciliation` is acceptable for that evidence class.
+- `evidence_status.class` accurately says `formal-extracted`, `diagnostic-reconstructed`, `user-attested-*`, or the non-confirmable `unresolved-no-observations`, and `integrity_status.reconciliation` is acceptable for that evidence class.
 - `account.account_id`, `institution`, and `account.currency` are usable for the confirmed ledger; if not, return to preflight or rerun extraction with an explicit override instead of adjudicating intake ad hoc here.
 - `statement_files` are the expected PDFs; the `preflight.verified_statement_files` summary records the matched ordered paths, byte sizes, and SHA-256 fingerprints.
 - `coverage.complete_year` is true.

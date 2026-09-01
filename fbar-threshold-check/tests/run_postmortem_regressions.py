@@ -86,6 +86,38 @@ def draw_table_pdf(
     doc.save()
 
 
+def draw_signed_statement_pdf(
+    path: Path,
+    *,
+    period: str,
+    opening: str,
+    closing: str,
+    rows: list[tuple[str, str, str]],
+    generated_on: str | None = None,
+) -> None:
+    """Draw a generic stacked-account, signed-Valor monthly statement."""
+    doc = canvas.Canvas(str(path))
+    doc.drawString(40, 810, "Northwind Ledger Cooperative Statement")
+    doc.drawString(40, 792, period)
+    doc.drawString(40, 774, "Currency USD")
+    doc.drawString(40, 756, "Número de cuenta:")
+    doc.drawString(40, 742, "24682468")  # privacy-gate: allow (synthetic account fixture)
+    doc.drawString(300, 756, f"Saldo anterior ${opening}")
+    doc.drawString(300, 714, f"Saldo final ${closing}")
+    doc.drawString(40, 684, "Fecha")
+    doc.drawString(175, 684, "Descripción")
+    doc.drawString(500, 684, "Valor")
+    y = 662
+    for movement_date, description, value in rows:
+        doc.drawString(40, y, movement_date)
+        doc.drawString(175, y, description)
+        doc.drawString(500, y, value)
+        y -= 20
+    if generated_on:
+        doc.drawString(40, 590, f"Estado de cuenta generado el {generated_on}")
+    doc.save()
+
+
 def preflight(work: Path, tag: str, pdfs: list[Path]) -> tuple[Path, dict, subprocess.CompletedProcess[str]]:
     out = work / f"{tag}-preflight.json"
     process = run([
@@ -114,12 +146,22 @@ def reviewed_handoff(work: Path, tag: str, source: Path, data: dict) -> Path:
     return out
 
 
-def extract(work: Path, tag: str, pdfs: list[Path], handoff: Path) -> tuple[Path, dict, subprocess.CompletedProcess[str]]:
+def extract(
+    work: Path,
+    tag: str,
+    pdfs: list[Path],
+    handoff: Path,
+    *,
+    mode: str | None = None,
+) -> tuple[Path, dict, subprocess.CompletedProcess[str]]:
     out = work / f"{tag}-account.json"
-    process = run([
+    command = [
         sys.executable, "-B", str(FBAR), "extract-account", "--pdf", *(str(path) for path in pdfs),
         "--tax-year", "2025", "--preflight-json", str(handoff), "--out", str(out),
-    ])
+    ]
+    if mode:
+        command.extend(["--mode", mode])
+    process = run(command)
     return out, read_json(out) if out.exists() else {}, process
 
 
@@ -312,6 +354,270 @@ with tempfile.TemporaryDirectory(prefix="fbar-postmortem-") as temporary:
         broken_process.returncode == 0 and broken_account.get("status") == "parser-coverage-defect"
         and broken_account.get("parser_coverage", {}).get("status") == "defect",
         broken_process.stderr,
+    )
+
+    # Four consecutive generic monthly statements reproduce the structural
+    # shape that motivated this patch without retaining any private source data.
+    signed_months: list[Path] = []
+    signed_specs = [
+        (
+            "signed-september.pdf",
+            "1 SEP - 30 SEP (30 días)",
+            "0.00",
+            "950.00",
+            [
+                ("15 SEP 2025", "Synthetic deposit", "+$1,000.00"),
+                ("15 SEP 2025", "Synthetic purchase", "-$100.00"),
+                ("15 SEP 2025", "Synthetic refund", "+$50.00"),
+            ],
+            None,
+        ),
+        (
+            "signed-october.pdf",
+            "1 OCT - 31 OCT (31 días)",
+            "950.00",
+            "750.00",
+            [("10 OCT 2025", "Synthetic purchase", "-$200.00")],
+            None,
+        ),
+        (
+            "signed-november.pdf",
+            "1 NOV - 30 NOV (30 días)",
+            "750.00",
+            "775.00",
+            [("20 NOV 2025", "Synthetic refund", "+$25.00")],
+            None,
+        ),
+        (
+            "signed-december.pdf",
+            "1 DEC - 31 DEC (31 días)",
+            "775.00",
+            "775.00",
+            [],
+            "December 31 2026",
+        ),
+    ]
+    for filename, period, opening, closing, rows, generated_on in signed_specs:
+        path = work / filename
+        draw_signed_statement_pdf(
+            path,
+            period=period,
+            opening=opening,
+            closing=closing,
+            rows=rows,
+            generated_on=generated_on,
+        )
+        signed_months.append(path)
+
+    signed_pf, signed_pf_data, signed_pf_process = preflight(work, "signed-months", signed_months)
+    signed_intervals = signed_pf_data.get("coverage_hints", {}).get("period_intervals", [])
+    signed_codes = [str(item.get("code")) for item in signed_pf_data.get("review_gates", [])]
+    signed_reviewed = work / "signed-months-reviewed.json"
+    signed_review_command = [
+        sys.executable, "-B", str(PREFLIGHT), "review-handoff", "--input", str(signed_pf),
+    ]
+    for code in signed_codes:
+        signed_review_command.extend(["--accept-gate", code])
+    if {"unknown-institution", "possible-mixed-institutions"} & set(signed_codes):
+        signed_review_command.extend(["--confirm-institution", "Northwind Ledger Cooperative"])
+    signed_review_command.extend([
+        "--confirm-account-opened-on", "2025-09-01",
+        "--confirm-generated-on-date", "2026-12-31",
+        "--user-review-confirmed", "--out", str(signed_reviewed),
+    ])
+    signed_review_process = run(signed_review_command)
+    signed_review_data = read_json(signed_reviewed) if signed_reviewed.exists() else {}
+    check(
+        "F11 signed monthly preflight binds periods, stacked account, metadata, and leading opening",
+        signed_pf_process.returncode == 0
+        and signed_review_process.returncode == 0
+        and signed_pf_data.get("account_hints") == ["24682468"]  # privacy-gate: allow (synthetic account fixture)
+        and [(item.get("start"), item.get("end")) for item in signed_intervals] == [
+            ("2025-09-01", "2025-09-30"),
+            ("2025-10-01", "2025-10-31"),
+            ("2025-11-01", "2025-11-30"),
+            ("2025-12-01", "2025-12-31"),
+        ]
+        and {"inferred-period-year", "possible-missing-statement-period", "out-of-period-generated-date"}
+        <= set(signed_codes)
+        and signed_review_data.get("user_resolutions", {}).get("account_opened_on", {}).get("date")
+        == "2025-09-01"
+        and signed_review_data.get("user_resolutions", {}).get("generated_on_dates", {}).get("confirmed_dates")
+        == ["2026-12-31"],
+        signed_pf_process.stderr + signed_review_process.stderr + json.dumps(signed_pf_data.get("coverage_hints", {})),
+    )
+
+    _signed_auto_path, signed_auto, signed_auto_process = extract(
+        work, "signed-months-auto", signed_months, signed_reviewed
+    )
+    _signed_explicit_path, signed_explicit, signed_explicit_process = extract(
+        work, "signed-months-explicit", signed_months, signed_reviewed, mode="reconcile-movements"
+    )
+    signed_profiles = signed_auto.get("parser_coverage", {}).get("profiles", [])
+    signed_rows = {row.get("date"): row for row in signed_auto.get("daily_ledger", [])}
+    check(
+        "F12 signed Valor auto and explicit reconciliation produce one diagnostic covered ledger",
+        signed_auto_process.returncode == 0
+        and signed_explicit_process.returncode == 0
+        and signed_auto.get("daily_ledger") == signed_explicit.get("daily_ledger")
+        and signed_auto.get("status") == "extracted-review-required"
+        and signed_auto.get("evidence_status", {}).get("class") == "diagnostic-reconstructed"
+        and signed_auto.get("parser_coverage", {}).get("status") == "covered"
+        and len(signed_profiles) == 4
+        and all(profile.get("parser_profile") == "opening-plus-signed-movements" for profile in signed_profiles)
+        and all(profile.get("reconciliation", {}).get("status") == "passed" for profile in signed_profiles)
+        and any(profile.get("reconciliation", {}).get("movement_count") == 0 for profile in signed_profiles)
+        and signed_auto.get("coverage", {}).get("missing_days") == 0
+        and signed_auto.get("data_sufficiency", {}).get("maximum_account_value", {}).get("answer")
+        != "not-determinable",
+        signed_auto_process.stderr + signed_explicit_process.stderr + json.dumps(signed_profiles),
+    )
+    check(
+        "F13 same-day threshold maximum does not contaminate following-day carry",
+        signed_rows.get("2025-09-15", {}).get("native_balance") == "1000"
+        and signed_rows.get("2025-09-16", {}).get("native_balance") == "950"
+        and any(
+            flag.get("code") == "reconstructed-end-of-day-carry"
+            for flag in signed_rows.get("2025-09-15", {}).get("review_flags", [])
+        ),
+        json.dumps({day: signed_rows.get(day) for day in ("2025-09-15", "2025-09-16")}),
+    )
+
+    unsigned_pdf = work / "unsigned-valor.pdf"
+    draw_signed_statement_pdf(
+        unsigned_pdf,
+        period="Statement period January 1 2025 to December 31 2025",
+        opening="0.00",
+        closing="100.00",
+        rows=[("15/01/2025", "Unsigned movement", "$100.00")],
+    )
+    unsigned_pf, unsigned_pf_data, _ = preflight(work, "unsigned-valor", [unsigned_pdf])
+    unsigned_handoff = (
+        unsigned_pf
+        if unsigned_pf_data.get("status") == "ready-for-domain-extraction"
+        else reviewed_handoff(work, "unsigned-valor", unsigned_pf, unsigned_pf_data)
+    )
+    _unsigned_path, unsigned_account, unsigned_process = extract(
+        work, "unsigned-valor", [unsigned_pdf], unsigned_handoff
+    )
+    check(
+        "H6 unsigned Valor movements are a parser coverage defect",
+        unsigned_process.returncode == 0
+        and unsigned_account.get("status") == "parser-coverage-defect"
+        and unsigned_account.get("parser_coverage", {}).get("status") == "defect",
+        unsigned_process.stderr + json.dumps(unsigned_account.get("parser_coverage", {})),
+    )
+
+    signed_mismatch_pdf = work / "signed-valor-mismatch.pdf"
+    draw_signed_statement_pdf(
+        signed_mismatch_pdf,
+        period="Statement period January 1 2025 to December 31 2025",
+        opening="0.00",
+        closing="99.00",
+        rows=[("15/01/2025", "Signed movement", "+$100.00")],
+    )
+    mismatch_pf, mismatch_pf_data, _ = preflight(work, "signed-valor-mismatch", [signed_mismatch_pdf])
+    mismatch_handoff = (
+        mismatch_pf
+        if mismatch_pf_data.get("status") == "ready-for-domain-extraction"
+        else reviewed_handoff(work, "signed-valor-mismatch", mismatch_pf, mismatch_pf_data)
+    )
+    _mismatch_path, mismatch_account, mismatch_process = extract(
+        work, "signed-valor-mismatch", [signed_mismatch_pdf], mismatch_handoff
+    )
+    check(
+        "H7 signed Valor checkpoint mismatch is a parser coverage defect",
+        mismatch_process.returncode == 0 and mismatch_account.get("status") == "parser-coverage-defect",
+        mismatch_process.stderr + json.dumps(mismatch_account.get("parser_coverage", {})),
+    )
+
+    zero_mismatch_pdf = work / "zero-movement-mismatch.pdf"
+    draw_signed_statement_pdf(
+        zero_mismatch_pdf,
+        period="Statement period January 1 2025 to December 31 2025",
+        opening="10.00",
+        closing="11.00",
+        rows=[],
+    )
+    zero_mismatch_pf, zero_mismatch_pf_data, _ = preflight(work, "zero-movement-mismatch", [zero_mismatch_pdf])
+    zero_mismatch_handoff = (
+        zero_mismatch_pf
+        if zero_mismatch_pf_data.get("status") == "ready-for-domain-extraction"
+        else reviewed_handoff(work, "zero-movement-mismatch", zero_mismatch_pf, zero_mismatch_pf_data)
+    )
+    _zero_mismatch_path, zero_mismatch_account, zero_mismatch_process = extract(
+        work, "zero-movement-mismatch", [zero_mismatch_pdf], zero_mismatch_handoff
+    )
+    check(
+        "H8 unequal zero-movement checkpoints are a parser coverage defect",
+        zero_mismatch_process.returncode == 0
+        and zero_mismatch_account.get("status") == "parser-coverage-defect",
+        zero_mismatch_process.stderr + json.dumps(zero_mismatch_account.get("parser_coverage", {})),
+    )
+
+    unsupported_pdf = work / "unsupported-visible-table.pdf"
+    draw_table_pdf(
+        unsupported_pdf,
+        currency="USD",
+        opening="0.00",
+        closing="100.00",
+        headers=[(40, "Fecha"), (170, "Descripción"), (500, "Referencia")],
+        rows=[[(40, "15/01/2025"), (170, "Visible money row"), (500, "$100.00")]],
+    )
+    unsupported_pf, unsupported_pf_data, _ = preflight(work, "unsupported-visible", [unsupported_pdf])
+    unsupported_handoff = (
+        unsupported_pf
+        if unsupported_pf_data.get("status") == "ready-for-domain-extraction"
+        else reviewed_handoff(work, "unsupported-visible", unsupported_pf, unsupported_pf_data)
+    )
+    _unsupported_path, unsupported_account, unsupported_process = extract(
+        work, "unsupported-visible", [unsupported_pdf], unsupported_handoff
+    )
+    check(
+        "H9 an unowned visible dated money table cannot report parser coverage",
+        unsupported_process.returncode == 0
+        and unsupported_account.get("status") == "parser-coverage-defect"
+        and any(
+            profile.get("parser_profile") == "unsupported-visible-table"
+            for profile in unsupported_account.get("parser_coverage", {}).get("profiles", [])
+        ),
+        unsupported_process.stderr + json.dumps(unsupported_account.get("parser_coverage", {})),
+    )
+
+    no_observation_pdf = work / "no-observations.pdf"
+    draw_table_pdf(
+        no_observation_pdf,
+        currency="USD",
+        opening="0.00",
+        closing="0.00",
+        headers=[(40, "Narrative"), (300, "Reference")],
+        rows=[],
+    )
+    no_obs_pf, no_obs_pf_data, _ = preflight(work, "no-observations", [no_observation_pdf])
+    no_obs_handoff = (
+        no_obs_pf
+        if no_obs_pf_data.get("status") == "ready-for-domain-extraction"
+        else reviewed_handoff(work, "no-observations", no_obs_pf, no_obs_pf_data)
+    )
+    no_obs_path, no_obs_account, no_obs_process = extract(
+        work, "no-observations", [no_observation_pdf], no_obs_handoff
+    )
+    no_obs_confirm = run([
+        sys.executable, "-B", str(FBAR), "confirm-account", "--input", str(no_obs_path),
+        "--balances-confirmed", "--out", str(work / "no-observations-confirmed.json"),
+    ])
+    check(
+        "H10 zero usable observations are explicitly non-formal and non-confirmable",
+        no_obs_process.returncode == 0
+        and no_obs_account.get("evidence_status") == {
+            "class": "unresolved-no-observations",
+            "confirmation": "unreviewed",
+            "formal_eligibility": False,
+        }
+        and no_obs_account.get("value_model", {}).get("maximum_date_known") is False
+        and no_obs_confirm.returncode == 2
+        and "no usable balance observations" in no_obs_confirm.stderr,
+        no_obs_process.stderr + no_obs_confirm.stderr + json.dumps(no_obs_account.get("evidence_status", {})),
     )
 
     certificate = work / "certificate.pdf"

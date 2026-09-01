@@ -210,6 +210,11 @@ MONTH_DATE_PATTERNS = (
     re.compile(rf"\b({MONTH_RE})\.?(?:[\s-]+)(\d{{1,2}})(?:\s*,\s*|[\s-]+)(20\d{{2}})\b", re.I),
     re.compile(rf"\b(\d{{1,2}})(?:\s+de\s+|[-\s]+)({MONTH_RE})\.?(?:\s+de\s+|[-,\s]+)(20\d{{2}})\b", re.I),
 )
+PERIOD_MONTH_DAY_PATTERNS = (
+    re.compile(rf"\b(?P<month>{MONTH_RE})\.?(?:\s+)(?P<day>\d{{1,2}})\b", re.I),
+    re.compile(rf"\b(?P<day>\d{{1,2}})(?:\s+de\s+|[-\s]+)(?P<month>{MONTH_RE})\.?\b", re.I),
+)
+PERIOD_RANGE_CONNECTOR_RE = re.compile(r"(?:[-–—]|\b(?:to|through|a(?:l)?|hasta|bis)\b)", re.I)
 
 # A period-end summary is not a transaction row.  Only accept the tightly
 # labelled form below after the source-bound preflight period on the same page
@@ -245,12 +250,16 @@ STRUCTURED_COLUMN_ALIASES = {
     "description": {"description", "descripcion", "descripción", "details", "detalle", "concepto"},
     "debit": {"debit", "debito", "débito", "withdrawal", "cargo", "retiro"},
     "credit": {"credit", "credito", "crédito", "deposit", "abono"},
+    "signed_amount": {"amount", "valor", "monto"},
     "balance": {"balance", "saldo", "solde"},
 }
 STRUCTURED_HEADER_MIN_GAP = 18.0
 STRUCTURED_AMOUNT_COLUMN_TOLERANCE = 8.0
 THREE_DECIMAL_CURRENCIES = {"BHD", "JOD", "KWD", "OMR"}
-OPENING_BALANCE_RE = re.compile(r"\b(?:opening|starting|beginning|initial)\s+balance\b|\bsaldo\s+inicial\b", re.I)
+OPENING_BALANCE_RE = re.compile(
+    r"\b(?:opening|starting|beginning|initial)\s+balance\b|\bsaldo\s+(?:inicial|anterior)\b",
+    re.I,
+)
 CLOSING_BALANCE_RE = re.compile(
     r"\b(?:closing|ending|final)\s+balance\b|\bsaldo\s+(?:final|de\s+cierre)\b|\bbalance\s+at\s+(?:period|statement)\s+end\b",
     re.I,
@@ -832,7 +841,11 @@ def _structured_header_columns(
                     if role != "balance" or role not in roles or float(word.get("x0", 0)) > float(roles[role].get("x0", 0)):
                         roles[role] = word
                     break
-        has_value_columns = "balance" in roles or ({"debit", "credit"} <= set(roles))
+        has_value_columns = (
+            "balance" in roles
+            or "signed_amount" in roles
+            or ({"debit", "credit"} <= set(roles))
+        )
         if "date" not in roles or not has_value_columns:
             continue
         ordered = sorted((float(word.get("x0", 0)), role) for role, word in roles.items())
@@ -841,6 +854,37 @@ def _structured_header_columns(
         if "balance" in roles and float(roles["balance"].get("x0", 0)) != max(value for value, _role in ordered):
             continue
         return row_index, roles
+    return None
+
+
+def _unsupported_visible_table_profile(
+    visual_rows: list[list[dict[str, object]]],
+) -> dict[str, object] | None:
+    """Describe a visibly dated money table that no safe parser profile owns."""
+    date_aliases = STRUCTURED_COLUMN_ALIASES["date"]
+    for header_index, row in enumerate(visual_rows):
+        labels = {
+            clean_text(word.get("text")).casefold().strip(".:")
+            for word in row
+        }
+        if not labels.intersection(date_aliases):
+            continue
+        visible_rows = 0
+        for candidate_row in visual_rows[header_index + 1:]:
+            joined = clean_text(" ".join(clean_text(word.get("text")) for word in candidate_row))
+            if not _looks_like_structured_date(joined):
+                continue
+            if parse_money_values(mask_date_spans(joined)):
+                visible_rows += 1
+        if visible_rows:
+            return {
+                "parser_profile": "unsupported-visible-table",
+                "column_roles": ["date", "unclassified-monetary"],
+                "visible_dated_rows": visible_rows,
+                "extracted_rows": 0,
+                "omitted_rows": visible_rows,
+                "reconciliation": {"status": "not-applicable"},
+            }
     return None
 
 
@@ -899,6 +943,16 @@ def _structured_date(
             return next(iter(possibilities)), "full numeric date resolved from the source-bound statement period"
         return None
 
+    month_name_dates = {
+        parsed
+        for parsed, _confidence, _note in parse_line_dates(value)
+        if not contexts or any(context.start <= parsed <= context.end for context in contexts)
+    }
+    if len(month_name_dates) == 1:
+        return next(iter(month_name_dates)), "month-name date resolved from the source-bound statement period"
+    if month_name_dates:
+        return None
+
     inferred = infer_short_transaction_date(value, contexts, day_first=day_first_header)
     if inferred is not None:
         return inferred.value, inferred.note
@@ -912,6 +966,7 @@ def _looks_like_structured_date(raw: str) -> bool:
         ISO_TIMESTAMP_RE.search(value)
         or DATE_PATTERNS[0].search(value)
         or DATE_PATTERNS[1].search(value)
+        or any(pattern.search(value) for pattern in MONTH_DATE_PATTERNS)
         or SHORT_TRANSACTION_DATE_RE.search(value)
     )
 
@@ -922,6 +977,21 @@ def _isolated_amount(raw: str) -> tuple[Decimal, str, tuple[str, ...]] | None:
         return None
     amount, token, _position, notes = values[0]
     return amount, token, notes
+
+
+def _isolated_explicit_signed_amount(raw: str) -> tuple[Decimal, str, tuple[str, ...]] | None:
+    """Parse one movement only when the source cell carries a leading +/- sign."""
+    value = clean_text(raw)
+    sign_match = re.match(r"^\s*(?P<sign>[+\-−])\s*", value)
+    if sign_match is None:
+        return None
+    parsed = _isolated_amount(value[sign_match.end():])
+    if parsed is None:
+        return None
+    amount, token, notes = parsed
+    signed = amount.copy_abs() if sign_match.group("sign") == "+" else -amount.copy_abs()
+    source_token = clean_text(value[: sign_match.end()] + token)
+    return signed, source_token, notes
 
 
 def _bind_structured_source_ref(
@@ -989,9 +1059,18 @@ def extract_structured_table_candidates(
                     visual_rows = visual_word_rows(page.extract_words(use_text_flow=True, keep_blank_chars=False))
                     header = _structured_header_columns(visual_rows)
                     if header is None:
+                        unsupported = _unsupported_visible_table_profile(visual_rows)
+                        if unsupported is not None:
+                            unsupported.update({"file": path.name, "page": page_number})
+                            profiles.append(unsupported)
+                            warnings.append(
+                                f"Parser coverage defect on {path.name} page {page_number}: "
+                                f"{unsupported['visible_dated_rows']} visibly dated money row(s) had no supported column profile."
+                            )
                         continue
                     header_index, columns = header
                     has_balance = "balance" in columns
+                    has_signed_amount = "signed_amount" in columns and not has_balance
                     if mode == "transaction-balances" and not has_balance:
                         continue
                     if mode == "reconcile-movements" and has_balance:
@@ -1044,14 +1123,24 @@ def extract_structured_table_candidates(
                                 )
                             )
                         else:
-                            debit_value = _isolated_amount(cells.get("debit", "")) if cells.get("debit") else None
-                            credit_value = _isolated_amount(cells.get("credit", "")) if cells.get("credit") else None
-                            if debit_value is None and credit_value is None:
-                                omitted_rows += 1
-                                continue
-                            debit = debit_value[0] if debit_value else Decimal("0")
-                            credit = credit_value[0] if credit_value else Decimal("0")
-                            tokens = [item[1] for item in (debit_value, credit_value) if item is not None]
+                            if has_signed_amount:
+                                signed_value = _isolated_explicit_signed_amount(cells.get("signed_amount", ""))
+                                if signed_value is None:
+                                    omitted_rows += 1
+                                    continue
+                                signed_amount, token, _amount_notes = signed_value
+                                debit = -signed_amount if signed_amount < 0 else Decimal("0")
+                                credit = signed_amount if signed_amount > 0 else Decimal("0")
+                                tokens = [token]
+                            else:
+                                debit_value = _isolated_amount(cells.get("debit", "")) if cells.get("debit") else None
+                                credit_value = _isolated_amount(cells.get("credit", "")) if cells.get("credit") else None
+                                if debit_value is None and credit_value is None:
+                                    omitted_rows += 1
+                                    continue
+                                debit = debit_value[0] if debit_value else Decimal("0")
+                                credit = credit_value[0] if credit_value else Decimal("0")
+                                tokens = [item[1] for item in (debit_value, credit_value) if item is not None]
                             source_ref = _bind_structured_source_ref(source_rows, raw_date, tokens, used_source_lines)
                             if source_ref is None:
                                 omitted_rows += 1
@@ -1065,11 +1154,65 @@ def extract_structured_table_candidates(
                         opening = _labelled_page_balance(source_rows, OPENING_BALANCE_RE)
                         closing = _labelled_page_balance(source_rows, CLOSING_BALANCE_RE)
                         tolerance = Decimal("0.0005") if currency in THREE_DECIMAL_CURRENCIES else Decimal("0.005")
-                        if opening is None or closing is None or not contexts or not movements:
+                        if opening is None or closing is None or not contexts:
                             reconciliation = {
                                 "status": "failed",
-                                "reason": "missing-source-bound-opening-closing-or-movements",
+                                "reason": "missing-source-bound-opening-closing-or-period",
+                                "opening_found": opening is not None,
+                                "closing_found": closing is not None,
+                                "period_context_found": bool(contexts),
                             }
+                        elif not movements and visible_rows:
+                            reconciliation = {
+                                "status": "failed",
+                                "reason": "visible-rows-without-explicit-signed-movements",
+                            }
+                        elif not movements:
+                            difference = opening[0] - closing[0]
+                            if abs(difference) <= tolerance:
+                                reconstructed = [
+                                    BalanceCandidate(
+                                        balance_date=contexts[0].start,
+                                        amount=opening[0],
+                                        currency=currency,
+                                        confidence="high",
+                                        source=opening[1],
+                                        notes=("Source-bound opening balance for zero-movement reconciliation.",),
+                                        candidate_type="reconstructed-from-movements",
+                                    )
+                                ]
+                                if contexts[0].end != contexts[0].start:
+                                    reconstructed.append(
+                                        BalanceCandidate(
+                                            balance_date=contexts[0].end,
+                                            amount=closing[0],
+                                            currency=currency,
+                                            confidence="high",
+                                            source=closing[1],
+                                            notes=("Source-bound closing balance for zero-movement reconciliation.",),
+                                            candidate_type="reconstructed-from-movements",
+                                        )
+                                    )
+                                candidates.extend(reconstructed)
+                                reconciliation = {
+                                    "status": "passed",
+                                    "opening_native": fmt_native(opening[0]),
+                                    "computed_closing_native": fmt_native(opening[0]),
+                                    "source_closing_native": fmt_native(closing[0]),
+                                    "difference_native": fmt_native(difference),
+                                    "movement_count": 0,
+                                    "opening_source_ref": source_ref_to_string(opening[1]),
+                                    "closing_source_ref": source_ref_to_string(closing[1]),
+                                }
+                            else:
+                                reconciliation = {
+                                    "status": "failed",
+                                    "reason": "zero-movement-closing-checkpoint-mismatch",
+                                    "computed_closing_native": fmt_native(opening[0]),
+                                    "source_closing_native": fmt_native(closing[0]),
+                                    "difference_native": fmt_native(difference),
+                                    "first_broken_checkpoint_source_ref": source_ref_to_string(closing[1]),
+                                }
                         else:
                             running = opening[0]
                             reconstructed: list[BalanceCandidate] = [
@@ -1093,7 +1236,11 @@ def extract_structured_table_candidates(
                                         confidence="high",
                                         source=movement.source,
                                         notes=(
-                                            "Reconstructed from source-bound opening balance plus signed Debit/Credit movement.",
+                                            (
+                                                "Reconstructed from source-bound opening balance plus one explicit signed Amount movement."
+                                                if has_signed_amount
+                                                else "Reconstructed from source-bound opening balance plus signed Debit/Credit movement."
+                                            ),
                                             f"Equation: prior balance - {fmt_native(movement.debit)} + {fmt_native(movement.credit)} = {fmt_native(running)}.",
                                         ),
                                         candidate_type="reconstructed-from-movements",
@@ -1138,7 +1285,13 @@ def extract_structured_table_candidates(
                         {
                             "file": path.name,
                             "page": page_number,
-                            "parser_profile": "column-role-balance" if has_balance else "opening-plus-movements",
+                            "parser_profile": (
+                                "column-role-balance"
+                                if has_balance
+                                else "opening-plus-signed-movements"
+                                if has_signed_amount
+                                else "opening-plus-movements"
+                            ),
                             "column_roles": sorted(columns),
                             "visible_dated_rows": visible_rows,
                             "extracted_rows": extracted_rows,
@@ -1514,6 +1667,14 @@ def build_daily_rows(
             if carry_run_days:
                 close_carry_run(day - timedelta(days=1))
             selected = max(day_candidates, key=lambda item: item.amount)
+            carry_candidate = selected
+            if day_candidates and all(
+                item.candidate_type == "reconstructed-from-movements" for item in day_candidates
+            ):
+                # A date-level threshold view keeps the largest reconstructed
+                # same-day candidate, but the next day must begin from the
+                # final reconciled movement balance rather than that maximum.
+                carry_candidate = day_candidates[-1]
             confidence = selected.confidence
             notes = list(selected.notes)
             review_flags: list[dict[str, object]] = []
@@ -1562,8 +1723,22 @@ def build_daily_rows(
                             ],
                         }
                     )
-            last_balance = selected.amount
-            last_ref = selected.source
+            if carry_candidate.amount != selected.amount:
+                notes.append(
+                    "Following dates carry the final reconstructed same-day balance "
+                    f"{fmt_native(carry_candidate.amount)}, not the threshold-safety same-day maximum "
+                    f"{fmt_native(selected.amount)}."
+                )
+                review_flags.append(
+                    {
+                        "code": "reconstructed-end-of-day-carry",
+                        "same_day_maximum_native_balance": fmt_native(selected.amount),
+                        "end_of_day_native_balance": fmt_native(carry_candidate.amount),
+                        "end_of_day_source_ref": source_ref_to_string(carry_candidate.source),
+                    }
+                )
+            last_balance = carry_candidate.amount
+            last_ref = carry_candidate.source
             if first_observed is None:
                 first_observed = day
             last_observed = day
@@ -2010,6 +2185,54 @@ def normalize_preflight_path(path: str | Path) -> str:
     return str(Path(path).expanduser().resolve(strict=False))
 
 
+def _line_contains_period_endpoints(line: str, start: date, end: date) -> bool:
+    """Re-verify a compact source period without borrowing its year from text."""
+    endpoints: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    for pattern in PERIOD_MONTH_DAY_PATTERNS:
+        for match in pattern.finditer(line):
+            month = MONTHS.get(match.group("month").casefold().rstrip("."))
+            if month is not None:
+                endpoints.append(((month, int(match.group("day"))), match.span()))
+    endpoints.sort(key=lambda item: item[1])
+    for start_index, (start_value, start_span) in enumerate(endpoints):
+        if start_value != (start.month, start.day):
+            continue
+        for end_value, end_span in endpoints[start_index + 1:]:
+            if end_value != (end.month, end.day):
+                continue
+            if PERIOD_RANGE_CONNECTOR_RE.search(line[start_span[1]:end_span[0]]):
+                return True
+    return False
+
+
+def _period_anchor_is_reverified(
+    raw_period: dict[str, object],
+    normalized_path: str,
+    source_lines: dict[tuple[str, int, int], tuple[SourceRef, str]],
+    start: date,
+    end: date,
+) -> bool:
+    raw_refs = raw_period.get("year_anchor_source_refs")
+    if not isinstance(raw_refs, list) or not raw_refs:
+        single = raw_period.get("year_anchor_source_ref")
+        raw_refs = [single] if isinstance(single, dict) else []
+    for raw_ref in raw_refs:
+        if not isinstance(raw_ref, dict):
+            continue
+        try:
+            page = int(raw_ref.get("page"))
+            line_number = int(raw_ref.get("line"))
+        except (TypeError, ValueError):
+            continue
+        source_item = source_lines.get((normalized_path, page, line_number))
+        if source_item is None:
+            continue
+        _ref, source_line = source_item
+        if any(start <= parsed_date <= end for parsed_date, _confidence, _note in parse_line_dates(source_line)):
+            return True
+    return False
+
+
 def preflight_page_period_contexts(
     preflight: dict[str, object], lines: list[tuple[SourceRef, str]]
 ) -> dict[tuple[str, int], tuple[PagePeriodContext, ...]]:
@@ -2040,7 +2263,7 @@ def preflight_page_period_contexts(
         if not isinstance(raw_periods, list):
             continue
         for raw_period in raw_periods:
-            if not isinstance(raw_period, dict) or str(raw_period.get("confidence")) != "high":
+            if not isinstance(raw_period, dict) or str(raw_period.get("confidence")) not in {"high", "medium"}:
                 continue
             source_ref = raw_period.get("source_ref")
             if not isinstance(source_ref, dict):
@@ -2052,6 +2275,10 @@ def preflight_page_period_contexts(
                 line_number = int(source_ref.get("line"))
             except (TypeError, ValueError):
                 continue
+            confidence = str(raw_period.get("confidence"))
+            provenance = str(raw_period.get("provenance") or "")
+            if confidence == "medium" and provenance != "inferred-chain":
+                continue
             if end < start or page <= 0 or line_number <= 0:
                 continue
             source_item = source_lines.get((normalized_path, page, line_number))
@@ -2059,9 +2286,19 @@ def preflight_page_period_contexts(
                 continue
             source_ref, source_line = source_item
             end_source_ref = raw_period.get("end_source_ref")
+            compact_verified = _line_contains_period_endpoints(source_line, start, end)
+            if compact_verified:
+                if provenance == "direct-anchor":
+                    compact_verified = confidence == "high" and _period_anchor_is_reverified(
+                        raw_period, normalized_path, source_lines, start, end
+                    )
+                elif provenance == "inferred-chain":
+                    compact_verified = confidence == "medium"
+                else:
+                    compact_verified = False
             if end_source_ref is None:
                 verified_dates = {parsed_date for parsed_date, _confidence, _note in parse_line_dates(source_line)}
-                if start not in verified_dates or end not in verified_dates:
+                if (start not in verified_dates or end not in verified_dates) and not compact_verified:
                     continue
                 end_ref = source_ref
             elif isinstance(end_source_ref, dict):
@@ -2078,7 +2315,7 @@ def preflight_page_period_contexts(
                 end_ref, end_source_line = end_source_item
                 start_dates = {parsed_date for parsed_date, _confidence, _note in parse_line_dates(source_line)}
                 end_dates = {parsed_date for parsed_date, _confidence, _note in parse_line_dates(end_source_line)}
-                if start not in start_dates or end not in end_dates:
+                if (start not in start_dates or end not in end_dates) and not compact_verified:
                     continue
             else:
                 continue
@@ -3114,16 +3351,20 @@ def command_extract_account(
         )
     ]
     reconstructed = any(candidate.candidate_type == "reconstructed-from-movements" for candidate in candidates)
+    formal_observations = any(candidate.candidate_type == "transaction-row" for candidate in candidates)
     attested_opening = leading_zero_until is not None
     if reconstructed:
         evidence_class = "diagnostic-reconstructed"
         value_type = "reconstructed-daily"
-    elif attested_opening:
+    elif attested_opening and formal_observations:
         evidence_class = "user-attested-daily"
         value_type = "exact-daily"
-    else:
+    elif formal_observations:
         evidence_class = "formal-extracted"
         value_type = "exact-daily"
+    else:
+        evidence_class = "unresolved-no-observations"
+        value_type = "unresolved"
     reconciliation_states = [
         profile.get("reconciliation")
         for profile in parser_profiles
@@ -3179,7 +3420,7 @@ def command_extract_account(
         },
         "value_model": {
             "type": value_type,
-            "maximum_date_known": True,
+            "maximum_date_known": evidence_class != "unresolved-no-observations",
         },
         "time_alignment": "date-only-upper-bound",
         "parser_coverage": {
@@ -3430,6 +3671,12 @@ def command_confirm_account(args: argparse.Namespace) -> int:
     ):
         raise FbarError(
             "Account extraction reports parser-coverage-defect; inspect the named source pages or use a supported reconstructed/attested evidence lane before confirmation.",
+            2,
+        )
+    evidence_status = data.get("evidence_status")
+    if isinstance(evidence_status, dict) and evidence_status.get("class") == "unresolved-no-observations":
+        raise FbarError(
+            "Account extraction has no usable balance observations; it cannot be confirmed as a ledger.",
             2,
         )
     coverage = data.get("coverage", {})
