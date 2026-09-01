@@ -9,6 +9,13 @@ changelogs, or GitHub Releases.
 The current repository version lives in [`VERSION`](VERSION), is tagged
 `vX.Y.Z`, and has one matching GitHub Release.
 
+## [1.6.1] - 2026-09-01
+
+### Changed
+
+- `repository`: feat: harden FBAR proof workflow after real-run postmortem
+- `repository`: fix: complete FBAR postmortem hardening
+
 ## [1.6.0] - 2026-08-26
 
 ### Changed
