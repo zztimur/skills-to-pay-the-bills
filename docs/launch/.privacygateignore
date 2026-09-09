@@ -1,0 +1,6 @@
+# Exact synthetic CLI transcript renders visually reviewed on 2026-09-09.
+# Source text is retained in demos/*-transcript.txt and is scanned normally.
+demos/privacy-demo.png
+demos/privacy-demo.gif
+demos/fx-demo.png
+demos/fx-demo.gif

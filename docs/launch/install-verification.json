@@ -1,0 +1,60 @@
+{
+  "source_commit": "550f77f42296639a1066388b97782f815a75b8ec",
+  "telemetry_disabled": true,
+  "checks": [
+    {
+      "host_path": ".agents",
+      "skill": "fbar-threshold-check",
+      "matching_installed_files": 10
+    },
+    {
+      "host_path": ".agents",
+      "skill": "get-year-end-fx-rate",
+      "matching_installed_files": 16
+    },
+    {
+      "host_path": ".agents",
+      "skill": "privacy-gate",
+      "matching_installed_files": 8
+    },
+    {
+      "host_path": ".agents",
+      "skill": "statement-intake-preflight",
+      "matching_installed_files": 8
+    },
+    {
+      "host_path": ".agents",
+      "privacy_block_exit": 1,
+      "privacy_clear_exit": 0,
+      "frozen_fx_exit": 0,
+      "fx_artifact_count": 4
+    },
+    {
+      "host_path": ".claude",
+      "skill": "fbar-threshold-check",
+      "matching_installed_files": 10
+    },
+    {
+      "host_path": ".claude",
+      "skill": "get-year-end-fx-rate",
+      "matching_installed_files": 16
+    },
+    {
+      "host_path": ".claude",
+      "skill": "privacy-gate",
+      "matching_installed_files": 8
+    },
+    {
+      "host_path": ".claude",
+      "skill": "statement-intake-preflight",
+      "matching_installed_files": 8
+    },
+    {
+      "host_path": ".claude",
+      "privacy_block_exit": 1,
+      "privacy_clear_exit": 0,
+      "frozen_fx_exit": 0,
+      "fx_artifact_count": 4
+    }
+  ]
+}

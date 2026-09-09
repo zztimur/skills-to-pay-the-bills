@@ -11,3 +11,9 @@ docs/assets/social-preview.png
 
 # Generated plugin copies of the same three reviewed public PNGs.
 plugins/fbar-proof-kit/assets/*.png
+
+# Reviewed synthetic CLI transcript presentations; source text in docs/launch/demos.
+docs/launch/demos/privacy-demo.png
+docs/launch/demos/privacy-demo.gif
+docs/launch/demos/fx-demo.png
+docs/launch/demos/fx-demo.gif
