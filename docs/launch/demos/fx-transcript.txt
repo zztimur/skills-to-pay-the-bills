@@ -1,0 +1,14 @@
+FROZEN-SOURCE FX DEMO — captured CLI output
+
+$ get_year_end_fx_rate.py lookup --currency COP --year 2025
+  --api-file treasury-2025-12-31.json --output-root <demo-output>
+
+Rate: 1 USD = 3773.62 COP year-end (2025-12-31)
+Reciprocal: 1 COP = 0.000264997536 USD
+Source: Treasury Reporting Rates of Exchange - Fiscal Data, https://fiscaldata.treasury.gov/datasets/treasury-reporting-rates-exchange/treasury-reporting-rates-of-exchange, retrieved 2026-09-09
+Proof: [workpaper.pdf](<<demo-output>/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.pdf>)
+Artifacts: [workpaper.pdf](<<demo-output>/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.pdf>), [workpaper.md](<<demo-output>/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.md>), [workpaper.json](<<demo-output>/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/workpaper.json>), [treasury-fiscal-data-response.json](<<demo-output>/cop-2025-treasury-reporting-rates-of-exchange-fiscal-data/treasury-fiscal-data-response.json>)
+Exit: 0
+
+Generated files: treasury-fiscal-data-response.json, workpaper.json, workpaper.md, workpaper.pdf
+Source: committed Treasury fixture; no live lookup claimed.

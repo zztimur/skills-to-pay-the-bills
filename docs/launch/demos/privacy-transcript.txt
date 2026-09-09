@@ -1,0 +1,18 @@
+SYNTHETIC PRIVACY DEMO — captured CLI output
+
+$ python3 privacy-gate/scripts/privacy_gate.py scan --path settings.txt --strict
+Privacy Gate: scanned 1 file(s); 2 block finding(s), 0 warning(s).
+BLOCK <synthetic-demo>/settings.txt:1 secret_assignment: possible API key, token, or client secret assignment found
+  Fix: Remove the credential and rotate it if it was real.
+BLOCK <synthetic-demo>/settings.txt:1 secret_stripe_key: possible Stripe live secret key found
+  Fix: Remove the Stripe key and roll it in the Stripe dashboard.
+Note: scanning is heuristic and non-exhaustive.
+Exit: 1
+
+Replace the synthetic credential assignment with a comment.
+
+$ python3 privacy-gate/scripts/privacy_gate.py scan --path settings.txt --strict
+Privacy Gate: pass. Scanned 1 file(s); no findings.
+Exit: 0
+
+Synthetic credential only. A real exposed credential must be rotated.

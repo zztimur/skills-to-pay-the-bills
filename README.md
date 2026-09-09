@@ -140,6 +140,12 @@ scratch check:
 examples/fbar-proof-demo/run_demo.py --check
 ```
 
+## Explore individual skills
+
+Try [Privacy Gate and year-end FX evidence](docs/launch/skill-pitches.md) independently,
+or inspect [three reproducible demonstrations](docs/launch/demos/README.md).
+Read [how the workflow retains evidence and handles missing records](docs/launch/article.md).
+
 ## How the proof workflow works
 
 1. `statement-intake-preflight` checks text layers, year and statement-period
